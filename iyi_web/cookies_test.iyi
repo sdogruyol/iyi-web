@@ -2,24 +2,32 @@
 module iyi_web/cookies_test
 
 import iyi_web/cookies
+import iyi_web/spec
 
 using iyi_web/cookies::{CookieJar}
+using iyi_web/spec
 
-empty = CookieJar.parse("")
-assert empty.empty?, "empty header"
+describe "CookieJar" do
+  it "treats an empty header as an empty jar" do
+    assert CookieJar.parse("").empty?
+  end
 
-jar = CookieJar.parse("session=abc; theme=dark")
-assert jar["session"] == "abc", "session"
-assert jar["theme"] == "dark", "theme"
-assert jar.has_key?("session"), "has_key"
-assert !jar.has_key?("missing"), "missing"
-assert jar["nope"]?.nil?, "[]?"
+  it "splits name/value pairs on semicolon" do
+    jar = CookieJar.parse("session=abc; theme=dark")
+    assert jar["session"] == "abc"
+    assert jar["theme"] == "dark"
+    assert jar.has_key?("session")
+    assert !jar.has_key?("missing")
+    assert jar["nope"]?.nil?
+  end
 
-spaced = CookieJar.parse(" a = 1 ; b=2 ")
-assert spaced["a"] == "1", "trimmed name"
-assert spaced["b"] == "2", "second"
+  it "trims spaces around names and values" do
+    jar = CookieJar.parse(" a = 1 ; b=2 ")
+    assert jar["a"] == "1"
+    assert jar["b"] == "2"
+  end
 
-encoded = CookieJar.parse("msg=hello+world")
-assert encoded["msg"] == "hello world", "plus in cookie value"
-
-puts "cookies_test ok"
+  it "treats plus as space in a cookie value" do
+    assert CookieJar.parse("msg=hello+world")["msg"] == "hello world"
+  end
+end

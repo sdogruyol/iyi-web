@@ -3,39 +3,66 @@
 module iyi_web/headers_test
 
 import iyi_web/headers
+import iyi_web/spec
 
 using iyi_web/headers::{Headers}
+using iyi_web/spec
 
-headers = Headers.new
-assert headers.empty?, "new headers empty"
-assert !headers.has_key?("Host"), "missing key"
-assert headers["Host"]?.nil?, "[]? is nil when missing"
-assert headers.to_s == "", "empty serialises to nothing"
+describe "Headers" do
+  it "starts empty" do
+    headers = Headers.new
+    assert headers.empty?
+    assert !headers.has_key?("Host")
+    assert headers["Host"]?.nil?
+    assert headers.to_s == ""
+  end
 
-headers["Content-Type"] = "text/plain"
-assert headers["content-type"] == "text/plain", "lookup ignores case"
-assert headers["CONTENT-TYPE"] == "text/plain", "lookup upper"
-assert headers.has_key?("content-type"), "has_key ignores case"
+  it "looks up a name without regard to case" do
+    headers = Headers.new
+    headers["Content-Type"] = "text/plain"
+    assert headers["content-type"] == "text/plain"
+    assert headers["CONTENT-TYPE"] == "text/plain"
+    assert headers.has_key?("content-type")
+  end
 
-headers["content-type"] = "text/html"
-assert headers["Content-Type"] == "text/html", "assign replaces"
-assert headers.to_s == "content-type: text/html\r\n", "assign keeps one pair"
+  it "replaces on assign and keeps a single pair" do
+    headers = Headers.new
+    headers["Content-Type"] = "text/plain"
+    headers["content-type"] = "text/html"
+    assert headers["Content-Type"] == "text/html"
+    assert headers.to_s == "content-type: text/html\r\n"
+  end
 
-headers.add("X-A", "1")
-headers.add("X-A", "2")
-assert headers["x-a"] == "2", "add last-wins on lookup"
-written = headers.to_s
-assert written == "content-type: text/html\r\nX-A: 1\r\nX-A: 2\r\n", "add keeps both, insertion order"
+  it "keeps every added value and still looks up last-wins" do
+    headers = Headers.new
+    headers["content-type"] = "text/html"
+    headers.add("X-A", "1")
+    headers.add("X-A", "2")
+    assert headers["x-a"] == "2"
+    assert headers.to_s == "content-type: text/html\r\nX-A: 1\r\nX-A: 2\r\n"
+  end
 
-names = [] of String
-headers.each do |name, value|
-  names << name + "=" + value
+  it "yields pairs in insertion order" do
+    headers = Headers.new
+    headers["content-type"] = "text/html"
+    headers.add("X-A", "1")
+    headers.add("X-A", "2")
+
+    names = [] of String
+    headers.each do |name, value|
+      names << name + "=" + value
+    end
+    assert names.size == 3
+    assert names[0] == "content-type=text/html"
+  end
+
+  it "deletes every case-insensitive match for a name" do
+    headers = Headers.new
+    headers["content-type"] = "text/html"
+    headers.add("X-A", "1")
+    headers.add("X-A", "2")
+    headers.delete("X-A")
+    assert !headers.has_key?("x-a")
+    assert headers.to_s == "content-type: text/html\r\n"
+  end
 end
-assert names.size == 3, "each visits every pair"
-assert names[0] == "content-type=text/html", "each starts at the first pair"
-
-headers.delete("X-A")
-assert !headers.has_key?("x-a"), "delete drops every case-insensitive match"
-assert headers.to_s == "content-type: text/html\r\n", "delete leaves the rest"
-
-puts "headers_test ok"

@@ -2,55 +2,75 @@
 module iyi_web/response_test
 
 import iyi_web/response
+import iyi_web/spec
 
 using iyi_web/response::{Response}
+using iyi_web/spec
 
-res = Response.new
-assert res.status_code == 200, "default status"
-assert res.body == "", "default body"
-assert !res.closed?, "open"
-assert res.content_type == "text/html; charset=utf-8", "default type"
+describe "Response" do
+  it "starts as 200 HTML with an empty body" do
+    res = Response.new
+    assert res.status_code == 200
+    assert res.body == ""
+    assert !res.closed?
+    assert res.content_type == "text/html; charset=utf-8"
+  end
 
-res.status_code = 201
-res.content_type = "application/json"
-res.print("{")
-res.write("}")
-assert res.body == "{}", "print concatenates"
-assert res.headers["content-type"] == "application/json", "setter writes header"
+  it "concatenates print/write and replaces with set_body" do
+    res = Response.new
+    res.status_code = 201
+    res.content_type = "application/json"
+    res.print("{")
+    res.write("}")
+    assert res.body == "{}"
+    assert res.headers["content-type"] == "application/json"
 
-res.set_body("ok")
-assert res.body == "ok", "set_body replaces"
+    res.set_body("ok")
+    assert res.body == "ok"
+  end
 
-res.close
-assert res.closed?, "closed"
+  it "serialises status, headers, a blank line and the body" do
+    res = Response.new
+    res.status_code = 201
+    res.content_type = "application/json"
+    res.set_body("ok")
+    res.close
+    assert res.closed?
+    assert res.to_http("HTTP/1.1") == "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\nok"
+  end
 
-http = res.to_http("HTTP/1.1")
-assert http == "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\nok", "frame is status, headers, blank, body"
+  it "writes the default type and length when neither was set" do
+    res = Response.new
+    res.set_body("ok")
+    assert res.to_http("HTTP/1.1") == "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 2\r\n\r\nok"
+  end
 
-plain = Response.new
-plain.set_body("ok")
-wired = plain.to_http("HTTP/1.1")
-assert wired == "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 2\r\n\r\nok", "default type and length"
+  it "leaves an existing Content-Length alone" do
+    res = Response.new
+    res.headers["Content-Length"] = "99"
+    res.set_body("x")
+    kept = res.to_http("HTTP/1.1")
+    assert kept.includes?("Content-Length: 99\r\n")
+    assert kept.includes?("\r\n\r\nx")
+  end
 
-forced = Response.new
-forced.headers["Content-Length"] = "99"
-forced.set_body("x")
-kept = forced.to_http("HTTP/1.1")
-assert kept.includes?("Content-Length: 99\r\n"), "existing content-length left alone"
-assert kept.includes?("\r\n\r\nx"), "body still written"
+  it "still serialises an unnamed status code" do
+    res = Response.new
+    res.status_code = 599
+    res.set_body("")
+    assert res.to_http("HTTP/1.1").starts_with?("HTTP/1.1 599 Unknown\r\n")
+  end
 
-unknown = Response.new
-unknown.status_code = 599
-unknown.set_body("")
-assert unknown.to_http("HTTP/1.1").starts_with?("HTTP/1.1 599 Unknown\r\n"), "unnamed status still serialises"
+  it "omits the body on HEAD and keeps the length" do
+    res = Response.new
+    res.set_body("ok")
+    assert res.to_http("HTTP/1.1", false) == "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 2\r\n\r\n"
+  end
 
-headless = Response.new
-headless.set_body("ok")
-assert headless.to_http("HTTP/1.1", false) == "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 2\r\n\r\n", "HEAD omits the body and keeps the length"
-
-empty = Response.new
-empty.status_code = 204
-empty.set_body("nope")
-assert empty.to_http("HTTP/1.1") == "HTTP/1.1 204 No Content\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 0\r\n\r\n", "204 has no entity"
-
-puts "response_test ok"
+  it "sends no entity body for 204" do
+    res = Response.new
+    res.status_code = 204
+    res.set_body("nope")
+    assert res.to_http("HTTP/1.1") == "HTTP/1.1 204 No Content\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 0\r\n\r\n"
+  end
+end

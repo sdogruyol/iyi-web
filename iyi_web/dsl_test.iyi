@@ -6,11 +6,13 @@ import iyi_web/dsl
 import iyi_web/router
 import iyi_web/harness
 import iyi_web/config
+import iyi_web/spec
 
 using iyi_web/dsl
 using iyi_web/router::{Router, RouteHandler}
 using iyi_web/harness
 using iyi_web/config
+using iyi_web/spec
 
 get "/dsl" do |env|
   "from-dsl"
@@ -39,23 +41,36 @@ mounted.get "/in" do |env|
 end
 mount "/sub", mounted
 
-handler = RouteHandler.new(app)
+describe "iyi_web/dsl" do
+  it "registers GET and POST on the process app" do
+    handler = RouteHandler.new(app)
+    assert dispatch(handler, "GET", "/dsl").response.body == "from-dsl"
+    assert dispatch(handler, "POST", "/dsl").response.body == "posted-dsl"
+  end
 
-assert dispatch(handler, "GET", "/dsl").response.body == "from-dsl", "DSL get"
-assert dispatch(handler, "POST", "/dsl").response.body == "posted-dsl", "DSL post"
-assert dispatch(handler, "GET", "/nope").response.body == "dsl-missing", "DSL error 404"
+  it "registers error handlers" do
+    handler = RouteHandler.new(app)
+    assert dispatch(handler, "GET", "/nope").response.body == "dsl-missing"
+  end
 
-gated = dispatch(handler, "GET", "/gated")
-assert gated.response.status_code == 401, "DSL before_all"
-assert gated.response.body == "gated", "DSL before_all body"
+  it "registers before_all" do
+    handler = RouteHandler.new(app)
+    gated = dispatch(handler, "GET", "/gated")
+    assert gated.response.status_code == 401
+    assert gated.response.body == "gated"
+  end
 
-assert dispatch(handler, "GET", "/sub/in").response.body == "mounted-dsl", "DSL mount"
+  it "mounts a sub-router" do
+    handler = RouteHandler.new(app)
+    assert dispatch(handler, "GET", "/sub/in").response.body == "mounted-dsl"
+  end
 
-logging(false)
-assert config.logging == false, "DSL logging"
-serve_static(false)
-assert config.serve_static == false, "DSL serve_static"
-public_folder("./assets")
-assert config.public_folder == "./assets", "DSL public_folder"
-
-puts "dsl_test ok"
+  it "writes config through helpers" do
+    logging(false)
+    assert config.logging == false
+    serve_static(false)
+    assert config.serve_static == false
+    public_folder("./assets")
+    assert config.public_folder == "./assets"
+  end
+end

@@ -3,8 +3,22 @@
 module iyi_web/radix_test
 
 import iyi_web/radix
+import iyi_web/spec
 
 using iyi_web/radix::{Tree}
+using iyi_web/spec
+
+def sample_tree : Tree(String)
+  tree = Tree(String).new
+  tree.add("/GET/", "home")
+  tree.add("/GET/users/:id", "user")
+  tree.add("/GET/users/new", "new-user")
+  tree.add("/GET/files/*path", "file")
+  tree.add("/POST/users", "create")
+  tree.add("/GET/:x/c", "xc")
+  tree.add("/GET/a/b", "ab")
+  tree
+end
 
 def payload(tree : Tree(String), path : String) : String
   match = tree.find(path)
@@ -24,40 +38,56 @@ def params(tree : Tree(String), path : String) : Hash(String, String)
   {} of String => String
 end
 
-tree = Tree(String).new
-tree.add("/GET/", "home")
-tree.add("/GET/users/:id", "user")
-tree.add("/GET/users/new", "new-user")
-tree.add("/GET/files/*path", "file")
-tree.add("/POST/users", "create")
-tree.add("/GET/:x/c", "xc")
-tree.add("/GET/a/b", "ab")
+describe "Tree" do
+  it "finds a static root" do
+    tree = sample_tree
+    assert payload(tree, "/GET/") == "home"
+    assert params(tree, "/GET/").empty?
+  end
 
-assert payload(tree, "/GET/") == "home", "GET /"
-assert params(tree, "/GET/").empty?, "GET / no params"
+  it "captures a named segment" do
+    tree = sample_tree
+    assert payload(tree, "/GET/users/7") == "user"
+    assert params(tree, "/GET/users/7")["id"] == "7"
+  end
 
-assert payload(tree, "/GET/users/7") == "user", "param payload"
-assert params(tree, "/GET/users/7")["id"] == "7", "param id"
+  it "prefers a static segment over a parameter on the same node" do
+    tree = sample_tree
+    assert payload(tree, "/GET/users/new") == "new-user"
+  end
 
-assert payload(tree, "/GET/users/new") == "new-user", "static wins over :id"
+  it "captures the rest of the path as a glob" do
+    tree = sample_tree
+    assert payload(tree, "/GET/files/a/b/c.txt") == "file"
+    assert params(tree, "/GET/files/a/b/c.txt")["path"] == "a/b/c.txt"
+    assert params(tree, "/GET/files")["path"] == ""
+  end
 
-assert payload(tree, "/GET/files/a/b/c.txt") == "file", "glob payload"
-assert params(tree, "/GET/files/a/b/c.txt")["path"] == "a/b/c.txt", "glob rest"
-assert params(tree, "/GET/files")["path"] == "", "empty glob tail"
+  it "keys the walk on the HTTP method" do
+    tree = sample_tree
+    assert payload(tree, "/POST/users") == "create"
+  end
 
-assert payload(tree, "/POST/users") == "create", "POST"
+  it "backtracks onto a parameter when a static walk fails" do
+    tree = sample_tree
+    assert payload(tree, "/GET/a/b") == "ab"
+    assert payload(tree, "/GET/a/c") == "xc"
+    assert params(tree, "/GET/a/c")["x"] == "a"
+  end
 
-assert payload(tree, "/GET/a/b") == "ab", "static /a/b"
-assert payload(tree, "/GET/a/c") == "xc", "static miss backtracks onto :x"
-assert params(tree, "/GET/a/c")["x"] == "a", "backtrack param"
+  it "returns nil for a path, method or extra segment that is not routed" do
+    tree = sample_tree
+    assert tree.find("/GET/missing").nil?
+    assert tree.find("/DELETE/users").nil?
+    assert tree.find("/GET/users/7/extra").nil?
+  end
 
-assert tree.find("/GET/missing").nil?, "unknown path"
-assert tree.find("/DELETE/users").nil?, "unknown method"
-assert tree.find("/GET/users/7/extra").nil?, "param does not swallow extra"
-
-hit = tree.find("/GET/")
-if found = hit
-  assert found.found?, "Match.found? is the success flag"
+  it "marks a successful Match as found?" do
+    hit = sample_tree.find("/GET/")
+    if found = hit
+      assert found.found?
+    else
+      assert false, "expected a match"
+    end
+  end
 end
-
-puts "radix_test ok"

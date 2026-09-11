@@ -10,6 +10,7 @@ import iyi_web/handler
 import iyi_web/server
 import iyi_web/config
 import iyi_web/harness
+import iyi_web/spec
 
 using std/socket::{IyiSocket}
 using iyi_web/router::{Router, RouteHandler}
@@ -17,6 +18,7 @@ using iyi_web/handler::{chain}
 using iyi_web/server::{Server}
 using iyi_web/config
 using iyi_web/harness
+using iyi_web/spec
 
 lib LibExit
   fun exit(status : Int32) : NoReturn
@@ -58,6 +60,10 @@ def read_frame(client : IyiSocket) : String
   size && size <= buffer.bytesize ? buffer[0, size] : buffer
 end
 
+def close_request(method : String, path : String, extra : String = "") : String
+  "#{method} #{path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n#{extra}\r\n"
+end
+
 router = Router.new
 router.get "/" do |env|
   "home"
@@ -96,91 +102,117 @@ port = server.bind("127.0.0.1", 0)
 
 group do |g|
   g.spawn do
-    home = exchange(port, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    assert status_line(home) == "HTTP/1.1 200 OK", "GET / status"
-    assert http_header(home, "X-Powered-By") == "iyi-web", "powered-by"
-    assert http_header(home, "Connection") == "close", "close"
-    assert http_body(home) == "home", "GET / body"
-    date = http_header(home, "Date")
-    assert !date.nil?, "Date header"
-    if dated = date
-      assert dated.includes?("GMT"), "Date is HTTP-date"
-    end
+    describe "Server" do
+      it "serves GET with Date, powered-by and Connection: close" do
+        home = exchange(port, close_request("GET", "/"))
+        assert status_line(home) == "HTTP/1.1 200 OK"
+        assert http_header(home, "X-Powered-By") == "iyi-web"
+        assert http_header(home, "Connection") == "close"
+        assert http_body(home) == "home"
+        date = http_header(home, "Date")
+        assert !date.nil?
+        if dated = date
+          assert dated.includes?("GMT")
+        end
+      end
 
-    named = exchange(port, "GET /hello/dunya HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    assert http_body(named) == "Hello, dunya!", "url param over TCP"
+      it "percent-decodes a url param over TCP" do
+        named = exchange(port, close_request("GET", "/hello/dunya"))
+        assert http_body(named) == "Hello, dunya!"
+        spaced = exchange(port, close_request("GET", "/hello/a%20b"))
+        assert http_body(spaced) == "Hello, a b!"
+      end
 
-    spaced = exchange(port, "GET /hello/a%20b HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    assert http_body(spaced) == "Hello, a b!", "percent-decoded path param"
+      it "preserves Content-Type set by the route" do
+        json = exchange(port, close_request("GET", "/json"))
+        assert http_header(json, "Content-Type") == "application/json"
+        assert http_body(json) == "{}"
+      end
 
-    json = exchange(port, "GET /json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    assert http_header(json, "Content-Type") == "application/json", "content-type"
-    assert http_body(json) == "{}", "json body"
+      it "echoes a POST body, including an empty one and a body larger than one read" do
+        echoed = exchange(port, close_request("POST", "/echo", "Content-Length: 5\r\n") + "hello")
+        assert http_body(echoed) == "hello"
 
-    echoed = exchange(port, "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
-    assert http_body(echoed) == "hello", "POST body echo"
+        empty = exchange(port, close_request("POST", "/echo", "Content-Length: 0\r\n"))
+        assert http_body(empty) == ""
 
-    empty = exchange(port, "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-    assert http_body(empty) == "", "zero-length body"
+        payload = "x" * 5000
+        bulky = exchange(port, close_request("POST", "/echo", "Content-Length: 5000\r\n") + payload)
+        assert http_body(bulky) == payload
+      end
 
-    payload = "x" * 5000
-    bulky = exchange(port, "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n" + payload)
-    assert http_body(bulky) == payload, "body larger than one socket read"
+      it "parses a form body" do
+        form = exchange(port, close_request("POST", "/form", "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 8\r\n") + "name=iyi")
+        assert http_body(form) == "iyi"
+      end
 
-    form = exchange(port, "POST /form HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 8\r\nConnection: close\r\n\r\nname=iyi")
-    assert http_body(form) == "iyi", "form body over TCP"
+      it "dispatches PUT" do
+        put = exchange(port, close_request("PUT", "/item"))
+        assert http_body(put) == "put"
+      end
 
-    put = exchange(port, "PUT /item HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    assert http_body(put) == "put", "PUT over TCP"
+      it "omits the body on HEAD and keeps Content-Length" do
+        headed = exchange(port, close_request("HEAD", "/"))
+        assert status_line(headed) == "HTTP/1.1 200 OK"
+        assert http_header(headed, "Content-Length") == "4"
+        assert http_body(headed) == ""
+      end
 
-    headed = exchange(port, "HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    assert status_line(headed) == "HTTP/1.1 200 OK", "HEAD status"
-    assert http_header(headed, "Content-Length") == "4", "HEAD content-length"
-    assert http_body(headed) == "", "HEAD body empty"
+      it "redirects with Location" do
+        go = exchange(port, close_request("GET", "/go"))
+        assert status_line(go) == "HTTP/1.1 302 Found"
+        assert http_header(go, "Location") == "/there"
+      end
 
-    go = exchange(port, "GET /go HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    assert status_line(go) == "HTTP/1.1 302 Found", "redirect status"
-    assert http_header(go, "Location") == "/there", "redirect Location"
+      it "serves a custom 404 over TCP" do
+        missing = exchange(port, close_request("GET", "/nope"))
+        assert status_line(missing) == "HTTP/1.1 404 Not Found"
+        assert http_body(missing) == "nope"
+      end
 
-    missing = exchange(port, "GET /nope HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    assert status_line(missing) == "HTTP/1.1 404 Not Found", "404 over TCP"
-    assert http_body(missing) == "nope", "custom 404 body"
+      it "rejects a lowercase method as 405" do
+        low = exchange(port, close_request("get", "/"))
+        assert status_line(low) == "HTTP/1.1 405 Method Not Allowed"
+      end
 
-    low = exchange(port, "get / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    assert status_line(low) == "HTTP/1.1 405 Method Not Allowed", "lowercase method is 405"
+      it "answers a malformed request with the canned 400" do
+        bad = exchange(port, "GET / HTTP/1.1\r\nNotAHeader\r\n\r\n")
+        assert bad == "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request"
+        short = exchange(port, "GET\r\n\r\n")
+        assert status_line(short) == "HTTP/1.1 400 Bad Request"
+      end
 
-    bad = exchange(port, "GET / HTTP/1.1\r\nNotAHeader\r\n\r\n")
-    assert bad == "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request", "malformed headers are the canned 400"
+      it "rejects a Content-Length above the cap" do
+        cfg.max_request_body_size = 8
+        huge = exchange(port, close_request("POST", "/echo", "Content-Length: 20\r\n") + "xxxxxxxxxxxxxxxxxxxx")
+        assert status_line(huge) == "HTTP/1.1 400 Bad Request"
+        cfg.max_request_body_size = 8 * 1024 * 1024
+      end
 
-    short = exchange(port, "GET\r\n\r\n")
-    assert status_line(short) == "HTTP/1.1 400 Bad Request", "short request-line is 400"
-
-    cfg.max_request_body_size = 8
-    huge = exchange(port, "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 20\r\nConnection: close\r\n\r\nxxxxxxxxxxxxxxxxxxxx")
-    assert status_line(huge) == "HTTP/1.1 400 Bad Request", "Content-Length above the cap is 400"
-
-    cfg.max_request_body_size = 8 * 1024 * 1024
-    alive = IyiSocket.connect("127.0.0.1", port)
-    alive.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
-    first = read_frame(alive)
-    assert status_line(first) == "HTTP/1.1 200 OK", "keep-alive first status"
-    assert http_header(first, "Connection") == "keep-alive", "keep-alive first connection"
-    assert http_body(first) == "home", "keep-alive first body"
-    alive.write("GET /json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    second = ""
-    loop do
-      case wait_readable(alive.fd)
-      in Cancelled
-        break
-      in Nil
-        chunk = alive.read(4096)
-        break if chunk.empty?
-        second = second + chunk
+      it "serves a second request on a keep-alive connection" do
+        alive = IyiSocket.connect("127.0.0.1", port)
+        alive.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        first = read_frame(alive)
+        assert status_line(first) == "HTTP/1.1 200 OK"
+        assert http_header(first, "Connection") == "keep-alive"
+        assert http_body(first) == "home"
+        alive.write("GET /json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        second = ""
+        loop do
+          case wait_readable(alive.fd)
+          in Cancelled
+            break
+          in Nil
+            chunk = alive.read(4096)
+            break if chunk.empty?
+            second = second + chunk
+          end
+        end
+        alive.close
+        assert http_body(second) == "{}"
+        assert http_header(second, "Connection") == "close"
       end
     end
-    alive.close
-    assert http_body(second) == "{}", "keep-alive second body"
-    assert http_header(second, "Connection") == "close", "last request closes"
 
     LibExit.exit(0)
     0

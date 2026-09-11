@@ -2,20 +2,27 @@
 module iyi_web/status_test
 
 import iyi_web/status
+import iyi_web/spec
 
 using iyi_web/status
+using iyi_web/spec
 
-assert phrase(200) == "OK", "200"
-assert phrase(201) == "Created", "201"
-assert phrase(204) == "No Content", "204"
-assert phrase(301) == "Moved Permanently", "301"
-assert phrase(302) == "Found", "302"
-assert phrase(400) == "Bad Request", "400"
-assert phrase(401) == "Unauthorized", "401"
-assert phrase(404) == "Not Found", "404"
-assert phrase(405) == "Method Not Allowed", "405"
-assert phrase(418) == "I'm a teapot", "418"
-assert phrase(500) == "Internal Server Error", "500"
-assert phrase(599) == "Unknown", "unnamed code"
+describe "phrase" do
+  it "names the status codes the framework actually sends" do
+    assert phrase(200) == "OK"
+    assert phrase(201) == "Created"
+    assert phrase(204) == "No Content"
+    assert phrase(301) == "Moved Permanently"
+    assert phrase(302) == "Found"
+    assert phrase(400) == "Bad Request"
+    assert phrase(401) == "Unauthorized"
+    assert phrase(404) == "Not Found"
+    assert phrase(405) == "Method Not Allowed"
+    assert phrase(418) == "I'm a teapot"
+    assert phrase(500) == "Internal Server Error"
+  end
 
-puts "status_test ok"
+  it "falls back to Unknown for an unnamed code" do
+    assert phrase(599) == "Unknown"
+  end
+end

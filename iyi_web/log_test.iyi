@@ -2,24 +2,25 @@
 module iyi_web/log_test
 
 import iyi_web/log
-import iyi_web/router
 import iyi_web/handler
 import iyi_web/harness
+import iyi_web/spec
 
 using iyi_web/log::{LogHandler}
-using iyi_web/router::{Router, RouteHandler}
 using iyi_web/handler::{chain}
 using iyi_web/harness
+using iyi_web/spec
 
-router = Router.new
-router.get "/log" do |env|
-  env.response.status_code = 201
-  "logged"
+describe "LogHandler" do
+  it "preserves the route's status and body" do
+    handler = chain([LogHandler.new, routes { |r|
+      r.get "/log" do |env|
+        env.response.status_code = 201
+        "logged"
+      end
+    }])
+    ctx = dispatch(handler, "GET", "/log")
+    assert ctx.response.status_code == 201
+    assert ctx.response.body == "logged"
+  end
 end
-
-head = chain([LogHandler.new, RouteHandler.new(router)])
-ctx = dispatch(head, "GET", "/log")
-assert ctx.response.status_code == 201, "log handler preserves status"
-assert ctx.response.body == "logged", "log handler preserves body"
-
-puts "log_test ok"

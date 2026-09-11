@@ -3,60 +3,148 @@
 module iyi_web/codec_test
 
 import iyi_web/codec
+import iyi_web/spec
 
 using iyi_web/codec
+using iyi_web/spec
 
-assert decode_form("hello+world") == "hello world", "plus is space in forms"
-assert decode_form("a%2Bb") == "a+b", "form percent-plus"
-assert decode_path("%2Ftmp") == "/tmp", "percent-decode path"
-assert decode_path("%2ftmp") == "/tmp", "lowercase hex"
-assert decode_path("a+b") == "a+b", "plus stays in a path"
-assert decode("%GG") == "%GG", "invalid percent is left written"
-assert decode("%2") == "%2", "truncated percent is left written"
-assert decode_path("%20") == " ", "space from percent"
-assert decode("%4A") == "J", "uppercase hex"
-assert decode("%C3%A7") == "ç", "utf-8 percent sequence"
+describe "decode" do
+  it "leaves an invalid or truncated percent sequence written" do
+    assert decode("%GG") == "%GG"
+    assert decode("%2") == "%2"
+  end
 
-assert parse_query("q=iyi&n=1")["q"] == "iyi", "query q"
-assert parse_query("q=iyi&n=1")["n"] == "1", "query n"
-assert parse_query("a=1&a=2")["a"] == "2", "query last-wins"
-assert parse_query("flag=")["flag"] == "", "empty value is present"
-assert parse_query("flag")["flag"] == "", "bare key is empty value"
-assert parse_query("").empty?, "empty query"
-assert parse_query("=x").empty?, "empty name dropped"
-assert parse_query("a%20b=c%2Bd")["a b"] == "c+d", "encoded name and value"
-assert parse_query("msg=hello+world")["msg"] == "hello world", "plus in value"
+  it "accepts upper-case hex" do
+    assert decode("%4A") == "J"
+  end
 
-assert join_paths("/api", "/users") == "/api/users", "join"
-assert join_paths("", "users") == "/users", "join empty left"
-assert join_paths("/api/", "") == "/api", "join empty right"
-assert join_paths("/api/", "/users") == "/api/users", "join strips extra slashes"
-assert join_paths("/", "x") == "/x", "join under root"
+  it "decodes a multi-byte UTF-8 sequence" do
+    assert decode("%C3%A7") == "ç"
+  end
+end
 
-assert matches_path_prefix?("/api", "/api/users"), "prefix hit"
-assert matches_path_prefix?("/api", "/api"), "prefix exact"
-assert matches_path_prefix?("/", "/anywhere"), "root prefix"
-assert matches_path_prefix?("", "/x"), "empty prefix"
-assert !matches_path_prefix?("/api", "/apiv2"), "prefix miss"
-assert !matches_path_prefix?("/api/users", "/api"), "prefix is not a suffix"
+describe "decode_form" do
+  it "treats plus as space" do
+    assert decode_form("hello+world") == "hello world"
+  end
 
-assert extension_of("/public/app.js") == "js", "extension"
-assert extension_of("/a.B") == "b", "extension downcased"
-assert extension_of("Makefile") == "", "no extension"
-assert extension_of("/.hidden") == "", "dotfile is not an extension"
-assert extension_of("/dir/") == "", "trailing slash"
+  it "still percent-decodes" do
+    assert decode_form("a%2Bb") == "a+b"
+  end
+end
 
-assert path_starts_with_slash?("/x"), "slash start"
-assert !path_starts_with_slash?("x"), "no slash"
+describe "decode_path" do
+  it "percent-decodes" do
+    assert decode_path("%2Ftmp") == "/tmp"
+    assert decode_path("%2ftmp") == "/tmp"
+    assert decode_path("%20") == " "
+  end
 
-assert find_substring("abcdef", "cd") == 2, "substring hit"
-assert find_substring("abcdef", "ab") == 0, "substring at start"
-assert find_substring("abcdef", "ef") == 4, "substring at end"
-assert find_substring("abcdef", "xyz").nil?, "substring miss"
-assert find_substring("abc", "") == 0, "empty needle"
-assert find_substring("ab", "abc").nil?, "needle longer than haystack"
+  it "leaves plus as plus" do
+    assert decode_path("a+b") == "a+b"
+  end
+end
 
-assert rindex_char("a.b.c", '.') == 3, "last dot"
-assert rindex_char("abc", '.').nil?, "char absent"
+describe "parse_query" do
+  it "splits name/value pairs" do
+    query = parse_query("q=iyi&n=1")
+    assert query["q"] == "iyi"
+    assert query["n"] == "1"
+  end
 
-puts "codec_test ok"
+  it "keeps the last value when a name repeats" do
+    assert parse_query("a=1&a=2")["a"] == "2"
+  end
+
+  it "treats a missing or empty value as an empty string" do
+    assert parse_query("flag=")["flag"] == ""
+    assert parse_query("flag")["flag"] == ""
+  end
+
+  it "drops an empty name" do
+    assert parse_query("=x").empty?
+  end
+
+  it "returns an empty table for an empty query" do
+    assert parse_query("").empty?
+  end
+
+  it "percent-decodes names and values, and treats plus as space" do
+    assert parse_query("a%20b=c%2Bd")["a b"] == "c+d"
+    assert parse_query("msg=hello+world")["msg"] == "hello world"
+  end
+end
+
+describe "join_paths" do
+  it "joins and strips extra slashes" do
+    assert join_paths("/api", "/users") == "/api/users"
+    assert join_paths("/api/", "/users") == "/api/users"
+    assert join_paths("/", "x") == "/x"
+  end
+
+  it "treats an empty side as the other, rooted" do
+    assert join_paths("", "users") == "/users"
+    assert join_paths("/api/", "") == "/api"
+  end
+end
+
+describe "matches_path_prefix?" do
+  it "matches a prefix or the exact path" do
+    assert matches_path_prefix?("/api", "/api/users")
+    assert matches_path_prefix?("/api", "/api")
+    assert matches_path_prefix?("/", "/anywhere")
+    assert matches_path_prefix?("", "/x")
+  end
+
+  it "does not match a longer sibling or a suffix" do
+    assert !matches_path_prefix?("/api", "/apiv2")
+    assert !matches_path_prefix?("/api/users", "/api")
+  end
+end
+
+describe "extension_of" do
+  it "returns the downcased suffix after the last dot" do
+    assert extension_of("/public/app.js") == "js"
+    assert extension_of("/a.B") == "b"
+  end
+
+  it "returns empty when there is no extension" do
+    assert extension_of("Makefile") == ""
+    assert extension_of("/.hidden") == ""
+    assert extension_of("/dir/") == ""
+  end
+end
+
+describe "path_starts_with_slash?" do
+  it "is true only for a leading slash" do
+    assert path_starts_with_slash?("/x")
+    assert !path_starts_with_slash?("x")
+  end
+end
+
+describe "find_substring" do
+  it "returns the byte index of a hit" do
+    assert find_substring("abcdef", "cd") == 2
+    assert find_substring("abcdef", "ab") == 0
+    assert find_substring("abcdef", "ef") == 4
+  end
+
+  it "returns nil when the needle is absent or longer than the haystack" do
+    assert find_substring("abcdef", "xyz").nil?
+    assert find_substring("ab", "abc").nil?
+  end
+
+  it "treats an empty needle as a hit at zero" do
+    assert find_substring("abc", "") == 0
+  end
+end
+
+describe "rindex_char" do
+  it "returns the last index of a character" do
+    assert rindex_char("a.b.c", '.') == 3
+  end
+
+  it "returns nil when the character is absent" do
+    assert rindex_char("abc", '.').nil?
+  end
+end

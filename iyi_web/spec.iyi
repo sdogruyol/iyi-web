@@ -1,0 +1,45 @@
+# Grouping for tests, not a runner.
+#
+# `iyi test` is still a program: assert, panic, exit. Crystal's `describe` /
+# `it` are macros that register a suite; these are ordinary functions that
+# yield now, so a group is a name around examples rather than a script of
+# bare asserts. Failure still names the file and line. The strings are for
+# the reader, the way a spec's example name is.
+module iyi_web/spec
+
+class Nesting
+  @path : String
+
+  def initialize
+    @path = ""
+  end
+
+  pub def path : String
+    @path
+  end
+
+  pub def path=(value : String) : String
+    @path = value
+  end
+end
+
+NESTING = Nesting.new
+
+def around(name : String, & : -> Nil) : Nil
+  previous = NESTING.path
+  NESTING.path = previous.empty? ? name : previous + " " + name
+  yield
+  NESTING.path = previous
+end
+
+pub def describe(name : String, & : -> Nil) : Nil
+  around(name) { yield }
+end
+
+pub def context(name : String, & : -> Nil) : Nil
+  around(name) { yield }
+end
+
+pub def it(name : String, & : -> Nil) : Nil
+  around(name) { yield }
+end

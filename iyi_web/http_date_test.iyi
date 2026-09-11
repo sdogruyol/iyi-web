@@ -2,12 +2,19 @@
 module iyi_web/http_date_test
 
 import iyi_web/http_date
+import iyi_web/spec
 import std/time
 
 using iyi_web/http_date
+using iyi_web/spec
 using std/time::{Time}
 
-assert http_date(Time.utc(1994, 11, 6, 8, 49, 37)) == "Sun, 06 Nov 1994 08:49:37 GMT", "RFC example"
-assert http_date(Time.utc(2026, 1, 2, 3, 4, 5)) == "Fri, 02 Jan 2026 03:04:05 GMT", "padded fields"
+describe "http_date" do
+  it "formats the RFC 9110 example" do
+    assert http_date(Time.utc(1994, 11, 6, 8, 49, 37)) == "Sun, 06 Nov 1994 08:49:37 GMT"
+  end
 
-puts "http_date_test ok"
+  it "zero-pads day, hour, minute and second" do
+    assert http_date(Time.utc(2026, 1, 2, 3, 4, 5)) == "Fri, 02 Jan 2026 03:04:05 GMT"
+  end
+end

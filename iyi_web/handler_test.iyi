@@ -2,14 +2,14 @@
 module iyi_web/handler_test
 
 import iyi_web/handler
-import iyi_web/router
 import iyi_web/harness
 import iyi_web/context
+import iyi_web/spec
 
 using iyi_web/handler::{Handler, chain}
-using iyi_web/router::{Router, RouteHandler}
 using iyi_web/harness
 using iyi_web/context::{Context}
+using iyi_web/spec
 
 class StampHandler < Handler
   pub def call(ctx : Context) : Nil
@@ -39,35 +39,46 @@ class AppendHandler < Handler
   end
 end
 
-router = Router.new
-router.get "/" do |env|
-  via = env["via"]?
-  via ? "ok:#{via}" : "ok"
+describe "Handler" do
+  it "runs middleware before the route" do
+    handler = chain([StampHandler.new, routes { |r|
+      r.get "/" do |env|
+        via = env["via"]?
+        via ? "ok:#{via}" : "ok"
+      end
+    }])
+    ctx = dispatch(handler, "GET", "/")
+    assert ctx.response.body == "ok:stamp"
+    assert ctx["via"] == "stamp"
+  end
+
+  it "skips the route after a halt" do
+    handler = chain([HaltHandler.new, routes { |r|
+      r.get "/secret" do |env|
+        "leaked"
+      end
+    }])
+    denied = dispatch(handler, "GET", "/secret")
+    assert denied.response.status_code == 401
+    assert denied.response.body == "stopped"
+  end
+
+  it "walks the chain left to right" do
+    handler = chain([AppendHandler.new("a"), AppendHandler.new("b"), routes { |r|
+      r.get "/order" do |env|
+        env["order"]? || ""
+      end
+    }])
+    assert dispatch(handler, "GET", "/order").response.body == "a,b"
+  end
+
+  it "treats the base Handler as call_next" do
+    passthrough = Handler.new
+    passthrough.next_handler = routes { |r|
+      r.get "/" do |env|
+        "ok"
+      end
+    }
+    assert dispatch(passthrough, "GET", "/").response.body == "ok"
+  end
 end
-router.get "/secret" do |env|
-  "leaked"
-end
-router.get "/order" do |env|
-  env["order"]? || ""
-end
-
-stamped = chain([StampHandler.new, RouteHandler.new(router)])
-ctx = dispatch(stamped, "GET", "/")
-assert ctx.response.body == "ok:stamp", "middleware runs before the route"
-assert ctx["via"] == "stamp", "store visible to the route"
-
-halted = chain([HaltHandler.new, RouteHandler.new(router)])
-denied = dispatch(halted, "GET", "/secret")
-assert denied.response.status_code == 401, "halt status"
-assert denied.response.body == "stopped", "halt body, route skipped"
-
-ordered = chain([AppendHandler.new("a"), AppendHandler.new("b"), RouteHandler.new(router)])
-walked = dispatch(ordered, "GET", "/order")
-assert walked.response.body == "a,b", "handlers run left to right"
-
-passthrough = Handler.new
-passthrough.next_handler = RouteHandler.new(router)
-plain = dispatch(passthrough, "GET", "/")
-assert plain.response.body == "ok", "base Handler is call_next"
-
-puts "handler_test ok"

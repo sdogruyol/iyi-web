@@ -1,349 +1,509 @@
-# Router dispatch without a socket. Isolated routers keep a filter on one
-# path from rewriting the assertions on another.
+# Router dispatch without a socket. Each example draws its own routes so a
+# filter on one path cannot rewrite the assertions on another.
 module iyi_web/router_test
 
 import iyi_web/router
 import iyi_web/harness
 import iyi_web/context
+import iyi_web/spec
 
 using iyi_web/router::{Router, RouteHandler}
 using iyi_web/harness
 using iyi_web/context::{Context}
+using iyi_web/spec
 
-router = Router.new
-router.get "/" do |env|
-  "home"
-end
-router.get "/users/:id" do |env|
-  env.params.url["id"]
-end
-router.get "/users/new" do |env|
-  "new-user"
-end
-router.post "/users" do |env|
-  "created"
-end
-router.put "/users/:id" do |env|
-  "put:#{env.params.url["id"]}"
-end
-router.patch "/users/:id" do |env|
-  "patch:#{env.params.url["id"]}"
-end
-router.delete "/users/:id" do |env|
-  "deleted"
-end
-router.options "/users" do |env|
-  env.response.headers["Allow"] = "GET, POST"
-  ""
-end
-router.query "/search-body" do |env|
-  q = env.params.body["q"]?
-  q ? q : "query-ok"
-end
-router.get "/search" do |env|
-  q = env.params.query["q"]?
-  q ? "q=#{q}" : "none"
-end
-router.get "/who/:message" do |env|
-  env.params["message"]
-end
-router.get "/count" do |env|
-  42
-end
-router.get "/empty" do |env|
-  nil
-end
-router.get "/yes" do |env|
-  true
-end
-router.get "/files/*path" do |env|
-  env.params.url["path"]
-end
-router.get "/go" do |env|
-  env.redirect("/there")
-  "nope"
-end
-router.get "/stop" do |env|
-  env.halt(418, "teapot")
-  "nope"
-end
-router.after "/stop" do |env|
-  env["after"] = "ran"
-  nil
-end
-router.get "/tagged" do |env|
-  "base"
-end
-router.after "/tagged" do |env|
-  env.response.print("+after")
-  nil
-end
-router.before "/admin" do |env|
-  env.halt(401, "no")
-  ""
-end
-router.get "/admin" do |env|
-  "secret"
-end
-router.before "/staff/*" do |env|
-  env.halt(403, "staff")
-  ""
-end
-router.get "/staff/x" do |env|
-  "open"
-end
-router.get "/public" do |env|
-  "open"
-end
-router.before_get "/only-get" do |env|
-  env.halt(400, "get-filter")
-  ""
-end
-router.get "/only-get" do |env|
-  "got"
-end
-router.post "/only-get" do |env|
-  "posted"
-end
-router.post "/form" do |env|
-  env.params.body["name"]
-end
-router.error 404 do |env|
-  "missing"
-end
-router.namespace "/ns" do |ns|
-  ns.get "/dash" do |env|
-    "dash"
+describe "Router" do
+  describe "HTTP verbs" do
+    it "dispatches GET, POST, PUT, PATCH, DELETE and OPTIONS" do
+      handler = routes do |r|
+        r.get "/" do |env|
+          "home"
+        end
+        r.post "/users" do |env|
+          "created"
+        end
+        r.put "/users/:id" do |env|
+          "put:#{env.params.url["id"]}"
+        end
+        r.patch "/users/:id" do |env|
+          "patch:#{env.params.url["id"]}"
+        end
+        r.delete "/users/:id" do |env|
+          "deleted"
+        end
+        r.options "/users" do |env|
+          env.response.headers["Allow"] = "GET, POST"
+          ""
+        end
+      end
+
+      assert dispatch(handler, "GET", "/").response.body == "home"
+      assert dispatch(handler, "POST", "/users").response.body == "created"
+      assert dispatch(handler, "PUT", "/users/3").response.body == "put:3"
+      assert dispatch(handler, "PATCH", "/users/3").response.body == "patch:3"
+      assert dispatch(handler, "DELETE", "/users/3").response.body == "deleted"
+
+      options = dispatch(handler, "OPTIONS", "/users")
+      assert options.response.status_code == 200
+      assert options.response.headers["allow"] == "GET, POST"
+    end
+
+    it "dispatches QUERY, including a form body" do
+      handler = routes do |r|
+        r.query "/search-body" do |env|
+          q = env.params.body["q"]?
+          q ? q : "query-ok"
+        end
+      end
+
+      assert dispatch(handler, "QUERY", "/search-body").response.body == "query-ok"
+      form = dispatch(handler, form_request("QUERY", "/search-body", "q=iyi"))
+      assert form.response.body == "iyi"
+    end
+
+    it "rejects a QUERY body without Content-Type" do
+      handler = routes do |r|
+        r.query "/search-body" do |env|
+          "query-ok"
+        end
+      end
+      ctx = dispatch(handler, http_request("QUERY", "/search-body", "", "q=iyi"))
+      assert ctx.response.status_code == 400
+      assert ctx.response.body == "400 Bad Request"
+    end
   end
-end
-router.namespace "/api" do |api|
-  api.namespace "/v1" do |v1|
-    v1.get "/ping" do |env|
-      "pong"
+
+  describe "parameters" do
+    it "captures a named url segment" do
+      handler = routes do |r|
+        r.get "/users/:id" do |env|
+          env.params.url["id"]
+        end
+      end
+      assert dispatch(handler, "GET", "/users/7").response.body == "7"
+    end
+
+    it "prefers a static segment over a parameter" do
+      handler = routes do |r|
+        r.get "/users/:id" do |env|
+          env.params.url["id"]
+        end
+        r.get "/users/new" do |env|
+          "new-user"
+        end
+      end
+      assert dispatch(handler, "GET", "/users/new").response.body == "new-user"
+    end
+
+    it "reads a query string" do
+      handler = routes do |r|
+        r.get "/search" do |env|
+          q = env.params.query["q"]?
+          q ? "q=#{q}" : "none"
+        end
+      end
+      ctx = dispatch(handler, http_request("GET", "/search", "q=iyi"))
+      assert ctx.response.body == "q=iyi"
+    end
+
+    it "prefers a url param over a query param of the same name" do
+      handler = routes do |r|
+        r.get "/who/:message" do |env|
+          env.params["message"]
+        end
+      end
+      ctx = dispatch(handler, http_request("GET", "/who/world", "message=coco"))
+      assert ctx.response.body == "world"
+    end
+
+    it "captures a glob and an empty glob tail" do
+      handler = routes do |r|
+        r.get "/files/*path" do |env|
+          env.params.url["path"]
+        end
+      end
+      assert dispatch(handler, "GET", "/files/a/b.txt").response.body == "a/b.txt"
+      assert dispatch(handler, "GET", "/files").response.body == ""
+    end
+
+    it "plus-decodes a form body" do
+      handler = routes do |r|
+        r.post "/form" do |env|
+          env.params.body["name"]
+        end
+      end
+      ctx = dispatch(handler, form_request("POST", "/form", "name=hello+world"))
+      assert ctx.response.body == "hello world"
+    end
+  end
+
+  describe "IntoBody" do
+    it "stringifies Int32, Nil and Bool" do
+      handler = routes do |r|
+        r.get "/count" do |env|
+          42
+        end
+        r.get "/empty" do |env|
+          nil
+        end
+        r.get "/yes" do |env|
+          true
+        end
+      end
+      assert dispatch(handler, "GET", "/count").response.body == "42"
+      assert dispatch(handler, "GET", "/empty").response.body == ""
+      assert dispatch(handler, "GET", "/yes").response.body == "true"
+    end
+
+    it "keeps a body already written when the handler returns nil" do
+      handler = routes do |r|
+        r.get "/plain" do |env|
+          env.text("OK")
+          nil
+        end
+        r.get "/created" do |env|
+          env.status(201).json("{\"ok\":true}")
+          nil
+        end
+      end
+
+      plain = dispatch(handler, "GET", "/plain")
+      assert plain.response.body == "OK"
+      assert plain.response.content_type == "text/plain; charset=utf-8"
+
+      created = dispatch(handler, "GET", "/created")
+      assert created.response.status_code == 201
+      assert created.response.body == "{\"ok\":true}"
+      assert created.response.content_type == "application/json; charset=utf-8"
+    end
+  end
+
+  describe "HEAD" do
+    it "serves GET with an empty body and the would-be Content-Length" do
+      handler = routes do |r|
+        r.get "/" do |env|
+          "home"
+        end
+      end
+      ctx = dispatch(handler, "HEAD", "/")
+      assert ctx.response.body == ""
+      assert ctx.response.headers["content-length"] == "4"
+      assert ctx.response.status_code == 200
+    end
+
+    it "cannot bypass before_get" do
+      handler = routes do |r|
+        r.before_get "/admin/*" do |env|
+          env.halt(401, "Unauthorized")
+          ""
+        end
+        r.get "/admin/users" do |env|
+          env["handler"] = "1"
+          "users"
+        end
+      end
+      ctx = dispatch(handler, "HEAD", "/admin/users")
+      assert ctx.response.status_code == 401
+      assert ctx.response.body == ""
+      assert ctx.response.headers["content-length"] == "12"
+      assert ctx["handler"]?.nil?
+    end
+
+    it "runs GET before, handler and after filters" do
+      handler = routes do |r|
+        r.before_get "/x" do |env|
+          env["calls"] = "before"
+          nil
+        end
+        r.after_get "/x" do |env|
+          prev = env["calls"]?
+          env["calls"] = prev ? prev + ",after" : "after"
+          nil
+        end
+        r.get "/x" do |env|
+          prev = env["calls"]?
+          env["calls"] = prev ? prev + ",handler" : "handler"
+          "users"
+        end
+      end
+      ctx = dispatch(handler, "HEAD", "/x")
+      assert ctx.response.body == ""
+      assert ctx.response.headers["content-length"] == "5"
+      assert ctx["calls"] == "before,handler,after"
+    end
+  end
+
+  describe "method mismatch" do
+    it "answers 405 with Allow when the path is routed for another verb" do
+      handler = routes do |r|
+        r.post "/users" do |env|
+          "created"
+        end
+        r.options "/users" do |env|
+          ""
+        end
+        r.get "/" do |env|
+          "home"
+        end
+      end
+
+      wrong = dispatch(handler, "GET", "/users")
+      assert wrong.response.status_code == 405
+      assert wrong.response.headers["allow"].includes?("POST")
+      assert wrong.response.headers["allow"].includes?("OPTIONS")
+      assert wrong.response.body == "405 Method Not Allowed"
+
+      post_root = dispatch(handler, "POST", "/")
+      assert post_root.response.status_code == 405
+      assert post_root.response.headers["allow"] == "GET, HEAD"
+    end
+
+    it "treats methods as case-sensitive" do
+      handler = routes do |r|
+        r.get "/" do |env|
+          "home"
+        end
+      end
+      ctx = dispatch(handler, "get", "/")
+      assert ctx.response.status_code == 405
+      assert ctx.response.headers["allow"] == "GET, HEAD"
+    end
+  end
+
+  describe "filters" do
+    it "halts from before and skips the route" do
+      handler = routes do |r|
+        r.before "/admin" do |env|
+          env.halt(401, "no")
+          ""
+        end
+        r.get "/admin" do |env|
+          "secret"
+        end
+      end
+      ctx = dispatch(handler, "GET", "/admin")
+      assert ctx.response.status_code == 401
+      assert ctx.response.body == "no"
+    end
+
+    it "scopes a wildcard before to that prefix" do
+      handler = routes do |r|
+        r.before "/staff/*" do |env|
+          env.halt(403, "staff")
+          ""
+        end
+        r.get "/staff/x" do |env|
+          "open"
+        end
+        r.get "/public" do |env|
+          "open"
+        end
+      end
+      assert dispatch(handler, "GET", "/staff/x").response.status_code == 403
+      assert dispatch(handler, "GET", "/public").response.body == "open"
+    end
+
+    it "runs before_get only for GET" do
+      handler = routes do |r|
+        r.before_get "/only-get" do |env|
+          env.halt(400, "get-filter")
+          ""
+        end
+        r.get "/only-get" do |env|
+          "got"
+        end
+        r.post "/only-get" do |env|
+          "posted"
+        end
+      end
+      assert dispatch(handler, "GET", "/only-get").response.status_code == 400
+      assert dispatch(handler, "POST", "/only-get").response.body == "posted"
+    end
+
+    it "lets an after filter append to the body" do
+      handler = routes do |r|
+        r.get "/tagged" do |env|
+          "base"
+        end
+        r.after "/tagged" do |env|
+          env.response.print("+after")
+          nil
+        end
+      end
+      assert dispatch(handler, "GET", "/tagged").response.body == "base+after"
+    end
+
+    it "stops the before chain at the first halt" do
+      handler = routes do |r|
+        r.before "*" do |env|
+          env["a"] = "1"
+          nil
+        end
+        r.before "*" do |env|
+          env.halt(403, "no")
+          ""
+        end
+        r.before "*" do |env|
+          env["c"] = "1"
+          nil
+        end
+        r.get "/z" do |env|
+          "z"
+        end
+      end
+      ctx = dispatch(handler, "GET", "/z")
+      assert ctx.response.status_code == 403
+      assert ctx["a"] == "1"
+      assert ctx["c"]?.nil?
+      assert ctx.response.body == "no"
+    end
+  end
+
+  describe "halt and redirect" do
+    it "redirects without writing the handler's return value" do
+      handler = routes do |r|
+        r.get "/go" do |env|
+          env.redirect("/there")
+          "nope"
+        end
+      end
+      ctx = dispatch(handler, "GET", "/go")
+      assert ctx.response.status_code == 302
+      assert ctx.response.headers["location"] == "/there"
+      assert ctx.response.body == ""
+    end
+
+    it "halts without running after filters" do
+      handler = routes do |r|
+        r.get "/stop" do |env|
+          env.halt(418, "teapot")
+          "nope"
+        end
+        r.after "/stop" do |env|
+          env["after"] = "ran"
+          nil
+        end
+      end
+      ctx = dispatch(handler, "GET", "/stop")
+      assert ctx.response.status_code == 418
+      assert ctx.response.body == "teapot"
+      assert ctx["after"]?.nil?
+    end
+
+    it "leaves an already-halted context alone" do
+      handler = routes do |r|
+        r.get "/" do |env|
+          "home"
+        end
+      end
+      ctx = Context.for(http_request("GET", "/"))
+      ctx.halt(499, "pre")
+      handler.call(ctx)
+      assert ctx.response.status_code == 499
+      assert ctx.response.body == "pre"
+    end
+  end
+
+  describe "error handlers" do
+    it "uses a custom 404 body" do
+      handler = routes do |r|
+        r.error 404 do |env|
+          "missing"
+        end
+      end
+      ctx = dispatch(handler, "GET", "/nope")
+      assert ctx.response.status_code == 404
+      assert ctx.response.body == "missing"
+    end
+
+    it "rewrites the body when the handler sets a status the error table names" do
+      handler = routes do |r|
+        r.get "/boom" do |env|
+          env.response.status_code = 500
+          "internal"
+        end
+        r.error 500 do |env|
+          "handled"
+        end
+      end
+      ctx = dispatch(handler, "GET", "/boom")
+      assert ctx.response.status_code == 500
+      assert ctx.response.body == "handled"
+    end
+
+    it "collects error handlers from a mounted router" do
+      auth = Router.new
+      auth.error 401 do |env|
+        "login"
+      end
+      auth.get "/x" do |env|
+        env.response.status_code = 401
+        "raw"
+      end
+      root = Router.new
+      root.mount "/n", auth
+      ctx = dispatch(RouteHandler.new(root), "GET", "/n/x")
+      assert ctx.response.status_code == 401
+      assert ctx.response.body == "login"
+    end
+  end
+
+  describe "namespace and mount" do
+    it "prefixes nested namespaces" do
+      handler = routes do |r|
+        r.namespace "/ns" do |ns|
+          ns.get "/dash" do |env|
+            "dash"
+          end
+        end
+        r.namespace "/api" do |api|
+          api.namespace "/v1" do |v1|
+            v1.get "/ping" do |env|
+              "pong"
+            end
+          end
+        end
+      end
+      assert dispatch(handler, "GET", "/ns/dash").response.body == "dash"
+      assert dispatch(handler, "GET", "/api/v1/ping").response.body == "pong"
+    end
+
+    it "mounts at a prefix and at the root" do
+      handler = routes do |r|
+        mounted = Router.new
+        mounted.get "/list" do |env|
+          "listed"
+        end
+        r.mount "/mounted", mounted
+
+        bare = Router.new
+        bare.get "/bare" do |env|
+          "bare"
+        end
+        r.mount(bare)
+      end
+      assert dispatch(handler, "GET", "/mounted/list").response.body == "listed"
+      assert dispatch(handler, "GET", "/bare").response.body == "bare"
+    end
+
+    it "joins nested prefixes in routes()" do
+      router = Router.new
+      router.namespace "/api" do |api|
+        api.namespace "/v1" do |v1|
+          v1.get "/ping" do |env|
+            "pong"
+          end
+        end
+      end
+      bare = Router.new
+      bare.get "/bare" do |env|
+        "bare"
+      end
+      router.mount(bare)
+
+      paths = router.routes.map { |route| route.method + " " + route.path }
+      assert paths.includes?("GET /api/v1/ping")
+      assert paths.includes?("GET /bare")
     end
   end
 end
-
-mounted = Router.new
-mounted.get "/list" do |env|
-  "listed"
-end
-router.mount "/mounted", mounted
-
-bare = Router.new
-bare.get "/bare" do |env|
-  "bare"
-end
-router.mount(bare)
-
-router.get "/plain" do |env|
-  env.text("OK")
-  nil
-end
-router.get "/created" do |env|
-  env.status(201).json("{\"ok\":true}")
-  nil
-end
-
-handler = RouteHandler.new(router)
-
-home = dispatch(handler, "GET", "/")
-assert home.response.body == "home", "GET /"
-assert home.response.status_code == 200, "GET / status"
-
-assert dispatch(handler, "GET", "/users/7").response.body == "7", "url param"
-assert dispatch(handler, "GET", "/users/new").response.body == "new-user", "static /users/new wins over :id"
-assert dispatch(handler, "POST", "/users").response.body == "created", "POST"
-assert dispatch(handler, "PUT", "/users/3").response.body == "put:3", "PUT"
-assert dispatch(handler, "PATCH", "/users/3").response.body == "patch:3", "PATCH"
-assert dispatch(handler, "DELETE", "/users/3").response.body == "deleted", "DELETE"
-
-options = dispatch(handler, "OPTIONS", "/users")
-assert options.response.status_code == 200, "OPTIONS"
-assert options.response.headers["allow"] == "GET, POST", "OPTIONS Allow as written"
-
-assert dispatch(handler, "QUERY", "/search-body").response.body == "query-ok", "QUERY without body"
-query_form = dispatch(handler, http_request("QUERY", "/search-body", "", "q=iyi", "application/x-www-form-urlencoded"))
-assert query_form.response.body == "iyi", "QUERY form body"
-query_bare = dispatch(handler, http_request("QUERY", "/search-body", "", "q=iyi"))
-assert query_bare.response.status_code == 400, "QUERY body without Content-Type"
-assert query_bare.response.body == "400 Bad Request", "QUERY 400 body"
-
-plain = dispatch(handler, "GET", "/plain")
-assert plain.response.body == "OK", "env.text survives a nil return"
-assert plain.response.content_type == "text/plain; charset=utf-8", "env.text content-type"
-
-created = dispatch(handler, "GET", "/created")
-assert created.response.status_code == 201, "env.status"
-assert created.response.body == "{\"ok\":true}", "env.json body"
-assert created.response.content_type == "application/json; charset=utf-8", "env.json type"
-
-assert dispatch(handler, "GET", "/count").response.body == "42", "IntoBody Int32"
-assert dispatch(handler, "GET", "/empty").response.body == "", "IntoBody Nil"
-assert dispatch(handler, "GET", "/yes").response.body == "true", "IntoBody Bool"
-
-search = dispatch(handler, http_request("GET", "/search", "q=iyi"))
-assert search.response.body == "q=iyi", "query param"
-
-who = dispatch(handler, http_request("GET", "/who/world", "message=coco"))
-assert who.response.body == "world", "url param beats query"
-
-assert dispatch(handler, "GET", "/files/a/b.txt").response.body == "a/b.txt", "glob param"
-assert dispatch(handler, "GET", "/files").response.body == "", "empty glob tail"
-
-head = dispatch(handler, "HEAD", "/")
-assert head.response.body == "", "HEAD body empty"
-assert head.response.headers["content-length"] == "4", "HEAD content-length of home"
-assert head.response.status_code == 200, "HEAD status"
-
-missing = dispatch(handler, "GET", "/nope")
-assert missing.response.status_code == 404, "404"
-assert missing.response.body == "missing", "custom 404 body"
-
-wrong = dispatch(handler, "GET", "/users")
-assert wrong.response.status_code == 405, "405 GET on POST /users"
-assert wrong.response.headers["allow"].includes?("POST"), "Allow POST"
-assert wrong.response.headers["allow"].includes?("OPTIONS"), "Allow OPTIONS"
-assert wrong.response.body == "405 Method Not Allowed", "default 405 body"
-
-post_root = dispatch(handler, "POST", "/")
-assert post_root.response.status_code == 405, "POST / is 405"
-assert post_root.response.headers["allow"] == "GET, HEAD", "Allow lists GET and the implicit HEAD"
-
-low = dispatch(handler, "get", "/")
-assert low.response.status_code == 405, "methods are case-sensitive"
-assert low.response.headers["allow"] == "GET, HEAD", "Allow names the routed verb"
-
-denied = dispatch(handler, "GET", "/admin")
-assert denied.response.status_code == 401, "before filter halt"
-assert denied.response.body == "no", "halt body"
-
-assert dispatch(handler, "GET", "/staff/x").response.status_code == 403, "wildcard before halt"
-assert dispatch(handler, "GET", "/public").response.body == "open", "wildcard before does not leak"
-
-assert dispatch(handler, "GET", "/only-get").response.status_code == 400, "before_get"
-assert dispatch(handler, "POST", "/only-get").response.body == "posted", "before_get skips POST"
-
-form = dispatch(handler, http_request("POST", "/form", "", "name=hello+world", "application/x-www-form-urlencoded"))
-assert form.response.body == "hello world", "form plus-decoding"
-
-go = dispatch(handler, "GET", "/go")
-assert go.response.status_code == 302, "redirect status"
-assert go.response.headers["location"] == "/there", "redirect Location"
-assert go.response.body == "", "redirect does not write handler return"
-
-stop = dispatch(handler, "GET", "/stop")
-assert stop.response.status_code == 418, "halt status"
-assert stop.response.body == "teapot", "halt body"
-assert stop["after"]?.nil?, "halt skips after filters"
-
-assert dispatch(handler, "GET", "/tagged").response.body == "base+after", "after filter can append"
-assert dispatch(handler, "GET", "/ns/dash").response.body == "dash", "namespace"
-assert dispatch(handler, "GET", "/api/v1/ping").response.body == "pong", "nested namespace"
-assert dispatch(handler, "GET", "/mounted/list").response.body == "listed", "mount with prefix"
-assert dispatch(handler, "GET", "/bare").response.body == "bare", "mount at root"
-
-# HEAD served by GET must still run before_get / after_get — otherwise HEAD
-# is a bypass, which is the bug Kemal's filter spec exists to catch.
-guarded = Router.new
-guarded.before_get "/admin/*" do |env|
-  env.halt(401, "Unauthorized")
-  ""
-end
-guarded.get "/admin/users" do |env|
-  env["handler"] = "1"
-  "users"
-end
-guard = RouteHandler.new(guarded)
-blocked = dispatch(guard, "HEAD", "/admin/users")
-assert blocked.response.status_code == 401, "HEAD cannot bypass before_get"
-assert blocked.response.body == "", "HEAD halt has no body"
-assert blocked.response.headers["content-length"] == "12", "HEAD halt length of Unauthorized"
-assert blocked["handler"]?.nil?, "GET handler did not run"
-
-traced = Router.new
-traced.before_get "/x" do |env|
-  env["calls"] = "before"
-  nil
-end
-traced.after_get "/x" do |env|
-  prev = env["calls"]?
-  env["calls"] = prev ? prev + ",after" : "after"
-  nil
-end
-traced.get "/x" do |env|
-  prev = env["calls"]?
-  env["calls"] = prev ? prev + ",handler" : "handler"
-  "users"
-end
-trace = RouteHandler.new(traced)
-headed = dispatch(trace, "HEAD", "/x")
-assert headed.response.body == "", "HEAD still has an empty body"
-assert headed.response.headers["content-length"] == "5", "HEAD length of users"
-assert headed["calls"] == "before,handler,after", "HEAD runs GET before, handler, after"
-
-# A before that halts must not run the rest of the before chain.
-layered = Router.new
-layered.before "*" do |env|
-  env["a"] = "1"
-  nil
-end
-layered.before "*" do |env|
-  env.halt(403, "no")
-  ""
-end
-layered.before "*" do |env|
-  env["c"] = "1"
-  nil
-end
-layered.get "/z" do |env|
-  "z"
-end
-layer = RouteHandler.new(layered)
-stopped = dispatch(layer, "GET", "/z")
-assert stopped.response.status_code == 403, "second before halt"
-assert stopped["a"] == "1", "first before ran"
-assert stopped["c"]?.nil?, "later before skipped"
-assert stopped.response.body == "no", "halt body from the second before"
-
-# Custom 500 replaces the handler's body when the status is >= 400.
-fails = Router.new
-fails.get "/boom" do |env|
-  env.response.status_code = 500
-  "internal"
-end
-fails.error 500 do |env|
-  "handled"
-end
-boom = dispatch(RouteHandler.new(fails), "GET", "/boom")
-assert boom.response.status_code == 500, "500 status"
-assert boom.response.body == "handled", "error 500 rewrites the body"
-
-# Nested routers used to lose every error handler except 404/500 on the
-# parent. A mounted 401 must still fire.
-auth = Router.new
-auth.error 401 do |env|
-  "login"
-end
-auth.get "/x" do |env|
-  env.response.status_code = 401
-  "raw"
-end
-root = Router.new
-root.mount "/n", auth
-nested = dispatch(RouteHandler.new(root), "GET", "/n/x")
-assert nested.response.status_code == 401, "nested error status"
-assert nested.response.body == "login", "nested error 401 rewrites the body"
-
-# Already-halted context is left alone.
-pre = Context.for(http_request("GET", "/"))
-pre.halt(499, "pre")
-handler.call(pre)
-assert pre.response.status_code == 499, "halted context keeps status"
-assert pre.response.body == "pre", "halted context keeps body"
-
-paths = router.routes.map { |route| route.method + " " + route.path }
-assert paths.includes?("GET /api/v1/ping"), "routes() joins nested prefixes"
-assert paths.includes?("GET /bare"), "routes() includes a root mount"
-
-puts "router_test ok"

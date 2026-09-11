@@ -3,45 +3,59 @@ module iyi_web/config_test
 
 import iyi_web/config
 import iyi_web/handler
+import iyi_web/spec
 
 using iyi_web/config
 using iyi_web/config::{Config}
 using iyi_web/handler::{Handler}
+using iyi_web/spec
 
-fresh = Config.new
-assert fresh.app_name == "iyi-web", "app name"
-assert fresh.host == "0.0.0.0", "host"
-assert fresh.public_folder == "./public", "public folder"
-assert fresh.logging, "logging on"
-assert !fresh.running, "not running"
-assert fresh.serve_static, "static on"
-assert !fresh.powered_by_header, "powered-by off"
-assert fresh.max_request_body_size == 8 * 1024 * 1024, "8 MiB"
-assert fresh.keepalive, "keepalive on"
-assert fresh.max_keepalive_requests == 100, "100 keep-alive requests"
-assert fresh.custom_handlers.empty?, "no custom handlers"
+describe "Config" do
+  it "starts with the framework defaults" do
+    fresh = Config.new
+    assert fresh.app_name == "iyi-web"
+    assert fresh.host == "0.0.0.0"
+    assert fresh.public_folder == "./public"
+    assert fresh.logging
+    assert !fresh.running
+    assert fresh.serve_static
+    assert !fresh.powered_by_header
+    assert fresh.max_request_body_size == 8 * 1024 * 1024
+    assert fresh.keepalive
+    assert fresh.max_keepalive_requests == 100
+    assert fresh.custom_handlers.empty?
+  end
 
-fresh.app_name = "demo"
-fresh.port = 4000
-fresh.env = "production"
-fresh.logging = false
-fresh.serve_static = false
-fresh.powered_by_header = true
-assert fresh.app_name == "demo", "set name"
-assert fresh.port == 4000, "set port"
-assert fresh.env == "production", "set env"
-assert !fresh.development?, "production is not development"
-fresh.env = "development"
-assert fresh.development?, "development?"
-assert !fresh.logging, "logging off"
-assert !fresh.serve_static, "static off"
-assert fresh.powered_by_header, "powered-by on"
+  it "accepts assignment and reports development?" do
+    fresh = Config.new
+    fresh.app_name = "demo"
+    fresh.port = 4000
+    fresh.env = "production"
+    fresh.logging = false
+    fresh.serve_static = false
+    fresh.powered_by_header = true
 
-fresh.add_handler(Handler.new)
-assert fresh.custom_handlers.size == 1, "add_handler"
+    assert fresh.app_name == "demo"
+    assert fresh.port == 4000
+    assert fresh.env == "production"
+    assert !fresh.development?
+    assert !fresh.logging
+    assert !fresh.serve_static
+    assert fresh.powered_by_header
 
-shared = config
-shared.env = "test"
-assert config.env == "test", "config is the process singleton"
+    fresh.env = "development"
+    assert fresh.development?
+  end
 
-puts "config_test ok"
+  it "collects custom handlers" do
+    fresh = Config.new
+    fresh.add_handler(Handler.new)
+    assert fresh.custom_handlers.size == 1
+  end
+
+  it "is the process singleton behind config()" do
+    shared = config
+    shared.env = "test"
+    assert config.env == "test"
+  end
+end

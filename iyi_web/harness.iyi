@@ -8,12 +8,14 @@ import iyi_web/headers
 import iyi_web/request
 import iyi_web/context
 import iyi_web/handler
+import iyi_web/router
 
 using iyi_web/codec
 using iyi_web/headers::{Headers}
 using iyi_web/request::{Request}
 using iyi_web/context::{Context}
 using iyi_web/handler::{Handler}
+using iyi_web/router::{Router, RouteHandler}
 
 pub def http_request(method : String, path : String, query : String = "", body : String = "", content_type : String = "") : Request
   headers = Headers.new
@@ -35,6 +37,18 @@ end
 
 pub def dispatch(handler : Handler, method : String, path : String) : Context
   dispatch(handler, http_request(method, path))
+end
+
+# Isolated app: a Router filled by the block, already wrapped as a Handler.
+# Each example builds its own so one route cannot rewrite the next.
+pub def routes(& : Router -> Nil) : RouteHandler
+  router = Router.new
+  yield router
+  RouteHandler.new(router)
+end
+
+pub def form_request(method : String, path : String, body : String) : Request
+  http_request(method, path, "", body, "application/x-www-form-urlencoded")
 end
 
 # First line of an HTTP/1.1 response, without the CRLF.

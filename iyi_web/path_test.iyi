@@ -3,15 +3,15 @@ module iyi_web/path_test
 
 import iyi_web/path
 import iyi_web/handler
-import iyi_web/router
 import iyi_web/harness
 import iyi_web/context
+import iyi_web/spec
 
 using iyi_web/path::{PathHandler}
 using iyi_web/handler::{Handler, chain}
-using iyi_web/router::{Router, RouteHandler}
 using iyi_web/harness
 using iyi_web/context::{Context}
+using iyi_web/spec
 
 class GateHandler < Handler
   pub def call(ctx : Context) : Nil
@@ -19,20 +19,29 @@ class GateHandler < Handler
   end
 end
 
-router = Router.new
-router.get "/" do |env|
-  "home"
+def gated
+  chain([PathHandler.new("/api", GateHandler.new), routes { |r|
+    r.get "/" do |env|
+      "home"
+    end
+    r.get "/api/x" do |env|
+      "secret"
+    end
+  }])
 end
-router.get "/api/x" do |env|
-  "secret"
+
+describe "PathHandler" do
+  it "skips the inner handler outside the prefix" do
+    assert dispatch(gated, "GET", "/").response.body == "home"
+  end
+
+  it "runs the inner handler under the prefix" do
+    denied = dispatch(gated, "GET", "/api/x")
+    assert denied.response.status_code == 401
+    assert denied.response.body == "gated"
+  end
+
+  it "does not treat a string prefix as a path prefix" do
+    assert dispatch(gated, "GET", "/apiv2").response.status_code == 404
+  end
 end
-
-head = chain([PathHandler.new("/api", GateHandler.new), RouteHandler.new(router)])
-
-assert dispatch(head, "GET", "/").response.body == "home", "outside the prefix skips the gate"
-denied = dispatch(head, "GET", "/api/x")
-assert denied.response.status_code == 401, "inside the prefix runs the gate"
-assert denied.response.body == "gated", "gate body"
-assert dispatch(head, "GET", "/apiv2").response.status_code == 404, "prefix is not a string prefix"
-
-puts "path_test ok"
