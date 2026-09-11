@@ -40,6 +40,24 @@ def exchange(port : Int32, request : String) : String
   buffer
 end
 
+def read_frame(client : IyiSocket) : String
+  buffer = ""
+  loop do
+    size = http_frame_size(buffer)
+    break if size && buffer.bytesize >= size
+    case wait_readable(client.fd)
+    in Cancelled
+      break
+    in Nil
+      chunk = client.read(4096)
+      break if chunk.empty?
+      buffer = buffer + chunk
+    end
+  end
+  size = http_frame_size(buffer)
+  size && size <= buffer.bytesize ? buffer[0, size] : buffer
+end
+
 router = Router.new
 router.get "/" do |env|
   "home"
@@ -135,6 +153,29 @@ group do |g|
     cfg.max_request_body_size = 8
     huge = exchange(port, "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 20\r\nConnection: close\r\n\r\nxxxxxxxxxxxxxxxxxxxx")
     assert status_line(huge) == "HTTP/1.1 400 Bad Request", "Content-Length above the cap is 400"
+
+    cfg.max_request_body_size = 8 * 1024 * 1024
+    alive = IyiSocket.connect("127.0.0.1", port)
+    alive.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    first = read_frame(alive)
+    assert status_line(first) == "HTTP/1.1 200 OK", "keep-alive first status"
+    assert http_header(first, "Connection") == "keep-alive", "keep-alive first connection"
+    assert http_body(first) == "home", "keep-alive first body"
+    alive.write("GET /json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+    second = ""
+    loop do
+      case wait_readable(alive.fd)
+      in Cancelled
+        break
+      in Nil
+        chunk = alive.read(4096)
+        break if chunk.empty?
+        second = second + chunk
+      end
+    end
+    alive.close
+    assert http_body(second) == "{}", "keep-alive second body"
+    assert http_header(second, "Connection") == "close", "last request closes"
 
     LibExit.exit(0)
     0

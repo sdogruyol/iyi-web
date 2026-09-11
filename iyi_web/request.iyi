@@ -32,6 +32,10 @@ pub class Request
     @method
   end
 
+  pub def method=(value : String) : String
+    @method = value
+  end
+
   pub def path : String
     @path
   end

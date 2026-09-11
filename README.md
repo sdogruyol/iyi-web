@@ -53,7 +53,10 @@ run
 | `mount` / `namespace` / `Router` | modular routing |
 | `use` | middleware (`Handler` subclass) |
 | `./public` | static files |
-| one request per connection | HTTP/1.1, no TLS yet |
+| HTTP/1.1 keep-alive | leftover bytes stay on the connection |
+| `env.cookies` / `env.set_cookie` | Cookie / Set-Cookie |
+| `env.send_file` | whole-file response |
+| `_method` | `use OverrideMethodHandler.new` |
 
 iyi's own prelude has no `HTTP::Server` and no TLS. The server is
 `std/socket` plus the cooperative scheduler (`wait_readable`, `group` /
@@ -68,8 +71,10 @@ iyi_web/router     Router, RouteHandler, namespace
 iyi_web/context    Context (request, response, params, halt)
 iyi_web/body       IntoBody — String, Nil, Int32, Int64, Bool
 iyi_web/handler    Handler, chain
-iyi_web/server     HTTP/1.1 on IyiSocket
-iyi_web/config     port, env, public_folder, logging
+iyi_web/server     HTTP/1.1 keep-alive on IyiSocket
+iyi_web/config     port, env, public_folder, logging, keepalive
+iyi_web/cookies    Cookie header table
+iyi_web/override   POST `_method` → PUT/PATCH/DELETE
 ```
 
 A program that only wants a sub-router imports `iyi_web/router` and never

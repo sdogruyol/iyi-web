@@ -5,10 +5,12 @@ module iyi_web/dsl_test
 import iyi_web/dsl
 import iyi_web/router
 import iyi_web/harness
+import iyi_web/config
 
 using iyi_web/dsl
 using iyi_web/router::{Router, RouteHandler}
 using iyi_web/harness
+using iyi_web/config
 
 get "/dsl" do |env|
   "from-dsl"
@@ -48,5 +50,12 @@ assert gated.response.status_code == 401, "DSL before_all"
 assert gated.response.body == "gated", "DSL before_all body"
 
 assert dispatch(handler, "GET", "/sub/in").response.body == "mounted-dsl", "DSL mount"
+
+logging(false)
+assert config.logging == false, "DSL logging"
+serve_static(false)
+assert config.serve_static == false, "DSL serve_static"
+public_folder("./assets")
+assert config.public_folder == "./assets", "DSL public_folder"
 
 puts "dsl_test ok"

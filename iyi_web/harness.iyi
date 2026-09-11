@@ -84,3 +84,18 @@ pub def http_body(raw : String) : String
   return "" unless sep
   raw[sep + 4, raw.bytesize - sep - 4]
 end
+
+# Byte length of the first HTTP/1.1 response in *raw*, or nil until the
+# headers (and, for a GET, the Content-Length body) have arrived. HEAD
+# advertises a length and sends no body: if the bytes after the blank
+# line already look like the next response, the body is treated as empty.
+pub def http_frame_size(raw : String) : Int32?
+  sep = find_substring(raw, "\r\n\r\n")
+  return nil unless sep
+  header = http_header(raw, "Content-Length")
+  extra = header ? (header.to_i? || 0) : 0
+  rest_len = raw.bytesize - sep - 4
+  rest = rest_len > 0 ? raw[sep + 4, rest_len] : ""
+  extra = 0 if extra > 0 && rest.starts_with?("HTTP/")
+  sep + 4 + extra
+end

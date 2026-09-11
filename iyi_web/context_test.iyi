@@ -49,4 +49,31 @@ url["id"] = "7"
 with_url = Context.for(http_request("GET", "/"), url)
 assert with_url.params.url["id"] == "7", "url params on construct"
 
+jar = Context.for(http_request("GET", "/"))
+assert jar.cookies.empty?, "no Cookie header"
+
+headed = http_request("GET", "/")
+headed.headers["Cookie"] = "session=abc; theme=dark"
+from_header = Context.for(headed)
+assert from_header.cookies["session"] == "abc", "cookie session"
+assert from_header.cookies["theme"] == "dark", "cookie theme"
+
+set = Context.for(http_request("GET", "/"))
+set.set_cookie("sid", "1")
+set.set_cookie("x", "y", "/", true)
+written = set.response.headers.to_s
+assert written.includes?("Set-Cookie: sid=1; Path=/\r\n"), "set_cookie"
+assert written.includes?("Set-Cookie: x=y; Path=/; HttpOnly\r\n"), "HttpOnly cookie"
+
+file_ctx = Context.for(http_request("GET", "/"))
+file_ctx.send_file(__DIR__ + "/fixtures/hello.txt")
+assert file_ctx.response.body == File.read(__DIR__ + "/fixtures/hello.txt"), "send_file body"
+assert file_ctx.response.content_type == "text/plain; charset=utf-8", "send_file mime"
+assert file_ctx.response.headers["x-content-type-options"] == "nosniff", "nosniff"
+
+missing_file = Context.for(http_request("GET", "/"))
+missing_file.send_file(__DIR__ + "/fixtures/no-such.txt")
+assert missing_file.response.status_code == 404, "send_file missing is 404"
+assert missing_file.halted?, "send_file missing halts"
+
 puts "context_test ok"

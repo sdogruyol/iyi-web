@@ -1,0 +1,45 @@
+# POST + `_method` becomes PUT/PATCH/DELETE, the way an HTML form pretends.
+module iyi_web/override_test
+
+import iyi_web/override
+import iyi_web/router
+import iyi_web/handler
+import iyi_web/harness
+
+using iyi_web/override::{OverrideMethodHandler}
+using iyi_web/router::{Router, RouteHandler}
+using iyi_web/handler::{chain}
+using iyi_web/harness
+
+router = Router.new
+router.post "/item" do |env|
+  "posted"
+end
+router.put "/item" do |env|
+  "put"
+end
+router.patch "/item" do |env|
+  "patched"
+end
+router.delete "/item" do |env|
+  "deleted"
+end
+
+head = chain([OverrideMethodHandler.new, RouteHandler.new(router)])
+
+plain = dispatch(head, http_request("POST", "/item", "", "name=x", "application/x-www-form-urlencoded"))
+assert plain.response.body == "posted", "POST without _method stays POST"
+
+put = dispatch(head, http_request("POST", "/item", "", "_method=PUT", "application/x-www-form-urlencoded"))
+assert put.response.body == "put", "POST _method=PUT"
+
+patch = dispatch(head, http_request("POST", "/item", "", "_method=patch", "application/x-www-form-urlencoded"))
+assert patch.response.body == "patched", "POST _method=patch is case-insensitive"
+
+deleted = dispatch(head, http_request("POST", "/item", "", "_method=DELETE", "application/x-www-form-urlencoded"))
+assert deleted.response.body == "deleted", "POST _method=DELETE"
+
+ignored = dispatch(head, http_request("POST", "/item", "", "_method=GET", "application/x-www-form-urlencoded"))
+assert ignored.response.body == "posted", "GET is not an allowed override"
+
+puts "override_test ok"

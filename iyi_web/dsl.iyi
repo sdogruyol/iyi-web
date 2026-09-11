@@ -74,6 +74,18 @@ pub def use(handler : Handler) : Nil
   add_handler(handler)
 end
 
+pub def logging(status : Bool) : Nil
+  config.logging = status
+end
+
+pub def serve_static(status : Bool) : Nil
+  config.serve_static = status
+end
+
+pub def public_folder(path : String) : Nil
+  config.public_folder = path
+end
+
 class Holder
   property server : Server?
 

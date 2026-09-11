@@ -14,6 +14,12 @@ pub def join_paths(a : String, b : String) : String
   left + "/" + right
 end
 
+# iyi's File has no `directory?`. A directory accepts `path/.` as an open;
+# a regular file does not.
+pub def directory?(path : String) : Bool
+  File.exists?(path) && File.exists?(join_paths(path, "."))
+end
+
 pub def path_starts_with_slash?(path : String) : Bool
   path.starts_with?('/')
 end

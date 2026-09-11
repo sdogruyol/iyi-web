@@ -1,0 +1,28 @@
+# Extension → media type. Shared by static files and `send_file` so a
+# download and a public folder cannot disagree about `.js`.
+module iyi_web/mime
+
+import iyi_web/codec
+
+using iyi_web/codec
+
+pub def mime_type_of(path : String) : String
+  case extension_of(path)
+  when "html", "htm" then "text/html; charset=utf-8"
+  when "css"         then "text/css; charset=utf-8"
+  when "js"          then "text/javascript; charset=utf-8"
+  when "json"        then "application/json; charset=utf-8"
+  when "svg"         then "image/svg+xml"
+  when "png"         then "image/png"
+  when "jpg", "jpeg" then "image/jpeg"
+  when "gif"         then "image/gif"
+  when "webp"        then "image/webp"
+  when "ico"         then "image/x-icon"
+  when "txt"         then "text/plain; charset=utf-8"
+  when "xml"         then "application/xml"
+  when "pdf"         then "application/pdf"
+  when "woff"        then "font/woff"
+  when "woff2"       then "font/woff2"
+  else                    "application/octet-stream"
+  end
+end

@@ -63,4 +63,9 @@ assert nested.response.status_code == 404, "nested .. is refused"
 fallback = dispatch(static_chain, "GET", "/fallback")
 assert fallback.response.body == "from-route", "unmatched GET reaches the router"
 
+# A directory without index.html must not be File.read — that panics.
+listing = chain([StaticHandler.new(__DIR__), RouteHandler.new(router)])
+dir_hit = dispatch(listing, "GET", "/")
+assert dir_hit.response.status_code == 404, "directory without index falls through"
+
 puts "static_test ok"

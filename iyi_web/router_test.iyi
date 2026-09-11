@@ -236,7 +236,8 @@ end
 guard = RouteHandler.new(guarded)
 blocked = dispatch(guard, "HEAD", "/admin/users")
 assert blocked.response.status_code == 401, "HEAD cannot bypass before_get"
-assert blocked.response.body == "Unauthorized", "HEAD halt keeps the halt body"
+assert blocked.response.body == "", "HEAD halt has no body"
+assert blocked.response.headers["content-length"] == "12", "HEAD halt length of Unauthorized"
 assert blocked["handler"]?.nil?, "GET handler did not run"
 
 traced = Router.new
@@ -296,6 +297,22 @@ end
 boom = dispatch(RouteHandler.new(fails), "GET", "/boom")
 assert boom.response.status_code == 500, "500 status"
 assert boom.response.body == "handled", "error 500 rewrites the body"
+
+# Nested routers used to lose every error handler except 404/500 on the
+# parent. A mounted 401 must still fire.
+auth = Router.new
+auth.error 401 do |env|
+  "login"
+end
+auth.get "/x" do |env|
+  env.response.status_code = 401
+  "raw"
+end
+root = Router.new
+root.mount "/n", auth
+nested = dispatch(RouteHandler.new(root), "GET", "/n/x")
+assert nested.response.status_code == 401, "nested error status"
+assert nested.response.body == "login", "nested error 401 rewrites the body"
 
 # Already-halted context is left alone.
 pre = Context.for(http_request("GET", "/"))

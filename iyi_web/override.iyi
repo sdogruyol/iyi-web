@@ -1,0 +1,23 @@
+# HTML forms can only POST. `_method=PUT` (or PATCH, DELETE) on a POST
+# body is the same lie browsers have been telling servers since Rails.
+# Not in the default chain: `use OverrideMethodHandler.new`.
+module iyi_web/override
+
+import iyi_web/handler
+import iyi_web/context
+
+using iyi_web/handler::{Handler}
+using iyi_web/context::{Context}
+
+pub class OverrideMethodHandler < Handler
+  pub def call(ctx : Context) : Nil
+    if ctx.request.method == "POST"
+      override = ctx.params.body["_method"]?
+      if override
+        up = override.upcase
+        ctx.request.method = up if up.in?("PUT", "PATCH", "DELETE")
+      end
+    end
+    call_next(ctx)
+  end
+end

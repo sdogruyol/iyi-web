@@ -119,7 +119,22 @@ pub class Router
   end
 
   pub def error_handler(status_code : Int32) : HandlerProc?
-    @error_handlers[status_code]?
+    error_handlers[status_code]?
+  end
+
+  # Parent first, then each mount, so a nested `error 404` replaces the
+  # parent's for the same code. Routes and filters already flatten this way.
+  pub def error_handlers : Hash(Int32, HandlerProc)
+    collected = {} of Int32 => HandlerProc
+    @error_handlers.each do |code, handler|
+      collected[code] = handler
+    end
+    @sub_routers.each do |sub|
+      sub.router.error_handlers.each do |code, handler|
+        collected[code] = handler
+      end
+    end
+    collected
   end
 
   pub def routes(base_prefix : String = "") : Array(Route)
@@ -180,11 +195,8 @@ pub class RouteHandler < Handler
     @error_handlers = {} of Int32 => HandlerProc
     @methods = [] of String
 
-    if handler = router.error_handler(404)
-      @error_handlers[404] = handler
-    end
-    if handler = router.error_handler(500)
-      @error_handlers[500] = handler
+    router.error_handlers.each do |code, handler|
+      @error_handlers[code] = handler
     end
 
     seen = {} of String => Bool
@@ -209,9 +221,11 @@ pub class RouteHandler < Handler
       if !allowed.empty? && !allowed.includes?(method)
         ctx.response.headers["Allow"] = allowed.join(", ")
         render_error(ctx, 405)
+        drop_head_body(ctx)
         return
       end
       render_error(ctx, 404)
+      drop_head_body(ctx)
       return
     end
 
@@ -219,20 +233,19 @@ pub class RouteHandler < Handler
     ctx.params.update_url(match.params)
 
     run_filters(ctx, :before, route.method, path)
-    return if ctx.halted?
-
-    if method == "HEAD"
-      body = route.handler.call(ctx)
-      unless ctx.halted?
-        ctx.response.headers["Content-Length"] = body.bytesize.to_s
-        ctx.response.set_body("")
-      end
-    else
-      body = route.handler.call(ctx)
-      ctx.response.set_body(body) unless ctx.halted?
+    if ctx.halted?
+      drop_head_body(ctx)
+      return
     end
 
-    return if ctx.halted?
+    body = route.handler.call(ctx)
+    ctx.response.set_body(body) unless ctx.halted?
+
+    if ctx.halted?
+      drop_head_body(ctx)
+      return
+    end
+
     run_filters(ctx, :after, route.method, path)
 
     if custom = @error_handlers[ctx.response.status_code]?
@@ -240,6 +253,8 @@ pub class RouteHandler < Handler
         ctx.response.set_body(custom.call(ctx))
       end
     end
+
+    drop_head_body(ctx)
   end
 
   pub def lookup(method : String, path : String) : Match(Route)?
@@ -247,6 +262,14 @@ pub class RouteHandler < Handler
     return found if found
     return @tree.find("/GET" + path) if method == "HEAD"
     nil
+  end
+
+  private def drop_head_body(ctx : Context) : Nil
+    return unless ctx.request.method == "HEAD"
+    unless ctx.response.headers.has_key?("Content-Length")
+      ctx.response.headers["Content-Length"] = ctx.response.body.bytesize.to_s
+    end
+    ctx.response.set_body("")
   end
 
   private def allowed_methods(path : String) : Array(String)

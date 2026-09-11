@@ -9,10 +9,16 @@ module iyi_web/context
 import iyi_web/request
 import iyi_web/response
 import iyi_web/params
+import iyi_web/cookies
+import iyi_web/codec
+import iyi_web/mime
 
 using iyi_web/request::{Request}
 using iyi_web/response::{Response}
 using iyi_web/params::{Params}
+using iyi_web/cookies::{CookieJar}
+using iyi_web/codec
+using iyi_web/mime
 
 pub class Context
   @request : Request
@@ -20,10 +26,12 @@ pub class Context
   @params : Params
   @halted : Bool
   @store : Hash(String, String)
+  @cookies : CookieJar?
 
   def initialize(@request : Request, @response : Response, @params : Params)
     @halted = false
     @store = {} of String => String
+    @cookies = nil
   end
 
   def self.for(request : Request) : Context
@@ -62,6 +70,35 @@ pub class Context
     @response.status_code = status_code
     @response.close
     @halted = true
+  end
+
+  pub def cookies : CookieJar
+    current = @cookies
+    return current if current
+    header = @request.headers["cookie"]? || ""
+    jar = CookieJar.parse(header)
+    @cookies = jar
+    jar
+  end
+
+  pub def set_cookie(name : String, value : String, path : String = "/", http_only : Bool = false) : Nil
+    cookie = name + "=" + value + "; Path=" + path
+    cookie = cookie + "; HttpOnly" if http_only
+    @response.headers.add("Set-Cookie", cookie)
+  end
+
+  # Whole-file send. Missing paths and directories 404 rather than panicking
+  # inside File.read; MIME follows the extension unless the caller names one.
+  pub def send_file(path : String, mime_type : String = "") : Nil
+    if !File.exists?(path) || directory?(path)
+      halt(404, "404 Not Found")
+      return
+    end
+
+    type = mime_type.empty? ? mime_type_of(path) : mime_type
+    @response.content_type = type
+    @response.headers["X-Content-Type-Options"] = "nosniff"
+    @response.set_body(File.read(path))
   end
 
   pub def []=(key : String, value : String) : String

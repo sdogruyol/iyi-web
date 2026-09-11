@@ -19,6 +19,8 @@ pub class Config
   @running : Bool
   @serve_static : Bool
   @powered_by_header : Bool
+  @keepalive : Bool
+  @max_keepalive_requests : Int32
   @max_request_body_size : Int32
   @custom_handlers : Array(Handler)
   @shutdown_message : Bool
@@ -37,6 +39,8 @@ pub class Config
     @running = false
     @serve_static = true
     @powered_by_header = false
+    @keepalive = true
+    @max_keepalive_requests = 100
     @max_request_body_size = 8 * 1024 * 1024
     @custom_handlers = [] of Handler
     @shutdown_message = true
@@ -112,6 +116,22 @@ pub class Config
 
   pub def powered_by_header=(value : Bool) : Bool
     @powered_by_header = value
+  end
+
+  pub def keepalive : Bool
+    @keepalive
+  end
+
+  pub def keepalive=(value : Bool) : Bool
+    @keepalive = value
+  end
+
+  pub def max_keepalive_requests : Int32
+    @max_keepalive_requests
+  end
+
+  pub def max_keepalive_requests=(value : Int32) : Int32
+    @max_keepalive_requests = value
   end
 
   pub def max_request_body_size : Int32

@@ -104,15 +104,29 @@ pub class Server
   private def serve_connection(client : IyiSocket) : Nil
     defer client.close
     leftover = ""
-    parsed = read_request(client, leftover)
-    case parsed
-    in Closed
-      return
-    in ParseError
-      write_raw(client, "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request")
-    in Tuple(Request, String)
-      dispatch(client, it[0], false)
+    requests = 0
+    loop do
+      parsed = read_request(client, leftover)
+      case parsed
+      in Closed
+        return
+      in ParseError
+        write_raw(client, "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request")
+        return
+      in Tuple(Request, String)
+        leftover = it[1]
+        keepalive = wants_keepalive?(it[0], requests)
+        dispatch(client, it[0], keepalive)
+        return unless keepalive
+        requests = requests + 1
+      end
     end
+  end
+
+  private def wants_keepalive?(request : Request, already : Int32) : Bool
+    return false unless @config.keepalive
+    return false unless request.keep_alive?
+    already + 1 < @config.max_keepalive_requests
   end
 
   private def dispatch(client : IyiSocket, request : Request, keepalive : Bool) : Nil
@@ -122,8 +136,12 @@ pub class Server
       ctx.response.headers["X-Powered-By"] = "iyi-web"
     end
     @handler.call(ctx)
-    ctx.response.headers["Connection"] = "close"
-    write_raw(client, ctx.response.to_http(request.version.empty? ? "HTTP/1.1" : request.version))
+    if conn = ctx.response.headers["connection"]?
+      keepalive = false if conn.downcase == "close"
+    end
+    ctx.response.headers["Connection"] = keepalive ? "keep-alive" : "close"
+    include_body = request.method != "HEAD"
+    write_raw(client, ctx.response.to_http(request.version.empty? ? "HTTP/1.1" : request.version, include_body))
     @in_flight = @in_flight - 1
   end
 

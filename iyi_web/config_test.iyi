@@ -17,6 +17,8 @@ assert !fresh.running, "not running"
 assert fresh.serve_static, "static on"
 assert !fresh.powered_by_header, "powered-by off"
 assert fresh.max_request_body_size == 8 * 1024 * 1024, "8 MiB"
+assert fresh.keepalive, "keepalive on"
+assert fresh.max_keepalive_requests == 100, "100 keep-alive requests"
 assert fresh.custom_handlers.empty?, "no custom handlers"
 
 fresh.app_name = "demo"

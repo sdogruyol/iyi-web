@@ -71,8 +71,9 @@ pub class Response
 
   # Serialise to the bytes a TCP connection is owed. `Content-Length` is
   # always written here so a keep-alive connection has a frame; a handler
-  # that already set one is left alone.
-  pub def to_http(version : String) : String
+  # that already set one is left alone. HEAD omits the body (RFC 9110 §9.3.2)
+  # but keeps the length a GET of the same resource would have advertised.
+  pub def to_http(version : String, include_body : Bool = true) : String
     unless @headers.has_key?("Content-Type")
       @headers["Content-Type"] = @content_type
     end
@@ -81,6 +82,7 @@ pub class Response
     end
 
     reason = phrase(@status_code)
-    version + " " + @status_code.to_s + " " + reason + "\r\n" + @headers.to_s + "\r\n" + @body
+    payload = include_body ? @body : ""
+    version + " " + @status_code.to_s + " " + reason + "\r\n" + @headers.to_s + "\r\n" + payload
   end
 end

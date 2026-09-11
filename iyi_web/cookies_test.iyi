@@ -1,0 +1,25 @@
+# Cookie header parsing. Setting cookies lives on Context.
+module iyi_web/cookies_test
+
+import iyi_web/cookies
+
+using iyi_web/cookies::{CookieJar}
+
+empty = CookieJar.parse("")
+assert empty.empty?, "empty header"
+
+jar = CookieJar.parse("session=abc; theme=dark")
+assert jar["session"] == "abc", "session"
+assert jar["theme"] == "dark", "theme"
+assert jar.has_key?("session"), "has_key"
+assert !jar.has_key?("missing"), "missing"
+assert jar["nope"]?.nil?, "[]?"
+
+spaced = CookieJar.parse(" a = 1 ; b=2 ")
+assert spaced["a"] == "1", "trimmed name"
+assert spaced["b"] == "2", "second"
+
+encoded = CookieJar.parse("msg=hello+world")
+assert encoded["msg"] == "hello world", "plus in cookie value"
+
+puts "cookies_test ok"
