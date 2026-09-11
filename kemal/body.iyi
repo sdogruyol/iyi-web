@@ -1,0 +1,40 @@
+# What a route handler may return. Kemal coerces anything that is not a
+# `String` to `""` on every request. A trait bound moves that check to
+# the line the handler is written on, and lets a consumer make their own
+# type returnable by implementing it — which Kemal cannot offer, because
+# the coercion is a runtime `is_a?`.
+module kemal/body
+
+pub trait IntoBody
+  abstract def into_body : String
+end
+
+impl IntoBody for String
+  def into_body : String
+    self
+  end
+end
+
+impl IntoBody for Nil
+  def into_body : String
+    ""
+  end
+end
+
+impl IntoBody for Int32
+  def into_body : String
+    to_s
+  end
+end
+
+impl IntoBody for Int64
+  def into_body : String
+    to_s
+  end
+end
+
+impl IntoBody for Bool
+  def into_body : String
+    to_s
+  end
+end

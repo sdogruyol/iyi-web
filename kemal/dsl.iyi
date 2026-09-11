@@ -1,0 +1,131 @@
+# Kemal's DSL, and the reason `using` exists.
+#
+# The original's first line is the whole problem: "Kemal DSL is defined here
+# and it's baked into global scope." `require "kemal"` injects `get` and
+# `before_all` into the importing program. `using` moves that decision to
+# the consumer: the library exports names, the program says which ones it
+# wants unqualified.
+module kemal/dsl
+
+import kemal/body
+import kemal/context
+import kemal/router
+import kemal/handler
+import kemal/config
+import kemal/log
+import kemal/server
+import kemal/static
+
+using kemal/body::{IntoBody}
+using kemal/context::{Context}
+using kemal/router::{Router, RouteHandler}
+using kemal/handler::{Handler, chain}
+using kemal/config
+using kemal/log::{LogHandler}
+using kemal/server::{Server}
+using kemal/static::{StaticHandler}
+
+HTTP_METHODS   = %w(get post put patch delete options head query)
+FILTER_METHODS = %w(get post put patch delete options query)
+
+APP = Router.new
+
+{% for method in HTTP_METHODS %}
+  pub def {{ method.id }}(path : String, &block : Context -> B) : Nil forall B : IntoBody
+    APP.{{ method.id }}(path, &block)
+  end
+{% end %}
+
+pub def before_all(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
+  APP.before(path, &block)
+end
+
+pub def after_all(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
+  APP.after(path, &block)
+end
+
+{% for method in FILTER_METHODS %}
+  pub def before_{{ method.id }}(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
+    APP.before_{{ method.id }}(path, &block)
+  end
+
+  pub def after_{{ method.id }}(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
+    APP.after_{{ method.id }}(path, &block)
+  end
+{% end %}
+
+pub def error(status_code : Int32, &block : Context -> B) : Nil forall B : IntoBody
+  APP.error(status_code, &block)
+end
+
+pub def mount(path : String, router : Router) : Nil
+  APP.mount(path, router)
+end
+
+pub def mount(router : Router) : Nil
+  APP.mount(router)
+end
+
+pub def app : Router
+  APP
+end
+
+pub def use(handler : Handler) : Nil
+  add_handler(handler)
+end
+
+class Holder
+  property server : Server?
+
+  def initialize
+    @server = nil
+  end
+end
+
+HOLDER = Holder.new
+
+pub def run : Nil
+  start(nil)
+end
+
+pub def run(port : Int32) : Nil
+  start(port)
+end
+
+pub def stop : Nil
+  current = HOLDER.server
+  raise "#{config.app_name} is already stopped" unless current
+  config.running = false
+  current.close
+  HOLDER.server = nil
+end
+
+pub def running? : Bool
+  config.running
+end
+
+private def start(port : Int32 | Nil) : Nil
+  cfg = config
+  cfg.port = port if port
+
+  handlers = [] of Handler
+  handlers << LogHandler.new if cfg.logging
+  handlers << StaticHandler.new(cfg.public_folder) if cfg.serve_static
+  cfg.custom_handlers.each { |handler| handlers << handler }
+  handlers << RouteHandler.new(app)
+
+  server = Server.new(chain(handlers), cfg)
+  bound = server.bind(cfg.host, cfg.port)
+  cfg.port = bound
+  HOLDER.server = server
+  cfg.running = true
+
+  unless cfg.env == "test"
+    puts "[" + cfg.env + "] " + cfg.app_name + " is ready to lead at http://" + display_host(cfg.host) + ":" + bound.to_s
+    server.listen
+  end
+end
+
+private def display_host(host : String) : String
+  host == "0.0.0.0" ? "localhost" : host
+end

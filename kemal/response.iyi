@@ -1,0 +1,86 @@
+# The writable half of a request: status, headers, body, and the `close`
+# flag `halt` sets so the rest of the chain writes nothing.
+module kemal/response
+
+import kemal/headers
+import kemal/status
+
+using kemal/headers::{Headers}
+using kemal/status
+
+pub class Response
+  @status_code : Int32
+  @headers : Headers
+  @body : String
+  @closed : Bool
+  @content_type : String
+
+  def initialize
+    @status_code = 200
+    @headers = Headers.new
+    @body = ""
+    @closed = false
+    @content_type = "text/html; charset=utf-8"
+  end
+
+  pub def status_code : Int32
+    @status_code
+  end
+
+  pub def status_code=(code : Int32) : Int32
+    @status_code = code
+  end
+
+  pub def headers : Headers
+    @headers
+  end
+
+  pub def body : String
+    @body
+  end
+
+  pub def closed? : Bool
+    @closed
+  end
+
+  pub def close : Nil
+    @closed = true
+  end
+
+  pub def content_type : String
+    @content_type
+  end
+
+  pub def content_type=(value : String) : String
+    @content_type = value
+    @headers["Content-Type"] = value
+    value
+  end
+
+  pub def print(text : String) : Nil
+    @body = @body + text
+  end
+
+  pub def write(text : String) : Nil
+    print(text)
+  end
+
+  pub def set_body(text : String) : Nil
+    @body = text
+  end
+
+  # Serialise to the bytes a TCP connection is owed. `Content-Length` is
+  # always written here so a keep-alive connection has a frame; a handler
+  # that already set one is left alone.
+  pub def to_http(version : String) : String
+    unless @headers.has_key?("Content-Type")
+      @headers["Content-Type"] = @content_type
+    end
+    unless @headers.has_key?("Content-Length")
+      @headers["Content-Length"] = @body.bytesize.to_s
+    end
+
+    reason = phrase(@status_code)
+    version + " " + @status_code.to_s + " " + reason + "\r\n" + @headers.to_s + "\r\n" + @body
+  end
+end

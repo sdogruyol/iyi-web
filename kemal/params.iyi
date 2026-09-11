@@ -1,0 +1,68 @@
+# URL, query and form params, each their own table, and a combined lookup
+# that prefers the most specific: url, then query, then body. Kemal's
+# `env.params.url["id"]` shape, without Crystal's `HTTP::Params`.
+module kemal/params
+
+import kemal/codec
+import kemal/request
+
+using kemal/codec
+using kemal/request::{Request}
+
+pub class Params
+  @url : Hash(String, String)
+  @query : Hash(String, String)
+  @body : Hash(String, String)
+
+  def initialize(@url : Hash(String, String), @query : Hash(String, String), @body : Hash(String, String))
+  end
+
+  def self.empty : Params
+    Params.new({} of String => String, {} of String => String, {} of String => String)
+  end
+
+  def self.from(request : Request, url : Hash(String, String)) : Params
+    query = parse_query(request.query_string)
+    body = parse_body(request)
+    Params.new(url, query, body)
+  end
+
+  pub def url : Hash(String, String)
+    @url
+  end
+
+  pub def query : Hash(String, String)
+    @query
+  end
+
+  pub def body : Hash(String, String)
+    @body
+  end
+
+  pub def []?(key : String) : String?
+    @url[key]? || @query[key]? || @body[key]?
+  end
+
+  pub def [](key : String) : String
+    self[key]? || raise "no such param #{key.inspect}"
+  end
+
+  pub def has_key?(key : String) : Bool
+    !self[key]?.nil?
+  end
+
+  pub def update_url(url : Hash(String, String)) : Nil
+    @url = url
+  end
+end
+
+private def parse_body(request : Request) : Hash(String, String)
+  return {} of String => String if request.body.empty?
+
+  type = request.content_type.downcase
+  if type == "application/x-www-form-urlencoded"
+    parse_query(request.body)
+  else
+    {} of String => String
+  end
+end

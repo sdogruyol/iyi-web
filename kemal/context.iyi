@@ -1,0 +1,78 @@
+# The value a handler is handed: the request, a writable response, parsed
+# params, and the `halt` flag that stops the rest of the chain.
+#
+# Crystal's Kemal reopens `HTTP::Server::Context`. That is the open-class
+# move R-3 exists to forbid, so this type lives here and is the whole of
+# what a handler sees.
+module kemal/context
+
+import kemal/request
+import kemal/response
+import kemal/params
+
+using kemal/request::{Request}
+using kemal/response::{Response}
+using kemal/params::{Params}
+
+pub class Context
+  @request : Request
+  @response : Response
+  @params : Params
+  @halted : Bool
+  @store : Hash(String, String)
+
+  def initialize(@request : Request, @response : Response, @params : Params)
+    @halted = false
+    @store = {} of String => String
+  end
+
+  def self.for(request : Request) : Context
+    Context.new(request, Response.new, Params.from(request, {} of String => String))
+  end
+
+  def self.for(request : Request, url : Hash(String, String)) : Context
+    Context.new(request, Response.new, Params.from(request, url))
+  end
+
+  pub def request : Request
+    @request
+  end
+
+  pub def response : Response
+    @response
+  end
+
+  pub def params : Params
+    @params
+  end
+
+  pub def halted? : Bool
+    @halted
+  end
+
+  pub def halt(status_code : Int32 = 200, body : String = "") : Nil
+    @response.status_code = status_code
+    @response.set_body(body)
+    @response.close
+    @halted = true
+  end
+
+  pub def redirect(url : String, status_code : Int32 = 302) : Nil
+    @response.headers["Location"] = url
+    @response.status_code = status_code
+    @response.close
+    @halted = true
+  end
+
+  pub def []=(key : String, value : String) : String
+    @store[key] = value
+  end
+
+  pub def []?(key : String) : String?
+    @store[key]?
+  end
+
+  pub def [](key : String) : String
+    @store[key]
+  end
+end

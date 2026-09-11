@@ -1,0 +1,66 @@
+# Static files from a public folder. Whole-file reads, a small extension
+# table, and a `..` refusal so a request cannot walk out of the folder.
+# Directory listing is not served: Kemal's default is the same.
+module kemal/static
+
+import kemal/codec
+import kemal/handler
+import kemal/context
+
+using kemal/codec
+using kemal/handler::{Handler}
+using kemal/context::{Context}
+
+pub class StaticHandler < Handler
+  @root : String
+
+  def initialize(@root : String)
+    super()
+  end
+
+  pub def call(ctx : Context) : Nil
+    return call_next(ctx) unless ctx.request.method.in?("GET", "HEAD")
+
+    relative = ctx.request.path
+    return call_next(ctx) if relative.empty? || !relative.starts_with?('/')
+    return call_next(ctx) if contains_dotdot?(relative)
+
+    path = join_paths(@root, relative)
+    path = join_paths(path, "index.html") if File.exists?(join_paths(path, "index.html"))
+    return call_next(ctx) unless File.exists?(path)
+
+    body = File.read(path)
+    ctx.response.content_type = mime_type(path)
+    if ctx.request.method == "HEAD"
+      ctx.response.headers["Content-Length"] = body.bytesize.to_s
+      ctx.response.set_body("")
+    else
+      ctx.response.set_body(body)
+    end
+  end
+end
+
+private def contains_dotdot?(path : String) : Bool
+  path.split('/').any? { |part| part == ".." }
+end
+
+private def mime_type(path : String) : String
+  case extension_of(path)
+  when "html", "htm" then "text/html; charset=utf-8"
+  when "css"         then "text/css; charset=utf-8"
+  when "js"          then "text/javascript; charset=utf-8"
+  when "json"        then "application/json; charset=utf-8"
+  when "svg"         then "image/svg+xml"
+  when "png"         then "image/png"
+  when "jpg", "jpeg" then "image/jpeg"
+  when "gif"         then "image/gif"
+  when "webp"        then "image/webp"
+  when "ico"         then "image/x-icon"
+  when "txt"         then "text/plain; charset=utf-8"
+  when "xml"         then "application/xml"
+  when "pdf"         then "application/pdf"
+  when "woff"        then "font/woff"
+  when "woff2"       then "font/woff2"
+  else                    "application/octet-stream"
+  end
+end

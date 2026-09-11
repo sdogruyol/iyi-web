@@ -1,0 +1,45 @@
+# A first compile of the HTTP value types, without a server. Exits 0 only
+# when parse, query and header lookup agree with what was written.
+module kemal/codec_test
+
+import kemal/codec
+import kemal/headers
+import kemal/request
+
+using kemal/codec
+using kemal/headers::{Headers}
+using kemal/request::{Request, ParseError, parse_head, with_body, split_target}
+
+assert decode_form("hello+world") == "hello world", "plus is space in forms"
+assert decode_path("%2Ftmp") == "/tmp", "percent-decode path"
+assert parse_query("q=iyi&n=1")["q"] == "iyi", "query q"
+assert parse_query("q=iyi&n=1")["n"] == "1", "query n"
+assert join_paths("/api", "/users") == "/api/users", "join"
+assert matches_path_prefix?("/api", "/api/users"), "prefix hit"
+assert !matches_path_prefix?("/api", "/apiv2"), "prefix miss"
+assert extension_of("/public/app.js") == "js", "extension"
+
+headers = Headers.new
+headers["Content-Type"] = "text/plain"
+assert headers["content-type"] == "text/plain", "header case"
+
+target = split_target("/search?q=one")
+assert target[0] == "/search", "split path"
+assert target[1] == "q=one", "split query"
+
+head = "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n"
+# parse_head wants the block without the trailing blank, as the connection
+# reader will slice it. The test feeds the request-line and headers only.
+block = "GET /hello HTTP/1.1\r\nHost: localhost"
+case parse_head(block)
+in ParseError
+  assert false, "parse_head failed"
+in Request
+  assert it.method == "GET", "method"
+  assert it.path == "/hello", "path"
+  assert it.host == "localhost", "host"
+  req = with_body(it, "abc")
+  assert req.body == "abc", "body"
+end
+
+puts "codec_test ok"

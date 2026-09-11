@@ -1,0 +1,77 @@
+# A real TCP round-trip: bind an ephemeral port, GET a route, POST a body,
+# hit a 404, then exit. Closing the listen socket does not wake a fiber
+# parked in `wait_readable`, so the client ends the process rather than
+# joining the accept loop.
+module kemal/server_test
+
+import std/socket
+import kemal/router
+import kemal/handler
+import kemal/server
+import kemal/config
+
+using std/socket::{IyiSocket}
+using kemal/router::{Router, RouteHandler}
+using kemal/handler::{chain}
+using kemal/server::{Server}
+using kemal/config
+
+lib LibExit
+  fun exit(status : Int32) : NoReturn
+end
+
+def exchange(port : Int32, request : String) : String
+  client = IyiSocket.connect("127.0.0.1", port)
+  client.write(request)
+  buffer = ""
+  case wait_readable(client.fd)
+  in Cancelled
+  in Nil
+    buffer = client.read(8192)
+  end
+  client.close
+  buffer
+end
+
+router = Router.new
+router.get "/" do |env|
+  "home"
+end
+router.get "/hello/:name" do |env|
+  "Hello, #{env.params.url["name"]}!"
+end
+router.post "/echo" do |env|
+  env.request.body
+end
+
+cfg = config
+cfg.logging = false
+cfg.serve_static = false
+
+server = Server.new(chain([RouteHandler.new(router)]), cfg)
+port = server.bind("127.0.0.1", 0)
+
+group do |g|
+  g.spawn do
+    home = exchange(port, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+    assert home.includes?("200 OK"), "GET / status"
+    assert home.includes?("home"), "GET / body"
+
+    named = exchange(port, "GET /hello/dunya HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+    assert named.includes?("Hello, dunya!"), "url param over TCP"
+
+    echoed = exchange(port, "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
+    assert echoed.includes?("hello"), "POST body echo"
+
+    missing = exchange(port, "GET /nope HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+    assert missing.includes?("404"), "404 over TCP"
+
+    LibExit.exit(0)
+    0
+  end
+
+  g.spawn do
+    server.listen
+    0
+  end
+end

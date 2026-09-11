@@ -1,0 +1,150 @@
+# Application settings. A value, not a pile of class variables: the
+# original's `Config::INSTANCE` and the five arrays beside it were why
+# tests had to `clear` the world between examples. The DSL still has one
+# process-wide config, because that is the Sinatra contract; it is this
+# object rather than a handful of globals.
+module kemal/config
+
+import kemal/handler
+
+using kemal/handler::{Handler}
+
+pub class Config
+  @app_name : String
+  @host : String
+  @port : Int32
+  @env : String
+  @public_folder : String
+  @logging : Bool
+  @running : Bool
+  @serve_static : Bool
+  @powered_by_header : Bool
+  @max_request_body_size : Int32
+  @custom_handlers : Array(Handler)
+  @shutdown_message : Bool
+
+  def initialize
+    @app_name = "Kemal"
+    @host = "0.0.0.0"
+    @port = 3000
+    env = Program.env("KEMAL_ENV")
+    @env = env ? env : "development"
+    port_env = Program.env("PORT")
+    parsed = port_env ? port_env.to_i? : nil
+    @port = parsed ? parsed : 3000
+    @public_folder = "./public"
+    @logging = true
+    @running = false
+    @serve_static = true
+    @powered_by_header = false
+    @max_request_body_size = 8 * 1024 * 1024
+    @custom_handlers = [] of Handler
+    @shutdown_message = true
+  end
+
+  pub def app_name : String
+    @app_name
+  end
+
+  pub def app_name=(value : String) : String
+    @app_name = value
+  end
+
+  pub def host : String
+    @host
+  end
+
+  pub def host=(value : String) : String
+    @host = value
+  end
+
+  pub def port : Int32
+    @port
+  end
+
+  pub def port=(value : Int32) : Int32
+    @port = value
+  end
+
+  pub def env : String
+    @env
+  end
+
+  pub def env=(value : String) : String
+    @env = value
+  end
+
+  pub def public_folder : String
+    @public_folder
+  end
+
+  pub def public_folder=(value : String) : String
+    @public_folder = value
+  end
+
+  pub def logging : Bool
+    @logging
+  end
+
+  pub def logging=(value : Bool) : Bool
+    @logging = value
+  end
+
+  pub def running : Bool
+    @running
+  end
+
+  pub def running=(value : Bool) : Bool
+    @running = value
+  end
+
+  pub def serve_static : Bool
+    @serve_static
+  end
+
+  pub def serve_static=(value : Bool) : Bool
+    @serve_static = value
+  end
+
+  pub def powered_by_header : Bool
+    @powered_by_header
+  end
+
+  pub def powered_by_header=(value : Bool) : Bool
+    @powered_by_header = value
+  end
+
+  pub def max_request_body_size : Int32
+    @max_request_body_size
+  end
+
+  pub def max_request_body_size=(value : Int32) : Int32
+    @max_request_body_size = value
+  end
+
+  pub def shutdown_message : Bool
+    @shutdown_message
+  end
+
+  pub def custom_handlers : Array(Handler)
+    @custom_handlers
+  end
+
+  pub def add_handler(handler : Handler) : Nil
+    @custom_handlers << handler
+  end
+
+  pub def development? : Bool
+    @env == "development"
+  end
+end
+
+INSTANCE = Config.new
+
+pub def config : Config
+  INSTANCE
+end
+
+pub def add_handler(handler : Handler) : Nil
+  INSTANCE.add_handler(handler)
+end

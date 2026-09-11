@@ -1,0 +1,10 @@
+module examples/hello
+
+import kemal/dsl
+using kemal/dsl
+
+get "/" do |env|
+  "Hello World!"
+end
+
+run

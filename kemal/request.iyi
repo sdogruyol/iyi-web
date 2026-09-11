@@ -1,0 +1,167 @@
+# An HTTP/1.1 request as a value: method, path, query, headers, body.
+#
+# Parsed from bytes, not from Crystal's `HTTP::Request`. The parser is
+# strict about the request-line and generous about header names, which is
+# the split RFC 9112 actually asks for.
+module kemal/request
+
+import kemal/codec
+import kemal/headers
+
+using kemal/codec
+using kemal/headers::{Headers}
+
+pub struct ParseError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+end
+
+impl Error for ParseError
+  def message : String
+    @message
+  end
+end
+
+pub class Request
+  def initialize(@method : String, @path : String, @query_string : String, @version : String, @headers : Headers, @body : String)
+  end
+
+  pub def method : String
+    @method
+  end
+
+  pub def path : String
+    @path
+  end
+
+  pub def query_string : String
+    @query_string
+  end
+
+  pub def version : String
+    @version
+  end
+
+  pub def headers : Headers
+    @headers
+  end
+
+  pub def body : String
+    @body
+  end
+
+  pub def content_type : String
+    header = @headers["content-type"]?
+    return "" unless header
+    semi = header.index(';')
+    semi ? header[0, semi].strip : header.strip
+  end
+
+  pub def content_length : Int32
+    raw = @headers["content-length"]?
+    return 0 unless raw
+    raw.to_i? || 0
+  end
+
+  pub def keep_alive? : Bool
+    conn = @headers["connection"]?
+    if conn
+      lowered = conn.downcase
+      return false if lowered == "close"
+      return true if lowered == "keep-alive"
+    end
+    @version == "HTTP/1.1"
+  end
+
+  pub def host : String
+    @headers["host"]? || ""
+  end
+end
+
+# Split a request-target into path and query, percent-decoding the path.
+# The query is left encoded; `parse_query` is what turns it into a table,
+# and form bodies share that function.
+pub def split_target(target : String) : Tuple(String, String)
+  q = target.index('?')
+  if q
+    path = decode_path(target[0, q])
+    query = target[q + 1, target.bytesize - q - 1]
+    {path.empty? ? "/" : path, query}
+  else
+    path = decode_path(target)
+    {path.empty? ? "/" : path, ""}
+  end
+end
+
+# Parse a complete header block (request-line + headers, no body) that
+# already had its trailing `\r\n\r\n` stripped.
+pub def parse_head(block : String) : Request | ParseError
+  lines = split_headers(block)
+  return ParseError.new("empty request") if lines.empty?
+
+  parts = split_spaces(lines[0])
+  return ParseError.new("malformed request line") if parts.size < 3
+
+  method = parts[0]
+  target = parts[1]
+  version = parts[2]
+  return ParseError.new("unsupported method") if method.empty?
+  return ParseError.new("path must start with /") unless target.starts_with?('/') || target == "*"
+
+  path_and_query = split_target(target == "*" ? "/" : target)
+  headers = Headers.new
+
+  index = 1
+  while index < lines.size
+    line = lines[index]
+    colon = line.index(':')
+    return ParseError.new("malformed header") unless colon
+    name = line[0, colon].strip
+    value = line[colon + 1, line.bytesize - colon - 1].strip
+    return ParseError.new("empty header name") if name.empty?
+    headers.add(name, value)
+    index = index + 1
+  end
+
+  Request.new(method, path_and_query[0], path_and_query[1], version, headers, "")
+end
+
+pub def with_body(request : Request, body : String) : Request
+  Request.new(request.method, request.path, request.query_string, request.version, request.headers, body)
+end
+
+private def split_headers(block : String) : Array(String)
+  lines = [] of String
+  start = 0
+  index = 0
+  while index < block.bytesize
+    if block[index] == '\r' && index + 1 < block.bytesize && block[index + 1] == '\n'
+      lines << block[start, index - start]
+      index = index + 2
+      start = index
+    else
+      index = index + 1
+    end
+  end
+  lines << block[start, block.bytesize - start] if start < block.bytesize
+  lines
+end
+
+private def split_spaces(line : String) : Array(String)
+  parts = [] of String
+  start = 0
+  index = 0
+  while index < line.bytesize
+    if line[index] == ' '
+      parts << line[start, index - start] unless index == start
+      index = index + 1
+      start = index
+    else
+      index = index + 1
+    end
+  end
+  parts << line[start, line.bytesize - start] unless start == line.bytesize
+  parts
+end

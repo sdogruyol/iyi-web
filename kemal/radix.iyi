@@ -1,0 +1,147 @@
+# A segment trie keyed on HTTP method + path. Not a compressed radix tree:
+# the nodes are one path segment each, which is enough for the routes a
+# Kemal app actually writes and far cheaper to get right than a compressed
+# form. `:name` captures a segment, `*name` captures the rest.
+#
+# The tree is generic over the payload so the router can store a handler
+# without this module knowing what a handler is.
+module kemal/radix
+
+pub class Match(T)
+  def initialize(@payload : T, @params : Hash(String, String))
+  end
+
+  pub def payload : T
+    @payload
+  end
+
+  pub def params : Hash(String, String)
+    @params
+  end
+
+  pub def found? : Bool
+    true
+  end
+end
+
+pub class Tree(T)
+  @root : Node(T)
+
+  def initialize
+    @root = Node(T).new
+  end
+
+  pub def find(path : String) : Match(T)?
+    params = {} of String => String
+    node = walk(@root, split_segments(path), 0, params)
+    return nil unless node
+    payload = node.payload
+    return nil unless payload
+    Match(T).new(payload, params)
+  end
+
+  pub def add(path : String, payload : T) : Nil
+    node = @root
+    split_segments(path).each do |segment|
+      node = node.child_for(segment)
+    end
+    node.payload = payload
+  end
+
+  private def walk(node : Node(T), segments : Array(String), index : Int32, params : Hash(String, String)) : Node(T)?
+    if index == segments.size
+      return node if node.payload
+      if glob = node.catch_all
+        if name = node.catch_all_name
+          params[name] = ""
+        end
+        return glob if glob.payload
+      end
+      return nil
+    end
+
+    segment = segments[index]
+
+    if child = node.static[segment]?
+      found = walk(child, segments, index + 1, params)
+      return found if found
+    end
+
+    if child = node.param
+      if name = node.param_name
+        params[name] = segment
+      end
+      found = walk(child, segments, index + 1, params)
+      return found if found
+      params.delete(name) if name
+    end
+
+    if glob = node.catch_all
+      if name = node.catch_all_name
+        rest = [] of String
+        rest_index = index
+        while rest_index < segments.size
+          rest << segments[rest_index]
+          rest_index = rest_index + 1
+        end
+        params[name] = rest.join("/")
+      end
+      return glob
+    end
+
+    nil
+  end
+
+  private def split_segments(path : String) : Array(String)
+    trimmed = path.starts_with?('/') ? path.lchop('/') : path
+    return [] of String if trimmed.empty?
+    trimmed.split('/')
+  end
+end
+
+private class Node(T)
+  getter static : Hash(String, Node(T))
+  property param : Node(T)?
+  property param_name : String?
+  property catch_all : Node(T)?
+  property catch_all_name : String?
+  property payload : T?
+
+  def initialize
+    @static = {} of String => Node(T)
+    @param = nil
+    @param_name = nil
+    @catch_all = nil
+    @catch_all_name = nil
+    @payload = nil
+  end
+
+  def child_for(segment : String) : Node(T)
+    if segment.starts_with?('*')
+      name = segment.lchop('*')
+      child = @catch_all
+      unless child
+        child = Node(T).new
+        @catch_all = child
+        @catch_all_name = name
+      end
+      child
+    elsif segment.starts_with?(':')
+      name = segment.lchop(':')
+      child = @param
+      unless child
+        child = Node(T).new
+        @param = child
+        @param_name = name
+      end
+      child
+    else
+      child = @static[segment]?
+      unless child
+        child = Node(T).new
+        @static[segment] = child
+      end
+      child
+    end
+  end
+end

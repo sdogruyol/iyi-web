@@ -1,0 +1,64 @@
+# HTTP headers, case-insensitive on lookup and insertion-ordered on write.
+#
+# Crystal's `HTTP::Headers` is a class the library owns, so Kemal reopens it.
+# R-3 forbids that, so this is a type this module owns. A consumer that wants
+# a header writes `ctx.request.headers["content-type"]` and the case of the
+# name they used does not matter.
+module kemal/headers
+
+pub class Headers
+  @pairs : Array(Tuple(String, String))
+
+  def initialize
+    @pairs = [] of Tuple(String, String)
+  end
+
+  pub def []?(name : String) : String?
+    key = name.downcase
+    found = nil
+    @pairs.each do |pair|
+      found = pair[1] if pair[0].downcase == key
+    end
+    found
+  end
+
+  pub def [](name : String) : String
+    self[name]? || raise "no such header #{name.inspect}"
+  end
+
+  pub def []=(name : String, value : String) : String
+    key = name.downcase
+    index = 0
+    while index < @pairs.size
+      if @pairs[index][0].downcase == key
+        @pairs[index] = {name, value}
+        return value
+      end
+      index = index + 1
+    end
+    @pairs << {name, value}
+    value
+  end
+
+  pub def add(name : String, value : String) : Nil
+    @pairs << {name, value}
+  end
+
+  pub def has_key?(name : String) : Bool
+    !self[name]?.nil?
+  end
+
+  pub def each(& : String, String -> Nil) : Nil
+    @pairs.each { |pair| yield pair[0], pair[1] }
+  end
+
+  pub def to_s : String
+    parts = [] of String
+    @pairs.each { |pair| parts << pair[0] + ": " + pair[1] + "\r\n" }
+    parts.join
+  end
+
+  pub def empty? : Bool
+    @pairs.empty?
+  end
+end

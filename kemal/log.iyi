@@ -1,0 +1,20 @@
+# Request logging. One line per request, after the handler has run, so the
+# status is the one that was actually sent.
+module kemal/log
+
+import kemal/handler
+import kemal/context
+import std/time
+
+using kemal/handler::{Handler}
+using kemal/context::{Context}
+using std/time::{Time}
+
+pub class LogHandler < Handler
+  pub def call(ctx : Context) : Nil
+    started = Time.monotonic
+    call_next(ctx)
+    elapsed = Time.monotonic - started
+    puts ctx.request.method + " " + ctx.request.path + " " + ctx.response.status_code.to_s + " " + elapsed.total_milliseconds.to_s + "ms"
+  end
+end

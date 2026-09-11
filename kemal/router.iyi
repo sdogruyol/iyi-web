@@ -1,0 +1,296 @@
+# Modular routing, ported from Kemal's `Router` and then actually dispatched
+# rather than flattened into Crystal globals.
+#
+# Registration returns a value. `Kemal::RouteHandler::INSTANCE` and the
+# three singletons beside it are gone: they were the workaround a clean
+# sheet is the moment to stop writing.
+module kemal/router
+
+import kemal/body
+import kemal/codec
+import kemal/context
+import kemal/radix
+import kemal/handler
+
+using kemal/body::{IntoBody}
+using kemal/codec
+using kemal/context::{Context}
+using kemal/radix::{Tree, Match}
+using kemal/handler::{Handler}
+
+alias HandlerProc = Context -> String
+
+HTTP_METHODS   = %w(get post put patch delete options head query)
+FILTER_METHODS = %w(get post put patch delete options query)
+
+pub struct Route
+  def initialize(@method : String, @path : String, @handler : Context -> String)
+  end
+
+  pub def method : String
+    @method
+  end
+
+  pub def path : String
+    @path
+  end
+
+  pub def handler : Context -> String
+    @handler
+  end
+end
+
+private record RouteDefinition,
+  method : String,
+  path : String,
+  handler : Context -> String
+
+private record FilterDefinition,
+  kind : Symbol,
+  method : String,
+  path : String,
+  handler : Context -> String
+
+private record SubRouter,
+  path : String,
+  router : Router
+
+pub class Router
+  @routes : Array(RouteDefinition)
+  @filters : Array(FilterDefinition)
+  @sub_routers : Array(SubRouter)
+  @error_handlers : Hash(Int32, HandlerProc)
+
+  def initialize(@prefix : String = "")
+    @routes = [] of RouteDefinition
+    @filters = [] of FilterDefinition
+    @sub_routers = [] of SubRouter
+    @error_handlers = {} of Int32 => HandlerProc
+  end
+
+  pub def prefix : String
+    @prefix
+  end
+
+  {% for method in HTTP_METHODS %}
+    pub def {{ method.id }}(path : String, &block : Context -> B) : Nil forall B : IntoBody
+      add_route({{ method.upcase }}, path, &block)
+    end
+  {% end %}
+
+  pub def before(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
+    add_filter(:before, "ALL", path, &block)
+  end
+
+  pub def after(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
+    add_filter(:after, "ALL", path, &block)
+  end
+
+  {% for method in FILTER_METHODS %}
+    pub def before_{{ method.id }}(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
+      add_filter(:before, {{ method.upcase }}, path, &block)
+    end
+
+    pub def after_{{ method.id }}(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
+      add_filter(:after, {{ method.upcase }}, path, &block)
+    end
+  {% end %}
+
+  # The sub-router arrives as a block parameter. Kemal's original used
+  # `with sub_router yield`, which changes the block's `self` — a shape
+  # no `& : Router -> Nil` annotation can describe (SPEC.md IV.2). One
+  # extra `|r|` is the rule being paid rather than avoided.
+  pub def namespace(path : String, & : Router -> Nil) : Nil
+    sub_router = Router.new
+    yield sub_router
+    @sub_routers << SubRouter.new(path: path, router: sub_router)
+  end
+
+  pub def mount(path : String, router : Router) : Nil
+    @sub_routers << SubRouter.new(path: path, router: router)
+  end
+
+  pub def mount(router : Router) : Nil
+    mount("", router)
+  end
+
+  pub def error(status_code : Int32, &block : Context -> B) : Nil forall B : IntoBody
+    @error_handlers[status_code] = ->(ctx : Context) { block.call(ctx).into_body }
+  end
+
+  pub def error_handler(status_code : Int32) : HandlerProc?
+    @error_handlers[status_code]?
+  end
+
+  pub def routes(base_prefix : String = "") : Array(Route)
+    full_prefix = join_paths(base_prefix, @prefix)
+    collected = [] of Route
+
+    @routes.each do |route|
+      collected << Route.new(route.method, join_paths(full_prefix, route.path), route.handler)
+    end
+
+    @sub_routers.each do |sub|
+      collected.concat(sub.router.routes(join_paths(full_prefix, sub.path)))
+    end
+
+    collected
+  end
+
+  pub def filters(base_prefix : String = "") : Array(Tuple(Symbol, String, String, HandlerProc))
+    full_prefix = join_paths(base_prefix, @prefix)
+    collected = [] of Tuple(Symbol, String, String, HandlerProc)
+
+    @filters.each do |filter|
+      collected << {filter.kind, filter.method, join_paths(full_prefix, filter.path), filter.handler}
+    end
+
+    @sub_routers.each do |sub|
+      collected.concat(sub.router.filters(join_paths(full_prefix, sub.path)))
+    end
+
+    collected
+  end
+
+  private def add_route(method : String, path : String, &block : Context -> B) : Nil forall B : IntoBody
+    raise "path must start with /" unless path_starts_with_slash?(path)
+    handler = ->(ctx : Context) { block.call(ctx).into_body }
+    @routes << RouteDefinition.new(method: method, path: path, handler: handler)
+  end
+
+  private def add_filter(kind : Symbol, method : String, path : String, &block : Context -> B) : Nil forall B : IntoBody
+    handler = ->(ctx : Context) { block.call(ctx).into_body }
+    @filters << FilterDefinition.new(kind: kind, method: method, path: path, handler: handler)
+  end
+end
+
+# The last handler in the chain: look the route up, run before-filters,
+# call the block, run after-filters, and render 404/405 when nothing
+# matched. HEAD falls back to GET the way RFC 9110 §9.3.1 asks.
+pub class RouteHandler < Handler
+  @tree : Tree(Route)
+  @filters : Array(Tuple(Symbol, String, String, HandlerProc))
+  @error_handlers : Hash(Int32, HandlerProc)
+  @methods : Array(String)
+
+  def initialize(router : Router)
+    super()
+    @tree = Tree(Route).new
+    @filters = router.filters
+    @error_handlers = {} of Int32 => HandlerProc
+    @methods = [] of String
+
+    if handler = router.error_handler(404)
+      @error_handlers[404] = handler
+    end
+    if handler = router.error_handler(500)
+      @error_handlers[500] = handler
+    end
+
+    seen = {} of String => Bool
+    router.routes.each do |route|
+      @tree.add("/" + route.method + route.path, route)
+      unless seen.has_key?(route.method)
+        @methods << route.method
+        seen[route.method] = true
+      end
+    end
+  end
+
+  pub def call(ctx : Context) : Nil
+    return if ctx.halted?
+
+    method = ctx.request.method
+    path = ctx.request.path
+    match = lookup(method, path)
+
+    unless match
+      allowed = allowed_methods(path)
+      if !allowed.empty? && !allowed.includes?(method)
+        ctx.response.headers["Allow"] = allowed.join(", ")
+        render_error(ctx, 405)
+        return
+      end
+      render_error(ctx, 404)
+      return
+    end
+
+    route = match.payload
+    ctx.params.update_url(match.params)
+
+    run_filters(ctx, :before, route.method, path)
+    return if ctx.halted?
+
+    if method == "HEAD"
+      body = route.handler.call(ctx)
+      unless ctx.halted?
+        ctx.response.headers["Content-Length"] = body.bytesize.to_s
+        ctx.response.set_body("")
+      end
+    else
+      body = route.handler.call(ctx)
+      ctx.response.set_body(body) unless ctx.halted?
+    end
+
+    return if ctx.halted?
+    run_filters(ctx, :after, route.method, path)
+
+    if custom = @error_handlers[ctx.response.status_code]?
+      if ctx.response.status_code >= 400
+        ctx.response.set_body(custom.call(ctx))
+      end
+    end
+  end
+
+  pub def lookup(method : String, path : String) : Match(Route)?
+    found = @tree.find("/" + method + path)
+    return found if found
+    return @tree.find("/GET" + path) if method == "HEAD"
+    nil
+  end
+
+  private def allowed_methods(path : String) : Array(String)
+    allowed = [] of String
+    @methods.each do |method|
+      if @tree.find("/" + method + path)
+        allowed << method
+      end
+    end
+    if allowed.includes?("GET") && !allowed.includes?("HEAD")
+      allowed << "HEAD"
+    end
+    allowed
+  end
+
+  private def run_filters(ctx : Context, kind : Symbol, method : String, path : String) : Nil
+    @filters.each do |filter|
+      next unless filter[0] == kind
+      next unless filter[1].in?("ALL", method)
+      next unless filter_matches?(filter[2], path)
+      filter[3].call(ctx)
+      return if ctx.halted?
+    end
+  end
+
+  private def filter_matches?(pattern : String, path : String) : Bool
+    return true if pattern == "*" || pattern == "/*"
+    trimmed = pattern.ends_with?("/*") ? pattern[0, pattern.bytesize - 2] : pattern
+    matches_path_prefix?(trimmed, path) || path == trimmed
+  end
+
+  private def render_error(ctx : Context, status : Int32) : Nil
+    ctx.response.status_code = status
+    if handler = @error_handlers[status]?
+      ctx.response.set_body(handler.call(ctx))
+    else
+      ctx.response.content_type = "text/html; charset=utf-8"
+      if status == 404
+        ctx.response.set_body("404 Not Found")
+      elsif status == 405
+        ctx.response.set_body("405 Method Not Allowed")
+      else
+        ctx.response.set_body(status.to_s)
+      end
+    end
+  end
+end

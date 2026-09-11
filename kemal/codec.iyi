@@ -1,0 +1,138 @@
+# Byte-level HTTP helpers the rest of the framework shares: percent-coding,
+# path joining, and the scans a parser does because the prelude has no
+# substring `index`.
+#
+# Kept in its own module so request, params and static files compile against
+# declarations rather than against one another's bodies (R-1).
+module kemal/codec
+
+pub def join_paths(a : String, b : String) : String
+  left = a.chomp('/')
+  right = b.starts_with?('/') ? b.lchop('/') : b
+  return "/" + right if left.empty?
+  return left if right.empty?
+  left + "/" + right
+end
+
+pub def path_starts_with_slash?(path : String) : Bool
+  path.starts_with?('/')
+end
+
+# True when *path* is *prefix* or a descendant of it. `/api` matches `/api`
+# and `/api/users`, and does not match `/apiv2`.
+pub def matches_path_prefix?(prefix : String, path : String) : Bool
+  return true if prefix.empty? || prefix == "/"
+  trimmed = prefix.chomp('/')
+  return true if path == trimmed
+  path.starts_with?(trimmed + "/")
+end
+
+pub def find_substring(haystack : String, needle : String) : Int32?
+  return 0 if needle.empty?
+  return nil if needle.bytesize > haystack.bytesize
+
+  limit = haystack.bytesize - needle.bytesize
+  start = 0
+  while start <= limit
+    index = 0
+    while index < needle.bytesize && haystack.to_unsafe[start + index] == needle.to_unsafe[index]
+      index = index + 1
+    end
+    return start if index == needle.bytesize
+    start = start + 1
+  end
+  nil
+end
+
+pub def rindex_char(text : String, char : Char) : Int32?
+  wanted = char.ord.to_u8
+  index = text.bytesize - 1
+  while index >= 0
+    return index if text.to_unsafe[index] == wanted
+    index = index - 1
+  end
+  nil
+end
+
+# RFC 3986 percent-decoding, and `+` as space for form bodies. Invalid
+# `%` sequences are left as written rather than rejected: a path is not
+# a place to 400 over a client that sent `%GG`.
+pub def decode(text : String, form : Bool = false) : String
+  bytes = Pointer(UInt8).malloc(text.bytesize.to_u64)
+  written = 0
+  index = 0
+  while index < text.bytesize
+    ch = text[index]
+    if form && ch == '+'
+      bytes[written] = 32_u8
+      written = written + 1
+      index = index + 1
+    elsif ch == '%' && index + 2 < text.bytesize
+      hi = hex_value(text[index + 1])
+      lo = hex_value(text[index + 2])
+      if hi >= 0 && lo >= 0
+        bytes[written] = (hi * 16 + lo).to_u8
+        written = written + 1
+        index = index + 3
+      else
+        bytes[written] = ch.ord.to_u8
+        written = written + 1
+        index = index + 1
+      end
+    else
+      bytes[written] = ch.ord.to_u8
+      written = written + 1
+      index = index + 1
+    end
+  end
+
+  String.new(written) do |target|
+    target.copy_from(bytes, written)
+  end
+end
+
+pub def decode_path(text : String) : String
+  decode(text, false)
+end
+
+pub def decode_form(text : String) : String
+  decode(text, true)
+end
+
+# `a=1&b=two+words` into a last-wins table. Empty values are kept, because
+# `?flag=` is a present flag with an empty string, not an absent one.
+pub def parse_query(text : String) : Hash(String, String)
+  table = {} of String => String
+  return table if text.empty?
+
+  text.split('&').each do |pair|
+    next if pair.empty?
+    eq = pair.index('=')
+    if eq
+      name = decode_form(pair[0, eq])
+      value = decode_form(pair[eq + 1, pair.bytesize - eq - 1])
+      table[name] = value unless name.empty?
+    else
+      name = decode_form(pair)
+      table[name] = "" unless name.empty?
+    end
+  end
+  table
+end
+
+pub def extension_of(path : String) : String
+  slash = rindex_char(path, '/')
+  start = slash ? slash + 1 : 0
+  name = path[start, path.bytesize - start]
+  dot = rindex_char(name, '.')
+  return "" unless dot
+  return "" if dot == 0
+  name[dot + 1, name.bytesize - dot - 1].downcase
+end
+
+private def hex_value(char : Char) : Int32
+  return char.ord - 48 if char >= '0' && char <= '9'
+  return char.ord - 65 + 10 if char >= 'A' && char <= 'F'
+  return char.ord - 97 + 10 if char >= 'a' && char <= 'f'
+  -1
+end

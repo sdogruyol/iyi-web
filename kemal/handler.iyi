@@ -1,0 +1,50 @@
+# Middleware as a class, not a mixin. Crystal's `HTTP::Handler` is a module
+# you `include`; iyi has no `include`, and R-3 would refuse one that reopened
+# a foreign type anyway. Subclass `Handler`, override `call`, and pass the
+# request on with `call_next`.
+module kemal/handler
+
+import kemal/context
+
+using kemal/context::{Context}
+
+pub class Handler
+  @next_handler : Handler?
+
+  def initialize
+    @next_handler = nil
+  end
+
+  pub def next_handler=(handler : Handler) : Handler
+    @next_handler = handler
+    handler
+  end
+
+  pub def next_handler : Handler?
+    @next_handler
+  end
+
+  pub def call(ctx : Context) : Nil
+    call_next(ctx)
+  end
+
+  pub def call_next(ctx : Context) : Nil
+    return if ctx.halted?
+    if handler = @next_handler
+      handler.call(ctx)
+    end
+  end
+end
+
+# Build a chain: handlers[0].next = handlers[1], … . The last one is the
+# router. Returns the head.
+pub def chain(handlers : Array(Handler)) : Handler
+  raise "handler chain is empty" if handlers.empty?
+
+  index = 0
+  while index + 1 < handlers.size
+    handlers[index].next_handler = handlers[index + 1]
+    index = index + 1
+  end
+  handlers[0]
+end

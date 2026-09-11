@@ -1,0 +1,12 @@
+# Build products
+/hello
+/app
+/site
+/examples/hello
+/examples/json
+*.iyimod
+/mods/
+
+# Local binaries
+/bin/
+/tmp/
