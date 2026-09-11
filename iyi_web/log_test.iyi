@@ -1,0 +1,25 @@
+# Request logging must not swallow the route's body or status.
+module iyi_web/log_test
+
+import iyi_web/log
+import iyi_web/router
+import iyi_web/handler
+import iyi_web/harness
+
+using iyi_web/log::{LogHandler}
+using iyi_web/router::{Router, RouteHandler}
+using iyi_web/handler::{chain}
+using iyi_web/harness
+
+router = Router.new
+router.get "/log" do |env|
+  env.response.status_code = 201
+  "logged"
+end
+
+head = chain([LogHandler.new, RouteHandler.new(router)])
+ctx = dispatch(head, "GET", "/log")
+assert ctx.response.status_code == 201, "log handler preserves status"
+assert ctx.response.body == "logged", "log handler preserves body"
+
+puts "log_test ok"

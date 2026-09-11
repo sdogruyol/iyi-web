@@ -1,7 +1,7 @@
-# A real TCP round-trip: bind an ephemeral port, exercise verbs, params,
-# forms, redirects, a bad request, then exit. Closing the listen socket
-# does not wake a fiber parked in `wait_readable`, so the client ends the
-# process rather than joining the accept loop.
+# A real TCP round-trip. Assertions read the status line, headers and body
+# as frames, not as a bag of substrings. Closing the listen socket does not
+# wake `wait_readable`, so the client ends the process rather than joining
+# the accept loop.
 module iyi_web/server_test
 
 import std/socket
@@ -9,12 +9,14 @@ import iyi_web/router
 import iyi_web/handler
 import iyi_web/server
 import iyi_web/config
+import iyi_web/harness
 
 using std/socket::{IyiSocket}
 using iyi_web/router::{Router, RouteHandler}
 using iyi_web/handler::{chain}
 using iyi_web/server::{Server}
 using iyi_web/config
+using iyi_web/harness
 
 lib LibExit
   fun exit(status : Int32) : NoReturn
@@ -24,10 +26,15 @@ def exchange(port : Int32, request : String) : String
   client = IyiSocket.connect("127.0.0.1", port)
   client.write(request)
   buffer = ""
-  case wait_readable(client.fd)
-  in Cancelled
-  in Nil
-    buffer = client.read(8192)
+  loop do
+    case wait_readable(client.fd)
+    in Cancelled
+      break
+    in Nil
+      chunk = client.read(4096)
+      break if chunk.empty?
+      buffer = buffer + chunk
+    end
   end
   client.close
   buffer
@@ -72,40 +79,62 @@ port = server.bind("127.0.0.1", 0)
 group do |g|
   g.spawn do
     home = exchange(port, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    assert home.includes?("200 OK"), "GET / status"
-    assert home.includes?("home"), "GET / body"
-    assert home.includes?("X-Powered-By: iyi-web"), "powered-by"
-    assert home.includes?("Connection: close"), "close"
+    assert status_line(home) == "HTTP/1.1 200 OK", "GET / status"
+    assert http_header(home, "X-Powered-By") == "iyi-web", "powered-by"
+    assert http_header(home, "Connection") == "close", "close"
+    assert http_body(home) == "home", "GET / body"
 
     named = exchange(port, "GET /hello/dunya HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    assert named.includes?("Hello, dunya!"), "url param over TCP"
+    assert http_body(named) == "Hello, dunya!", "url param over TCP"
+
+    spaced = exchange(port, "GET /hello/a%20b HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+    assert http_body(spaced) == "Hello, a b!", "percent-decoded path param"
 
     json = exchange(port, "GET /json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    assert json.includes?("application/json"), "content-type"
-    assert json.includes?("{}"), "json body"
+    assert http_header(json, "Content-Type") == "application/json", "content-type"
+    assert http_body(json) == "{}", "json body"
 
     echoed = exchange(port, "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
-    assert echoed.includes?("hello"), "POST body echo"
+    assert http_body(echoed) == "hello", "POST body echo"
+
+    empty = exchange(port, "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    assert http_body(empty) == "", "zero-length body"
+
+    payload = "x" * 5000
+    bulky = exchange(port, "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n" + payload)
+    assert http_body(bulky) == payload, "body larger than one socket read"
 
     form = exchange(port, "POST /form HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 8\r\nConnection: close\r\n\r\nname=iyi")
-    assert form.includes?("iyi"), "form body over TCP"
+    assert http_body(form) == "iyi", "form body over TCP"
 
     put = exchange(port, "PUT /item HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    assert put.includes?("put"), "PUT over TCP"
+    assert http_body(put) == "put", "PUT over TCP"
+
+    headed = exchange(port, "HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+    assert status_line(headed) == "HTTP/1.1 200 OK", "HEAD status"
+    assert http_header(headed, "Content-Length") == "4", "HEAD content-length"
+    assert http_body(headed) == "", "HEAD body empty"
 
     go = exchange(port, "GET /go HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    assert go.includes?("302 Found"), "redirect status"
-    assert go.includes?("Location: /there"), "redirect Location"
+    assert status_line(go) == "HTTP/1.1 302 Found", "redirect status"
+    assert http_header(go, "Location") == "/there", "redirect Location"
 
     missing = exchange(port, "GET /nope HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    assert missing.includes?("404"), "404 over TCP"
-    assert missing.includes?("nope"), "custom 404 body"
+    assert status_line(missing) == "HTTP/1.1 404 Not Found", "404 over TCP"
+    assert http_body(missing) == "nope", "custom 404 body"
+
+    low = exchange(port, "get / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+    assert status_line(low) == "HTTP/1.1 405 Method Not Allowed", "lowercase method is 405"
 
     bad = exchange(port, "GET / HTTP/1.1\r\nNotAHeader\r\n\r\n")
-    assert bad.includes?("400"), "malformed headers are 400"
+    assert bad == "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request", "malformed headers are the canned 400"
 
     short = exchange(port, "GET\r\n\r\n")
-    assert short.includes?("400"), "short request-line is 400"
+    assert status_line(short) == "HTTP/1.1 400 Bad Request", "short request-line is 400"
+
+    cfg.max_request_body_size = 8
+    huge = exchange(port, "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 20\r\nConnection: close\r\n\r\nxxxxxxxxxxxxxxxxxxxx")
+    assert status_line(huge) == "HTTP/1.1 400 Bad Request", "Content-Length above the cap is 400"
 
     LibExit.exit(0)
     0

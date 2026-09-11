@@ -2,16 +2,14 @@
 module iyi_web/handler_test
 
 import iyi_web/handler
-import iyi_web/context
-import iyi_web/request
-import iyi_web/headers
 import iyi_web/router
+import iyi_web/harness
+import iyi_web/context
 
 using iyi_web/handler::{Handler, chain}
-using iyi_web/context::{Context}
-using iyi_web/request::{Request}
-using iyi_web/headers::{Headers}
 using iyi_web/router::{Router, RouteHandler}
+using iyi_web/harness
+using iyi_web/context::{Context}
 
 class StampHandler < Handler
   pub def call(ctx : Context) : Nil
@@ -27,10 +25,18 @@ class HaltHandler < Handler
   end
 end
 
-def make_request(path : String = "/") : Request
-  headers = Headers.new
-  headers["Host"] = "localhost"
-  Request.new("GET", path, "", "HTTP/1.1", headers, "")
+class AppendHandler < Handler
+  @tag : String
+
+  def initialize(@tag : String)
+    super()
+  end
+
+  pub def call(ctx : Context) : Nil
+    prev = ctx["order"]?
+    ctx["order"] = prev ? prev + "," + @tag : @tag
+    call_next(ctx)
+  end
 end
 
 router = Router.new
@@ -41,17 +47,27 @@ end
 router.get "/secret" do |env|
   "leaked"
 end
+router.get "/order" do |env|
+  env["order"]? || ""
+end
 
 stamped = chain([StampHandler.new, RouteHandler.new(router)])
-ctx = Context.for(make_request)
-stamped.call(ctx)
+ctx = dispatch(stamped, "GET", "/")
 assert ctx.response.body == "ok:stamp", "middleware runs before the route"
 assert ctx["via"] == "stamp", "store visible to the route"
 
 halted = chain([HaltHandler.new, RouteHandler.new(router)])
-denied = Context.for(make_request("/secret"))
-halted.call(denied)
+denied = dispatch(halted, "GET", "/secret")
 assert denied.response.status_code == 401, "halt status"
 assert denied.response.body == "stopped", "halt body, route skipped"
+
+ordered = chain([AppendHandler.new("a"), AppendHandler.new("b"), RouteHandler.new(router)])
+walked = dispatch(ordered, "GET", "/order")
+assert walked.response.body == "a,b", "handlers run left to right"
+
+passthrough = Handler.new
+passthrough.next_handler = RouteHandler.new(router)
+plain = dispatch(passthrough, "GET", "/")
+assert plain.response.body == "ok", "base Handler is call_next"
 
 puts "handler_test ok"

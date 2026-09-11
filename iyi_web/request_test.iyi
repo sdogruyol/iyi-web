@@ -8,6 +8,24 @@ import iyi_web/headers
 using iyi_web/request::{Request, ParseError, parse_head, with_body, split_target}
 using iyi_web/headers::{Headers}
 
+def parsed(block : String) : Request
+  case parse_head(block)
+  in ParseError
+    assert false, "parse_head failed"
+    Request.new("GET", "/", "", "HTTP/1.1", Headers.new, "")
+  in Request
+    it
+  end
+end
+
+def assert_error(block : String, why : String) : Nil
+  case parse_head(block)
+  in ParseError
+  in Request
+    assert false, why
+  end
+end
+
 target = split_target("/search?q=one&n=2")
 assert target[0] == "/search", "split path"
 assert target[1] == "q=one&n=2", "split query leaves encoding"
@@ -16,81 +34,47 @@ space = split_target("/a%20b")
 assert space[0] == "/a b", "path percent-decode"
 assert space[1] == "", "no query"
 
-star = split_target("/")
-assert star[0] == "/", "root"
+encoded_query = split_target("/a%20b?x=1%20y")
+assert encoded_query[0] == "/a b", "path decoded beside a query"
+assert encoded_query[1] == "x=1%20y", "query stays encoded"
 
-qonly = split_target("/?")
-assert qonly[0] == "/", "empty path after decode"
-assert qonly[1] == "", "empty query"
+assert split_target("/")[0] == "/", "root"
+assert split_target("/?")[0] == "/", "empty path after decode"
+assert split_target("/?")[1] == "", "empty query"
+assert split_target("")[0] == "/", "empty target is /"
 
-block = "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: 2\r\nConnection: close"
-case parse_head(block)
-in ParseError
-  assert false, "parse_head failed"
-in Request
-  assert it.method == "POST", "method"
-  assert it.path == "/echo", "path"
-  assert it.version == "HTTP/1.1", "version"
-  assert it.host == "localhost", "host"
-  assert it.content_type == "application/json", "content-type strips params"
-  assert it.content_length == 2, "content-length"
-  assert !it.keep_alive?, "Connection: close"
-  req = with_body(it, "{}")
-  assert req.body == "{}", "body"
-end
+req = parsed("POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: 2\r\nConnection: close")
+assert req.method == "POST", "method"
+assert req.path == "/echo", "path"
+assert req.version == "HTTP/1.1", "version"
+assert req.host == "localhost", "host"
+assert req.content_type == "application/json", "content-type strips params"
+assert req.content_length == 2, "content-length"
+assert !req.keep_alive?, "Connection: close"
+assert with_body(req, "{}").body == "{}", "body"
 
-alive = "GET / HTTP/1.1\r\nHost: localhost"
-case parse_head(alive)
-in ParseError
-  assert false, "HTTP/1.1 parse failed"
-in Request
-  assert it.keep_alive?, "HTTP/1.1 defaults to keep-alive"
-end
+assert parsed("GET / HTTP/1.1\r\nHost: localhost").keep_alive?, "HTTP/1.1 defaults to keep-alive"
+assert !parsed("GET / HTTP/1.0\r\nHost: localhost").keep_alive?, "HTTP/1.0 defaults to close"
+assert parsed("GET / HTTP/1.0\r\nHost: localhost\r\nConnection: keep-alive").keep_alive?, "explicit keep-alive"
+assert !parsed("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: Close").keep_alive?, "Close is case-insensitive"
 
-http10 = "GET / HTTP/1.0\r\nHost: localhost"
-case parse_head(http10)
-in ParseError
-  assert false, "HTTP/1.0 parse failed"
-in Request
-  assert !it.keep_alive?, "HTTP/1.0 defaults to close"
-end
+star = parsed("OPTIONS * HTTP/1.1\r\nHost: localhost")
+assert star.method == "OPTIONS", "star method"
+assert star.path == "/", "star target becomes /"
 
-keep = "GET / HTTP/1.0\r\nHost: localhost\r\nConnection: keep-alive"
-case parse_head(keep)
-in ParseError
-  assert false, "keep-alive parse failed"
-in Request
-  assert it.keep_alive?, "explicit keep-alive"
-end
+bad_len = parsed("GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: nope")
+assert bad_len.content_length == 0, "unparsable content-length is 0"
 
-case parse_head("")
-in ParseError
-in Request
-  assert false, "empty request should fail"
-end
+dup = parsed("GET / HTTP/1.1\r\nHost: first\r\nHost: second")
+assert dup.host == "second", "duplicate header last-wins"
 
-case parse_head("GET")
-in ParseError
-in Request
-  assert false, "short request-line should fail"
-end
+assert parsed("GET / HTTP/1.1").host == "", "missing Host is empty"
+assert parsed("GET / HTTP/1.1").content_type == "", "missing content-type is empty"
 
-case parse_head("GET nope HTTP/1.1")
-in ParseError
-in Request
-  assert false, "path must start with /"
-end
-
-case parse_head("GET / HTTP/1.1\r\nNotAHeader")
-in ParseError
-in Request
-  assert false, "malformed header should fail"
-end
-
-case parse_head("GET / HTTP/1.1\r\n: no-name")
-in ParseError
-in Request
-  assert false, "empty header name should fail"
-end
+assert_error("", "empty request should fail")
+assert_error("GET", "short request-line should fail")
+assert_error("GET nope HTTP/1.1", "path must start with /")
+assert_error("GET / HTTP/1.1\r\nNotAHeader", "malformed header should fail")
+assert_error("GET / HTTP/1.1\r\n: no-name", "empty header name should fail")
 
 puts "request_test ok"

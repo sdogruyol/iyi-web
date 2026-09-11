@@ -4,38 +4,49 @@ module iyi_web/dsl_test
 
 import iyi_web/dsl
 import iyi_web/router
-import iyi_web/request
-import iyi_web/context
-import iyi_web/headers
+import iyi_web/harness
 
 using iyi_web/dsl
-using iyi_web/router::{RouteHandler}
-using iyi_web/request::{Request}
-using iyi_web/context::{Context}
-using iyi_web/headers::{Headers}
-
-def make_request(method : String, path : String) : Request
-  headers = Headers.new
-  headers["Host"] = "localhost"
-  Request.new(method, path, "", "HTTP/1.1", headers, "")
-end
+using iyi_web/router::{Router, RouteHandler}
+using iyi_web/harness
 
 get "/dsl" do |env|
   "from-dsl"
+end
+
+post "/dsl" do |env|
+  "posted-dsl"
+end
+
+before_all "/gated" do |env|
+  env.halt(401, "gated")
+  ""
+end
+
+get "/gated" do |env|
+  "open"
 end
 
 error 404 do |env|
   "dsl-missing"
 end
 
+mounted = Router.new
+mounted.get "/in" do |env|
+  "mounted-dsl"
+end
+mount "/sub", mounted
+
 handler = RouteHandler.new(app)
 
-hit = Context.for(make_request("GET", "/dsl"))
-handler.call(hit)
-assert hit.response.body == "from-dsl", "DSL get registers on app"
+assert dispatch(handler, "GET", "/dsl").response.body == "from-dsl", "DSL get"
+assert dispatch(handler, "POST", "/dsl").response.body == "posted-dsl", "DSL post"
+assert dispatch(handler, "GET", "/nope").response.body == "dsl-missing", "DSL error 404"
 
-miss = Context.for(make_request("GET", "/nope"))
-handler.call(miss)
-assert miss.response.body == "dsl-missing", "DSL error 404"
+gated = dispatch(handler, "GET", "/gated")
+assert gated.response.status_code == 401, "DSL before_all"
+assert gated.response.body == "gated", "DSL before_all body"
+
+assert dispatch(handler, "GET", "/sub/in").response.body == "mounted-dsl", "DSL mount"
 
 puts "dsl_test ok"

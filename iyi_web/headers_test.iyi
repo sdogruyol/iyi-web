@@ -9,6 +9,8 @@ using iyi_web/headers::{Headers}
 headers = Headers.new
 assert headers.empty?, "new headers empty"
 assert !headers.has_key?("Host"), "missing key"
+assert headers["Host"]?.nil?, "[]? is nil when missing"
+assert headers.to_s == "", "empty serialises to nothing"
 
 headers["Content-Type"] = "text/plain"
 assert headers["content-type"] == "text/plain", "lookup ignores case"
@@ -23,13 +25,13 @@ headers.add("X-A", "1")
 headers.add("X-A", "2")
 assert headers["x-a"] == "2", "add last-wins on lookup"
 written = headers.to_s
-assert written.includes?("X-A: 1\r\n"), "add keeps first"
-assert written.includes?("X-A: 2\r\n"), "add keeps second"
+assert written == "content-type: text/html\r\nX-A: 1\r\nX-A: 2\r\n", "add keeps both, insertion order"
 
 names = [] of String
 headers.each do |name, value|
-  names << name
+  names << name + "=" + value
 end
 assert names.size == 3, "each visits every pair"
+assert names[0] == "content-type=text/html", "each starts at the first pair"
 
 puts "headers_test ok"

@@ -1,39 +1,14 @@
-# Router dispatch without a socket: verbs, globs, namespace/mount, filters,
-# custom 404, redirect, form params, IntoBody, HEAD fallback, 405.
+# Router dispatch without a socket. Isolated routers keep a filter on one
+# path from rewriting the assertions on another.
 module iyi_web/router_test
 
 import iyi_web/router
-import iyi_web/request
+import iyi_web/harness
 import iyi_web/context
-import iyi_web/headers
 
 using iyi_web/router::{Router, RouteHandler}
-using iyi_web/request::{Request}
+using iyi_web/harness
 using iyi_web/context::{Context}
-using iyi_web/headers::{Headers}
-
-def request(method : String, path : String) : Request
-  request_with_query(method, path, "")
-end
-
-def request_with_query(method : String, path : String, query : String) : Request
-  headers = Headers.new
-  headers["Host"] = "localhost"
-  Request.new(method, path, query, "HTTP/1.1", headers, "")
-end
-
-def request_with_body(method : String, path : String, content_type : String, body : String) : Request
-  headers = Headers.new
-  headers["Host"] = "localhost"
-  headers["Content-Type"] = content_type
-  Request.new(method, path, "", "HTTP/1.1", headers, body)
-end
-
-def dispatch(handler : RouteHandler, method : String, path : String) : Context
-  ctx = Context.for(request(method, path))
-  handler.call(ctx)
-  ctx
-end
 
 router = Router.new
 router.get "/" do |env|
@@ -62,11 +37,15 @@ router.options "/users" do |env|
   ""
 end
 router.query "/search-body" do |env|
-  "query-ok"
+  q = env.params.body["q"]?
+  q ? q : "query-ok"
 end
 router.get "/search" do |env|
   q = env.params.query["q"]?
   q ? "q=#{q}" : "none"
+end
+router.get "/who/:message" do |env|
+  env.params["message"]
 end
 router.get "/count" do |env|
   42
@@ -137,6 +116,13 @@ router.namespace "/ns" do |ns|
     "dash"
   end
 end
+router.namespace "/api" do |api|
+  api.namespace "/v1" do |v1|
+    v1.get "/ping" do |env|
+      "pong"
+    end
+  end
+end
 
 mounted = Router.new
 mounted.get "/list" do |env|
@@ -144,59 +130,50 @@ mounted.get "/list" do |env|
 end
 router.mount "/mounted", mounted
 
+bare = Router.new
+bare.get "/bare" do |env|
+  "bare"
+end
+router.mount(bare)
+
 handler = RouteHandler.new(router)
 
 home = dispatch(handler, "GET", "/")
 assert home.response.body == "home", "GET /"
 assert home.response.status_code == 200, "GET / status"
 
-user = dispatch(handler, "GET", "/users/7")
-assert user.response.body == "7", "url param"
-
-newer = dispatch(handler, "GET", "/users/new")
-assert newer.response.body == "new-user", "static /users/new wins over :id"
-
-created = dispatch(handler, "POST", "/users")
-assert created.response.body == "created", "POST"
-
-put = dispatch(handler, "PUT", "/users/3")
-assert put.response.body == "put:3", "PUT"
-
-patch = dispatch(handler, "PATCH", "/users/3")
-assert patch.response.body == "patch:3", "PATCH"
-
-deleted = dispatch(handler, "DELETE", "/users/3")
-assert deleted.response.body == "deleted", "DELETE"
+assert dispatch(handler, "GET", "/users/7").response.body == "7", "url param"
+assert dispatch(handler, "GET", "/users/new").response.body == "new-user", "static /users/new wins over :id"
+assert dispatch(handler, "POST", "/users").response.body == "created", "POST"
+assert dispatch(handler, "PUT", "/users/3").response.body == "put:3", "PUT"
+assert dispatch(handler, "PATCH", "/users/3").response.body == "patch:3", "PATCH"
+assert dispatch(handler, "DELETE", "/users/3").response.body == "deleted", "DELETE"
 
 options = dispatch(handler, "OPTIONS", "/users")
 assert options.response.status_code == 200, "OPTIONS"
-assert options.response.headers["allow"].includes?("POST"), "OPTIONS Allow"
+assert options.response.headers["allow"] == "GET, POST", "OPTIONS Allow as written"
 
-queried = dispatch(handler, "QUERY", "/search-body")
-assert queried.response.body == "query-ok", "QUERY"
+assert dispatch(handler, "QUERY", "/search-body").response.body == "query-ok", "QUERY without body"
+query_form = dispatch(handler, http_request("QUERY", "/search-body", "", "q=iyi", "application/x-www-form-urlencoded"))
+assert query_form.response.body == "iyi", "QUERY form body"
 
-count = dispatch(handler, "GET", "/count")
-assert count.response.body == "42", "IntoBody Int32"
+assert dispatch(handler, "GET", "/count").response.body == "42", "IntoBody Int32"
+assert dispatch(handler, "GET", "/empty").response.body == "", "IntoBody Nil"
+assert dispatch(handler, "GET", "/yes").response.body == "true", "IntoBody Bool"
 
-empty = dispatch(handler, "GET", "/empty")
-assert empty.response.body == "", "IntoBody Nil"
-
-flag = dispatch(handler, "GET", "/yes")
-assert flag.response.body == "true", "IntoBody Bool"
-
-search = Context.for(request_with_query("GET", "/search", "q=iyi"))
-handler.call(search)
+search = dispatch(handler, http_request("GET", "/search", "q=iyi"))
 assert search.response.body == "q=iyi", "query param"
 
-glob = dispatch(handler, "GET", "/files/a/b.txt")
-assert glob.response.body == "a/b.txt", "glob param"
+who = dispatch(handler, http_request("GET", "/who/world", "message=coco"))
+assert who.response.body == "world", "url param beats query"
 
-glob_empty = dispatch(handler, "GET", "/files")
-assert glob_empty.response.body == "", "empty glob tail"
+assert dispatch(handler, "GET", "/files/a/b.txt").response.body == "a/b.txt", "glob param"
+assert dispatch(handler, "GET", "/files").response.body == "", "empty glob tail"
 
 head = dispatch(handler, "HEAD", "/")
 assert head.response.body == "", "HEAD body empty"
 assert head.response.headers["content-length"] == "4", "HEAD content-length of home"
+assert head.response.status_code == 200, "HEAD status"
 
 missing = dispatch(handler, "GET", "/nope")
 assert missing.response.status_code == 404, "404"
@@ -206,43 +183,129 @@ wrong = dispatch(handler, "GET", "/users")
 assert wrong.response.status_code == 405, "405 GET on POST /users"
 assert wrong.response.headers["allow"].includes?("POST"), "Allow POST"
 assert wrong.response.headers["allow"].includes?("OPTIONS"), "Allow OPTIONS"
+assert wrong.response.body == "405 Method Not Allowed", "default 405 body"
+
+post_root = dispatch(handler, "POST", "/")
+assert post_root.response.status_code == 405, "POST / is 405"
+assert post_root.response.headers["allow"] == "GET, HEAD", "Allow lists GET and the implicit HEAD"
+
+low = dispatch(handler, "get", "/")
+assert low.response.status_code == 405, "methods are case-sensitive"
+assert low.response.headers["allow"] == "GET, HEAD", "Allow names the routed verb"
 
 denied = dispatch(handler, "GET", "/admin")
 assert denied.response.status_code == 401, "before filter halt"
 assert denied.response.body == "no", "halt body"
 
-staff = dispatch(handler, "GET", "/staff/x")
-assert staff.response.status_code == 403, "wildcard before halt"
+assert dispatch(handler, "GET", "/staff/x").response.status_code == 403, "wildcard before halt"
+assert dispatch(handler, "GET", "/public").response.body == "open", "wildcard before does not leak"
 
-opened = dispatch(handler, "GET", "/public")
-assert opened.response.body == "open", "wildcard before does not leak"
+assert dispatch(handler, "GET", "/only-get").response.status_code == 400, "before_get"
+assert dispatch(handler, "POST", "/only-get").response.body == "posted", "before_get skips POST"
 
-get_filtered = dispatch(handler, "GET", "/only-get")
-assert get_filtered.response.status_code == 400, "before_get"
-posted = dispatch(handler, "POST", "/only-get")
-assert posted.response.body == "posted", "before_get skips POST"
-
-form = Context.for(request_with_body("POST", "/form", "application/x-www-form-urlencoded", "name=iyi"))
-handler.call(form)
-assert form.response.body == "iyi", "form body param"
+form = dispatch(handler, http_request("POST", "/form", "", "name=hello+world", "application/x-www-form-urlencoded"))
+assert form.response.body == "hello world", "form plus-decoding"
 
 go = dispatch(handler, "GET", "/go")
 assert go.response.status_code == 302, "redirect status"
 assert go.response.headers["location"] == "/there", "redirect Location"
-assert go.response.body != "nope", "redirect does not write handler return"
+assert go.response.body == "", "redirect does not write handler return"
 
 stop = dispatch(handler, "GET", "/stop")
 assert stop.response.status_code == 418, "halt status"
 assert stop.response.body == "teapot", "halt body"
 assert stop["after"]?.nil?, "halt skips after filters"
 
-tagged = dispatch(handler, "GET", "/tagged")
-assert tagged.response.body == "base+after", "after filter can append"
+assert dispatch(handler, "GET", "/tagged").response.body == "base+after", "after filter can append"
+assert dispatch(handler, "GET", "/ns/dash").response.body == "dash", "namespace"
+assert dispatch(handler, "GET", "/api/v1/ping").response.body == "pong", "nested namespace"
+assert dispatch(handler, "GET", "/mounted/list").response.body == "listed", "mount with prefix"
+assert dispatch(handler, "GET", "/bare").response.body == "bare", "mount at root"
 
-dash = dispatch(handler, "GET", "/ns/dash")
-assert dash.response.body == "dash", "namespace"
+# HEAD served by GET must still run before_get / after_get — otherwise HEAD
+# is a bypass, which is the bug Kemal's filter spec exists to catch.
+guarded = Router.new
+guarded.before_get "/admin/*" do |env|
+  env.halt(401, "Unauthorized")
+  ""
+end
+guarded.get "/admin/users" do |env|
+  env["handler"] = "1"
+  "users"
+end
+guard = RouteHandler.new(guarded)
+blocked = dispatch(guard, "HEAD", "/admin/users")
+assert blocked.response.status_code == 401, "HEAD cannot bypass before_get"
+assert blocked.response.body == "Unauthorized", "HEAD halt keeps the halt body"
+assert blocked["handler"]?.nil?, "GET handler did not run"
 
-listed = dispatch(handler, "GET", "/mounted/list")
-assert listed.response.body == "listed", "mount"
+traced = Router.new
+traced.before_get "/x" do |env|
+  env["calls"] = "before"
+  nil
+end
+traced.after_get "/x" do |env|
+  prev = env["calls"]?
+  env["calls"] = prev ? prev + ",after" : "after"
+  nil
+end
+traced.get "/x" do |env|
+  prev = env["calls"]?
+  env["calls"] = prev ? prev + ",handler" : "handler"
+  "users"
+end
+trace = RouteHandler.new(traced)
+headed = dispatch(trace, "HEAD", "/x")
+assert headed.response.body == "", "HEAD still has an empty body"
+assert headed.response.headers["content-length"] == "5", "HEAD length of users"
+assert headed["calls"] == "before,handler,after", "HEAD runs GET before, handler, after"
+
+# A before that halts must not run the rest of the before chain.
+layered = Router.new
+layered.before "*" do |env|
+  env["a"] = "1"
+  nil
+end
+layered.before "*" do |env|
+  env.halt(403, "no")
+  ""
+end
+layered.before "*" do |env|
+  env["c"] = "1"
+  nil
+end
+layered.get "/z" do |env|
+  "z"
+end
+layer = RouteHandler.new(layered)
+stopped = dispatch(layer, "GET", "/z")
+assert stopped.response.status_code == 403, "second before halt"
+assert stopped["a"] == "1", "first before ran"
+assert stopped["c"]?.nil?, "later before skipped"
+assert stopped.response.body == "no", "halt body from the second before"
+
+# Custom 500 replaces the handler's body when the status is >= 400.
+fails = Router.new
+fails.get "/boom" do |env|
+  env.response.status_code = 500
+  "internal"
+end
+fails.error 500 do |env|
+  "handled"
+end
+boom = dispatch(RouteHandler.new(fails), "GET", "/boom")
+assert boom.response.status_code == 500, "500 status"
+assert boom.response.body == "handled", "error 500 rewrites the body"
+
+# Already-halted context is left alone.
+pre = Context.for(http_request("GET", "/"))
+pre.halt(499, "pre")
+handler.call(pre)
+assert pre.response.status_code == 499, "halted context keeps status"
+assert pre.response.body == "pre", "halted context keeps body"
+
+paths = router.routes.map { |route| route.method + " " + route.path }
+assert paths.includes?("GET /api/v1/ping"), "routes() joins nested prefixes"
+assert paths.includes?("GET /bare"), "routes() includes a root mount"
 
 puts "router_test ok"

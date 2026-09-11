@@ -1,0 +1,86 @@
+# Shared construction for tests. Not a `*_test.iyi`, so `iyi test` does not
+# run it; every test that would otherwise rebuild a Host header imports this
+# instead.
+module iyi_web/harness
+
+import iyi_web/codec
+import iyi_web/headers
+import iyi_web/request
+import iyi_web/context
+import iyi_web/handler
+
+using iyi_web/codec
+using iyi_web/headers::{Headers}
+using iyi_web/request::{Request}
+using iyi_web/context::{Context}
+using iyi_web/handler::{Handler}
+
+pub def http_request(method : String, path : String, query : String = "", body : String = "", content_type : String = "") : Request
+  headers = Headers.new
+  headers["Host"] = "localhost"
+  if !content_type.empty?
+    headers["Content-Type"] = content_type
+  end
+  if !body.empty?
+    headers["Content-Length"] = body.bytesize.to_s
+  end
+  Request.new(method, path, query, "HTTP/1.1", headers, body)
+end
+
+pub def dispatch(handler : Handler, request : Request) : Context
+  ctx = Context.for(request)
+  handler.call(ctx)
+  ctx
+end
+
+pub def dispatch(handler : Handler, method : String, path : String) : Context
+  dispatch(handler, http_request(method, path))
+end
+
+# First line of an HTTP/1.1 response, without the CRLF.
+pub def status_line(raw : String) : String
+  ending = find_substring(raw, "\r\n")
+  ending ? raw[0, ending] : raw
+end
+
+# Header value, last-wins, case-insensitive. Nil when absent.
+pub def http_header(raw : String, name : String) : String?
+  sep = find_substring(raw, "\r\n\r\n")
+  return nil unless sep
+
+  block = raw[0, sep]
+  want = name.downcase
+  found = nil
+  start = 0
+  first = true
+
+  while start <= block.bytesize
+    rest = block.bytesize - start
+    break if rest <= 0
+
+    relative = find_substring(block[start, rest], "\r\n")
+    line = relative ? block[start, relative] : block[start, rest]
+
+    unless first
+      colon = line.index(':')
+      if colon
+        key = line[0, colon]
+        if key.downcase == want
+          found = line[colon + 1, line.bytesize - colon - 1].strip
+        end
+      end
+    end
+
+    break unless relative
+    start = start + relative + 2
+    first = false
+  end
+
+  found
+end
+
+pub def http_body(raw : String) : String
+  sep = find_substring(raw, "\r\n\r\n")
+  return "" unless sep
+  raw[sep + 4, raw.bytesize - sep - 4]
+end

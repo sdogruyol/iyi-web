@@ -31,6 +31,12 @@ assert params.query["id"] == "query-id", "query id"
 assert params.body["name"] == "iyi", "form body"
 assert params.body["id"] == "body-id", "form id"
 
+plus_headers = Headers.new
+plus_headers["Content-Type"] = "application/x-www-form-urlencoded"
+plus_req = Request.new("POST", "/", "", "HTTP/1.1", plus_headers, "msg=hello+world")
+plus_params = Params.from(plus_req, {} of String => String)
+assert plus_params.body["msg"] == "hello world", "form plus is space"
+
 assert params["id"] == "url-id", "combined prefers url"
 assert params["q"] == "from-query", "combined falls to query"
 assert params["name"] == "iyi", "combined falls to body"
