@@ -1,0 +1,96 @@
+# Request-line parsing, content-type chopping, keep-alive, and the
+# errors a bad header block must produce rather than guess through.
+module iyi_web/request_test
+
+import iyi_web/request
+import iyi_web/headers
+
+using iyi_web/request::{Request, ParseError, parse_head, with_body, split_target}
+using iyi_web/headers::{Headers}
+
+target = split_target("/search?q=one&n=2")
+assert target[0] == "/search", "split path"
+assert target[1] == "q=one&n=2", "split query leaves encoding"
+
+space = split_target("/a%20b")
+assert space[0] == "/a b", "path percent-decode"
+assert space[1] == "", "no query"
+
+star = split_target("/")
+assert star[0] == "/", "root"
+
+qonly = split_target("/?")
+assert qonly[0] == "/", "empty path after decode"
+assert qonly[1] == "", "empty query"
+
+block = "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: 2\r\nConnection: close"
+case parse_head(block)
+in ParseError
+  assert false, "parse_head failed"
+in Request
+  assert it.method == "POST", "method"
+  assert it.path == "/echo", "path"
+  assert it.version == "HTTP/1.1", "version"
+  assert it.host == "localhost", "host"
+  assert it.content_type == "application/json", "content-type strips params"
+  assert it.content_length == 2, "content-length"
+  assert !it.keep_alive?, "Connection: close"
+  req = with_body(it, "{}")
+  assert req.body == "{}", "body"
+end
+
+alive = "GET / HTTP/1.1\r\nHost: localhost"
+case parse_head(alive)
+in ParseError
+  assert false, "HTTP/1.1 parse failed"
+in Request
+  assert it.keep_alive?, "HTTP/1.1 defaults to keep-alive"
+end
+
+http10 = "GET / HTTP/1.0\r\nHost: localhost"
+case parse_head(http10)
+in ParseError
+  assert false, "HTTP/1.0 parse failed"
+in Request
+  assert !it.keep_alive?, "HTTP/1.0 defaults to close"
+end
+
+keep = "GET / HTTP/1.0\r\nHost: localhost\r\nConnection: keep-alive"
+case parse_head(keep)
+in ParseError
+  assert false, "keep-alive parse failed"
+in Request
+  assert it.keep_alive?, "explicit keep-alive"
+end
+
+case parse_head("")
+in ParseError
+in Request
+  assert false, "empty request should fail"
+end
+
+case parse_head("GET")
+in ParseError
+in Request
+  assert false, "short request-line should fail"
+end
+
+case parse_head("GET nope HTTP/1.1")
+in ParseError
+in Request
+  assert false, "path must start with /"
+end
+
+case parse_head("GET / HTTP/1.1\r\nNotAHeader")
+in ParseError
+in Request
+  assert false, "malformed header should fail"
+end
+
+case parse_head("GET / HTTP/1.1\r\n: no-name")
+in ParseError
+in Request
+  assert false, "empty header name should fail"
+end
+
+puts "request_test ok"

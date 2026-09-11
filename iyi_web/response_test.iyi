@@ -1,0 +1,39 @@
+# Writable response: status, headers, body, and the bytes a socket is owed.
+module iyi_web/response_test
+
+import iyi_web/response
+
+using iyi_web/response::{Response}
+
+res = Response.new
+assert res.status_code == 200, "default status"
+assert res.body == "", "default body"
+assert !res.closed?, "open"
+assert res.content_type == "text/html; charset=utf-8", "default type"
+
+res.status_code = 201
+res.content_type = "application/json"
+res.print("{")
+res.write("}")
+assert res.body == "{}", "print concatenates"
+assert res.headers["content-type"] == "application/json", "setter writes header"
+
+res.set_body("ok")
+assert res.body == "ok", "set_body replaces"
+
+res.close
+assert res.closed?, "closed"
+
+http = res.to_http("HTTP/1.1")
+assert http.starts_with?("HTTP/1.1 201 Created\r\n"), "status line"
+assert http.includes?("Content-Type: application/json\r\n"), "content-type header"
+assert http.includes?("Content-Length: 2\r\n"), "content-length of ok"
+assert http.ends_with?("\r\n\r\nok") || http.includes?("\r\n\r\nok"), "body after blank line"
+
+res2 = Response.new
+res2.headers["Content-Length"] = "99"
+res2.set_body("x")
+wired = res2.to_http("HTTP/1.1")
+assert wired.includes?("Content-Length: 99\r\n"), "existing content-length left alone"
+
+puts "response_test ok"

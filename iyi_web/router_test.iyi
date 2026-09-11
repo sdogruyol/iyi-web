@@ -1,4 +1,5 @@
-# Router dispatch without a socket: path params, HEAD fallback, 404, 405.
+# Router dispatch without a socket: verbs, globs, namespace/mount, filters,
+# custom 404, redirect, form params, IntoBody, HEAD fallback, 405.
 module iyi_web/router_test
 
 import iyi_web/router
@@ -21,6 +22,13 @@ def request_with_query(method : String, path : String, query : String) : Request
   Request.new(method, path, query, "HTTP/1.1", headers, "")
 end
 
+def request_with_body(method : String, path : String, content_type : String, body : String) : Request
+  headers = Headers.new
+  headers["Host"] = "localhost"
+  headers["Content-Type"] = content_type
+  Request.new(method, path, "", "HTTP/1.1", headers, body)
+end
+
 def dispatch(handler : RouteHandler, method : String, path : String) : Context
   ctx = Context.for(request(method, path))
   handler.call(ctx)
@@ -34,8 +42,27 @@ end
 router.get "/users/:id" do |env|
   env.params.url["id"]
 end
+router.get "/users/new" do |env|
+  "new-user"
+end
 router.post "/users" do |env|
   "created"
+end
+router.put "/users/:id" do |env|
+  "put:#{env.params.url["id"]}"
+end
+router.patch "/users/:id" do |env|
+  "patch:#{env.params.url["id"]}"
+end
+router.delete "/users/:id" do |env|
+  "deleted"
+end
+router.options "/users" do |env|
+  env.response.headers["Allow"] = "GET, POST"
+  ""
+end
+router.query "/search-body" do |env|
+  "query-ok"
 end
 router.get "/search" do |env|
   q = env.params.query["q"]?
@@ -44,6 +71,34 @@ end
 router.get "/count" do |env|
   42
 end
+router.get "/empty" do |env|
+  nil
+end
+router.get "/yes" do |env|
+  true
+end
+router.get "/files/*path" do |env|
+  env.params.url["path"]
+end
+router.get "/go" do |env|
+  env.redirect("/there")
+  "nope"
+end
+router.get "/stop" do |env|
+  env.halt(418, "teapot")
+  "nope"
+end
+router.after "/stop" do |env|
+  env["after"] = "ran"
+  nil
+end
+router.get "/tagged" do |env|
+  "base"
+end
+router.after "/tagged" do |env|
+  env.response.print("+after")
+  nil
+end
 router.before "/admin" do |env|
   env.halt(401, "no")
   ""
@@ -51,6 +106,43 @@ end
 router.get "/admin" do |env|
   "secret"
 end
+router.before "/staff/*" do |env|
+  env.halt(403, "staff")
+  ""
+end
+router.get "/staff/x" do |env|
+  "open"
+end
+router.get "/public" do |env|
+  "open"
+end
+router.before_get "/only-get" do |env|
+  env.halt(400, "get-filter")
+  ""
+end
+router.get "/only-get" do |env|
+  "got"
+end
+router.post "/only-get" do |env|
+  "posted"
+end
+router.post "/form" do |env|
+  env.params.body["name"]
+end
+router.error 404 do |env|
+  "missing"
+end
+router.namespace "/ns" do |ns|
+  ns.get "/dash" do |env|
+    "dash"
+  end
+end
+
+mounted = Router.new
+mounted.get "/list" do |env|
+  "listed"
+end
+router.mount "/mounted", mounted
 
 handler = RouteHandler.new(router)
 
@@ -61,15 +153,46 @@ assert home.response.status_code == 200, "GET / status"
 user = dispatch(handler, "GET", "/users/7")
 assert user.response.body == "7", "url param"
 
+newer = dispatch(handler, "GET", "/users/new")
+assert newer.response.body == "new-user", "static /users/new wins over :id"
+
 created = dispatch(handler, "POST", "/users")
 assert created.response.body == "created", "POST"
+
+put = dispatch(handler, "PUT", "/users/3")
+assert put.response.body == "put:3", "PUT"
+
+patch = dispatch(handler, "PATCH", "/users/3")
+assert patch.response.body == "patch:3", "PATCH"
+
+deleted = dispatch(handler, "DELETE", "/users/3")
+assert deleted.response.body == "deleted", "DELETE"
+
+options = dispatch(handler, "OPTIONS", "/users")
+assert options.response.status_code == 200, "OPTIONS"
+assert options.response.headers["allow"].includes?("POST"), "OPTIONS Allow"
+
+queried = dispatch(handler, "QUERY", "/search-body")
+assert queried.response.body == "query-ok", "QUERY"
 
 count = dispatch(handler, "GET", "/count")
 assert count.response.body == "42", "IntoBody Int32"
 
+empty = dispatch(handler, "GET", "/empty")
+assert empty.response.body == "", "IntoBody Nil"
+
+flag = dispatch(handler, "GET", "/yes")
+assert flag.response.body == "true", "IntoBody Bool"
+
 search = Context.for(request_with_query("GET", "/search", "q=iyi"))
 handler.call(search)
 assert search.response.body == "q=iyi", "query param"
+
+glob = dispatch(handler, "GET", "/files/a/b.txt")
+assert glob.response.body == "a/b.txt", "glob param"
+
+glob_empty = dispatch(handler, "GET", "/files")
+assert glob_empty.response.body == "", "empty glob tail"
 
 head = dispatch(handler, "HEAD", "/")
 assert head.response.body == "", "HEAD body empty"
@@ -77,13 +200,49 @@ assert head.response.headers["content-length"] == "4", "HEAD content-length of h
 
 missing = dispatch(handler, "GET", "/nope")
 assert missing.response.status_code == 404, "404"
+assert missing.response.body == "missing", "custom 404 body"
 
 wrong = dispatch(handler, "GET", "/users")
 assert wrong.response.status_code == 405, "405 GET on POST /users"
 assert wrong.response.headers["allow"].includes?("POST"), "Allow POST"
+assert wrong.response.headers["allow"].includes?("OPTIONS"), "Allow OPTIONS"
 
 denied = dispatch(handler, "GET", "/admin")
 assert denied.response.status_code == 401, "before filter halt"
 assert denied.response.body == "no", "halt body"
+
+staff = dispatch(handler, "GET", "/staff/x")
+assert staff.response.status_code == 403, "wildcard before halt"
+
+opened = dispatch(handler, "GET", "/public")
+assert opened.response.body == "open", "wildcard before does not leak"
+
+get_filtered = dispatch(handler, "GET", "/only-get")
+assert get_filtered.response.status_code == 400, "before_get"
+posted = dispatch(handler, "POST", "/only-get")
+assert posted.response.body == "posted", "before_get skips POST"
+
+form = Context.for(request_with_body("POST", "/form", "application/x-www-form-urlencoded", "name=iyi"))
+handler.call(form)
+assert form.response.body == "iyi", "form body param"
+
+go = dispatch(handler, "GET", "/go")
+assert go.response.status_code == 302, "redirect status"
+assert go.response.headers["location"] == "/there", "redirect Location"
+assert go.response.body != "nope", "redirect does not write handler return"
+
+stop = dispatch(handler, "GET", "/stop")
+assert stop.response.status_code == 418, "halt status"
+assert stop.response.body == "teapot", "halt body"
+assert stop["after"]?.nil?, "halt skips after filters"
+
+tagged = dispatch(handler, "GET", "/tagged")
+assert tagged.response.body == "base+after", "after filter can append"
+
+dash = dispatch(handler, "GET", "/ns/dash")
+assert dash.response.body == "dash", "namespace"
+
+listed = dispatch(handler, "GET", "/mounted/list")
+assert listed.response.body == "listed", "mount"
 
 puts "router_test ok"

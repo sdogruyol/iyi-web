@@ -1,0 +1,35 @@
+# Case-insensitive lookup, last-wins on add, replacement on assign,
+# insertion order on write.
+module iyi_web/headers_test
+
+import iyi_web/headers
+
+using iyi_web/headers::{Headers}
+
+headers = Headers.new
+assert headers.empty?, "new headers empty"
+assert !headers.has_key?("Host"), "missing key"
+
+headers["Content-Type"] = "text/plain"
+assert headers["content-type"] == "text/plain", "lookup ignores case"
+assert headers["CONTENT-TYPE"] == "text/plain", "lookup upper"
+assert headers.has_key?("content-type"), "has_key ignores case"
+
+headers["content-type"] = "text/html"
+assert headers["Content-Type"] == "text/html", "assign replaces"
+assert headers.to_s == "content-type: text/html\r\n", "assign keeps one pair"
+
+headers.add("X-A", "1")
+headers.add("X-A", "2")
+assert headers["x-a"] == "2", "add last-wins on lookup"
+written = headers.to_s
+assert written.includes?("X-A: 1\r\n"), "add keeps first"
+assert written.includes?("X-A: 2\r\n"), "add keeps second"
+
+names = [] of String
+headers.each do |name, value|
+  names << name
+end
+assert names.size == 3, "each visits every pair"
+
+puts "headers_test ok"

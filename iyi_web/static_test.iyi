@@ -1,0 +1,78 @@
+# Static files: MIME, HEAD, a missing file falling through, and a `..`
+# path that must not walk out of the folder.
+module iyi_web/static_test
+
+import iyi_web/static
+import iyi_web/handler
+import iyi_web/router
+import iyi_web/context
+import iyi_web/request
+import iyi_web/headers
+
+using iyi_web/static::{StaticHandler}
+using iyi_web/handler::{chain}
+using iyi_web/router::{Router, RouteHandler}
+using iyi_web/context::{Context}
+using iyi_web/request::{Request}
+using iyi_web/headers::{Headers}
+
+def make_request(method : String, path : String) : Request
+  headers = Headers.new
+  headers["Host"] = "localhost"
+  Request.new(method, path, "", "HTTP/1.1", headers, "")
+end
+
+hello_path = "/tmp/iyi_web_static_hello.txt"
+css_path = "/tmp/iyi_web_static_app.css"
+index_path = "/tmp/iyi_web_static_index.html"
+File.write(hello_path, "hello-static")
+File.write(css_path, "body{}")
+File.write(index_path, "<p>hi</p>")
+
+router = Router.new
+router.get "/fallback" do |env|
+  "from-route"
+end
+static_chain = chain([StaticHandler.new("/tmp"), RouteHandler.new(router)])
+
+txt = Context.for(make_request("GET", "/iyi_web_static_hello.txt"))
+static_chain.call(txt)
+assert txt.response.body == "hello-static", "GET file"
+assert txt.response.content_type == "text/plain; charset=utf-8", "txt mime"
+
+css = Context.for(make_request("GET", "/iyi_web_static_app.css"))
+static_chain.call(css)
+assert css.response.body == "body{}", "GET css"
+assert css.response.content_type == "text/css; charset=utf-8", "css mime"
+
+html = Context.for(make_request("GET", "/iyi_web_static_index.html"))
+static_chain.call(html)
+assert html.response.body == "<p>hi</p>", "GET html"
+assert html.response.content_type == "text/html; charset=utf-8", "html mime"
+
+headed = Context.for(make_request("HEAD", "/iyi_web_static_hello.txt"))
+static_chain.call(headed)
+assert headed.response.body == "", "HEAD body empty"
+assert headed.response.headers["content-length"] == "12", "HEAD length"
+
+posted = Context.for(make_request("POST", "/iyi_web_static_hello.txt"))
+static_chain.call(posted)
+assert posted.response.status_code == 404, "POST is not a static verb"
+
+missing = Context.for(make_request("GET", "/no-such-static.txt"))
+static_chain.call(missing)
+assert missing.response.status_code == 404, "missing file falls through"
+
+walk = Context.for(make_request("GET", "/../iyi_web_static_hello.txt"))
+static_chain.call(walk)
+assert walk.response.status_code == 404, ".. is refused"
+
+fallback = Context.for(make_request("GET", "/fallback"))
+static_chain.call(fallback)
+assert fallback.response.body == "from-route", "unmatched GET reaches the router"
+
+File.delete(hello_path) if File.exists?(hello_path)
+File.delete(css_path) if File.exists?(css_path)
+File.delete(index_path) if File.exists?(index_path)
+
+puts "static_test ok"

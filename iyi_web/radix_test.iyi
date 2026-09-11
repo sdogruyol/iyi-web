@@ -1,0 +1,60 @@
+# Segment tree: static wins over a param, :name captures one
+# segment, *name the rest, including an empty tail.
+module iyi_web/radix_test
+
+import iyi_web/radix
+
+using iyi_web/radix::{Tree}
+
+tree = Tree(String).new
+tree.add("/GET/", "home")
+tree.add("/GET/users/:id", "user")
+tree.add("/GET/users/new", "new-user")
+tree.add("/GET/files/*path", "file")
+tree.add("/POST/users", "create")
+
+home = tree.find("/GET/")
+assert !home.nil?, "GET / found"
+assert home.nil? == false, "GET / present"
+if found = home
+  assert found.payload == "home", "GET / payload"
+  assert found.params.empty?, "GET / no params"
+end
+
+user = tree.find("/GET/users/7")
+assert !user.nil?, "param found"
+if found = user
+  assert found.payload == "user", "param payload"
+  assert found.params["id"] == "7", "param id"
+end
+
+newer = tree.find("/GET/users/new")
+assert !newer.nil?, "static wins over :id"
+if found = newer
+  assert found.payload == "new-user", "static /users/new"
+end
+
+nested = tree.find("/GET/files/a/b/c.txt")
+assert !nested.nil?, "glob found"
+if found = nested
+  assert found.payload == "file", "glob payload"
+  assert found.params["path"] == "a/b/c.txt", "glob rest"
+end
+
+empty_glob = tree.find("/GET/files")
+assert !empty_glob.nil?, "glob matches empty tail"
+if found = empty_glob
+  assert found.params["path"] == "", "empty glob param"
+end
+
+posted = tree.find("/POST/users")
+assert !posted.nil?, "POST found"
+if found = posted
+  assert found.payload == "create", "POST payload"
+end
+
+assert tree.find("/GET/missing").nil?, "unknown path"
+assert tree.find("/DELETE/users").nil?, "unknown method"
+assert tree.find("/GET/users/7/extra").nil?, "param does not swallow extra"
+
+puts "radix_test ok"

@@ -1,0 +1,53 @@
+# URL, query and form tables, and the combined lookup that prefers the
+# most specific: url, then query, then body.
+module iyi_web/params_test
+
+import iyi_web/params
+import iyi_web/request
+import iyi_web/headers
+
+using iyi_web/params::{Params}
+using iyi_web/request::{Request}
+using iyi_web/headers::{Headers}
+
+empty = Params.empty
+assert empty.url.empty?, "empty url"
+assert empty.query.empty?, "empty query"
+assert empty.body.empty?, "empty body"
+assert !empty.has_key?("id"), "empty has nothing"
+
+headers = Headers.new
+headers["Host"] = "localhost"
+headers["Content-Type"] = "application/x-www-form-urlencoded; charset=utf-8"
+req = Request.new("POST", "/users", "q=from-query&id=query-id", "HTTP/1.1", headers, "name=iyi&id=body-id")
+
+url = {} of String => String
+url["id"] = "url-id"
+params = Params.from(req, url)
+
+assert params.url["id"] == "url-id", "url table"
+assert params.query["q"] == "from-query", "query table"
+assert params.query["id"] == "query-id", "query id"
+assert params.body["name"] == "iyi", "form body"
+assert params.body["id"] == "body-id", "form id"
+
+assert params["id"] == "url-id", "combined prefers url"
+assert params["q"] == "from-query", "combined falls to query"
+assert params["name"] == "iyi", "combined falls to body"
+assert params.has_key?("name"), "has_key body"
+assert !params.has_key?("missing"), "missing key"
+assert params["nope"]?.nil?, "[]? nil"
+
+json_headers = Headers.new
+json_headers["Content-Type"] = "application/json"
+json_req = Request.new("POST", "/", "", "HTTP/1.1", json_headers, "{\"a\":1}")
+json_params = Params.from(json_req, {} of String => String)
+assert json_params.body.empty?, "json body is not a form table"
+
+plain = Params.from(Request.new("POST", "/", "", "HTTP/1.1", Headers.new, "a=1"), {} of String => String)
+assert plain.body.empty?, "missing content-type is not a form"
+
+params.update_url({"id" => "next"})
+assert params.url["id"] == "next", "update_url replaces"
+
+puts "params_test ok"

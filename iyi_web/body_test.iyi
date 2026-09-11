@@ -1,0 +1,15 @@
+# IntoBody is the compile-time stand-in for Kemal's runtime `is_a?(String)`.
+module iyi_web/body_test
+
+import iyi_web/body
+
+using iyi_web/body::{IntoBody}
+
+assert "hello".into_body == "hello", "String"
+assert nil.into_body == "", "Nil"
+assert 42.into_body == "42", "Int32"
+assert 99_i64.into_body == "99", "Int64"
+assert true.into_body == "true", "true"
+assert false.into_body == "false", "false"
+
+puts "body_test ok"

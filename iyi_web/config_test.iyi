@@ -1,0 +1,43 @@
+# Process-wide config is one object, not a pile of class variables.
+module iyi_web/config_test
+
+import iyi_web/config
+import iyi_web/handler
+
+using iyi_web/config
+using iyi_web/config::{Config}
+using iyi_web/handler::{Handler}
+
+fresh = Config.new
+assert fresh.app_name == "iyi-web", "app name"
+assert fresh.host == "0.0.0.0", "host"
+assert fresh.public_folder == "./public", "public folder"
+assert fresh.logging, "logging on"
+assert !fresh.running, "not running"
+assert fresh.serve_static, "static on"
+assert !fresh.powered_by_header, "powered-by off"
+assert fresh.max_request_body_size == 8 * 1024 * 1024, "8 MiB"
+assert fresh.custom_handlers.empty?, "no custom handlers"
+
+fresh.app_name = "demo"
+fresh.port = 4000
+fresh.env = "production"
+fresh.logging = false
+fresh.serve_static = false
+fresh.powered_by_header = true
+assert fresh.app_name == "demo", "set name"
+assert fresh.port == 4000, "set port"
+assert fresh.env == "production", "set env"
+assert !fresh.development?, "production is not development"
+assert !fresh.logging, "logging off"
+assert !fresh.serve_static, "static off"
+assert fresh.powered_by_header, "powered-by on"
+
+fresh.add_handler(Handler.new)
+assert fresh.custom_handlers.size == 1, "add_handler"
+
+shared = config
+shared.env = "test"
+assert config.env == "test", "config is the process singleton"
+
+puts "config_test ok"

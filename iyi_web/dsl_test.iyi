@@ -1,0 +1,41 @@
+# The DSL writes onto the process app. `using` is what makes `get` a
+# bare word; this file is that consumer.
+module iyi_web/dsl_test
+
+import iyi_web/dsl
+import iyi_web/router
+import iyi_web/request
+import iyi_web/context
+import iyi_web/headers
+
+using iyi_web/dsl
+using iyi_web/router::{RouteHandler}
+using iyi_web/request::{Request}
+using iyi_web/context::{Context}
+using iyi_web/headers::{Headers}
+
+def make_request(method : String, path : String) : Request
+  headers = Headers.new
+  headers["Host"] = "localhost"
+  Request.new(method, path, "", "HTTP/1.1", headers, "")
+end
+
+get "/dsl" do |env|
+  "from-dsl"
+end
+
+error 404 do |env|
+  "dsl-missing"
+end
+
+handler = RouteHandler.new(app)
+
+hit = Context.for(make_request("GET", "/dsl"))
+handler.call(hit)
+assert hit.response.body == "from-dsl", "DSL get registers on app"
+
+miss = Context.for(make_request("GET", "/nope"))
+handler.call(miss)
+assert miss.response.body == "dsl-missing", "DSL error 404"
+
+puts "dsl_test ok"
