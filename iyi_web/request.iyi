@@ -3,13 +3,13 @@
 # Parsed from bytes, not from Crystal's `HTTP::Request`. The parser is
 # strict about the request-line and generous about header names, which is
 # the split RFC 9112 actually asks for.
-module kemal/request
+module iyi_web/request
 
-import kemal/codec
-import kemal/headers
+import iyi_web/codec
+import iyi_web/headers
 
-using kemal/codec
-using kemal/headers::{Headers}
+using iyi_web/codec
+using iyi_web/headers::{Headers}
 
 pub struct ParseError
   getter message : String

@@ -1,12 +1,12 @@
 # The writable half of a request: status, headers, body, and the `close`
 # flag `halt` sets so the rest of the chain writes nothing.
-module kemal/response
+module iyi_web/response
 
-import kemal/headers
-import kemal/status
+import iyi_web/headers
+import iyi_web/status
 
-using kemal/headers::{Headers}
-using kemal/status
+using iyi_web/headers::{Headers}
+using iyi_web/status
 
 pub class Response
   @status_code : Int32

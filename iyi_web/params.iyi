@@ -1,13 +1,13 @@
 # URL, query and form params, each their own table, and a combined lookup
 # that prefers the most specific: url, then query, then body. Kemal's
 # `env.params.url["id"]` shape, without Crystal's `HTTP::Params`.
-module kemal/params
+module iyi_web/params
 
-import kemal/codec
-import kemal/request
+import iyi_web/codec
+import iyi_web/request
 
-using kemal/codec
-using kemal/request::{Request}
+using iyi_web/codec
+using iyi_web/request::{Request}
 
 pub class Params
   @url : Hash(String, String)

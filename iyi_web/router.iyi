@@ -4,19 +4,19 @@
 # Registration returns a value. `Kemal::RouteHandler::INSTANCE` and the
 # three singletons beside it are gone: they were the workaround a clean
 # sheet is the moment to stop writing.
-module kemal/router
+module iyi_web/router
 
-import kemal/body
-import kemal/codec
-import kemal/context
-import kemal/radix
-import kemal/handler
+import iyi_web/body
+import iyi_web/codec
+import iyi_web/context
+import iyi_web/radix
+import iyi_web/handler
 
-using kemal/body::{IntoBody}
-using kemal/codec
-using kemal/context::{Context}
-using kemal/radix::{Tree, Match}
-using kemal/handler::{Handler}
+using iyi_web/body::{IntoBody}
+using iyi_web/codec
+using iyi_web/context::{Context}
+using iyi_web/radix::{Tree, Match}
+using iyi_web/handler::{Handler}
 
 alias HandlerProc = Context -> String
 

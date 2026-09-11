@@ -1,29 +1,29 @@
-# Kemal's DSL, and the reason `using` exists.
+# iyi-web's DSL, and the reason `using` exists.
 #
 # The original's first line is the whole problem: "Kemal DSL is defined here
 # and it's baked into global scope." `require "kemal"` injects `get` and
 # `before_all` into the importing program. `using` moves that decision to
 # the consumer: the library exports names, the program says which ones it
 # wants unqualified.
-module kemal/dsl
+module iyi_web/dsl
 
-import kemal/body
-import kemal/context
-import kemal/router
-import kemal/handler
-import kemal/config
-import kemal/log
-import kemal/server
-import kemal/static
+import iyi_web/body
+import iyi_web/context
+import iyi_web/router
+import iyi_web/handler
+import iyi_web/config
+import iyi_web/log
+import iyi_web/server
+import iyi_web/static
 
-using kemal/body::{IntoBody}
-using kemal/context::{Context}
-using kemal/router::{Router, RouteHandler}
-using kemal/handler::{Handler, chain}
-using kemal/config
-using kemal/log::{LogHandler}
-using kemal/server::{Server}
-using kemal/static::{StaticHandler}
+using iyi_web/body::{IntoBody}
+using iyi_web/context::{Context}
+using iyi_web/router::{Router, RouteHandler}
+using iyi_web/handler::{Handler, chain}
+using iyi_web/config
+using iyi_web/log::{LogHandler}
+using iyi_web/server::{Server}
+using iyi_web/static::{StaticHandler}
 
 HTTP_METHODS   = %w(get post put patch delete options head query)
 FILTER_METHODS = %w(get post put patch delete options query)

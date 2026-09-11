@@ -1,15 +1,15 @@
 # Static files from a public folder. Whole-file reads, a small extension
 # table, and a `..` refusal so a request cannot walk out of the folder.
 # Directory listing is not served: Kemal's default is the same.
-module kemal/static
+module iyi_web/static
 
-import kemal/codec
-import kemal/handler
-import kemal/context
+import iyi_web/codec
+import iyi_web/handler
+import iyi_web/context
 
-using kemal/codec
-using kemal/handler::{Handler}
-using kemal/context::{Context}
+using iyi_web/codec
+using iyi_web/handler::{Handler}
+using iyi_web/context::{Context}
 
 pub class StaticHandler < Handler
   @root : String

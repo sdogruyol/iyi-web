@@ -1,12 +1,15 @@
-# Kemal for iyi
+# iyi-web
 
 [Kemal](https://kemalcr.com), rewritten for [iyi](https://iyi-lang.com). Same
 Sinatra-shaped DSL. Different compilation model: modules, `using`, traits, no
 open classes.
 
+The package name is `iyi-web`. Module paths are snake_case (`iyi_web/dsl`)
+because iyi's in-package grammar does not admit a hyphen (SPEC.md IV.6).
+
 Crystal Kemal injects `get` into your program when you `require "kemal"`, and
 it reopens `HTTP::Server::Context`. iyi forbids both. The library exports
-names; the program writes `using kemal/dsl`. A handler may return anything
+names; the program writes `using iyi_web/dsl`. A handler may return anything
 that implements `IntoBody` — checked at the line you write the route, not
 silently emptied on every request.
 
@@ -20,33 +23,17 @@ iyi run examples/hello.iyi
 # http://localhost:3000/
 ```
 
-`PORT=4000 iyi run examples/hello.iyi` moves it. `KEMAL_ENV=production` turns
-the banner.
+`PORT=4000 iyi run examples/hello.iyi` moves it. `IYI_WEB_ENV=production`
+turns the banner.
 
 ```iyi
 module examples/hello
 
-import kemal/dsl
-using kemal/dsl
+import iyi_web/dsl
+using iyi_web/dsl
 
 get "/" do |env|
-  "Hello iyi!"
-end
-
-get "/hello/:name" do |env|
-  "Hello, #{env.params.url["name"]}!"
-end
-
-get "/count" do |env|
-  42
-end
-
-post "/echo" do |env|
-  env.request.body
-end
-
-error 404 do |env|
-  "no such route"
+  "Hello World!"
 end
 
 run
@@ -76,16 +63,16 @@ yet.
 ## Modules
 
 ```
-kemal/dsl        get, post, run, error, mount, use
-kemal/router     Router, RouteHandler, namespace
-kemal/context    Context (request, response, params, halt)
-kemal/body       IntoBody — String, Nil, Int32, Int64, Bool
-kemal/handler    Handler, chain
-kemal/server     HTTP/1.1 on IyiSocket
-kemal/config     port, env, public_folder, logging
+iyi_web/dsl        get, post, run, error, mount, use
+iyi_web/router     Router, RouteHandler, namespace
+iyi_web/context    Context (request, response, params, halt)
+iyi_web/body       IntoBody — String, Nil, Int32, Int64, Bool
+iyi_web/handler    Handler, chain
+iyi_web/server     HTTP/1.1 on IyiSocket
+iyi_web/config     port, env, public_folder, logging
 ```
 
-A program that only wants a sub-router imports `kemal/router` and never
+A program that only wants a sub-router imports `iyi_web/router` and never
 `using`s the DSL.
 
 `namespace` takes the sub-router as a block parameter (`|admin|`), not as
@@ -93,8 +80,8 @@ A program that only wants a sub-router imports `kemal/router` and never
 that a block's `self` changes (SPEC.md IV.2).
 
 ```iyi
-import kemal/router
-using kemal/router::{Router}
+import iyi_web/router
+using iyi_web/router::{Router}
 
 users = Router.new
 users.namespace "/admin" do |admin|
@@ -109,7 +96,7 @@ end
 A test is a `*_test.iyi` program that exits non-zero on failure.
 
 ```sh
-iyi test kemal
+iyi test iyi_web
 ```
 
 ## Crystal Kemal

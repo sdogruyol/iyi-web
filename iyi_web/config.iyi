@@ -3,11 +3,11 @@
 # tests had to `clear` the world between examples. The DSL still has one
 # process-wide config, because that is the Sinatra contract; it is this
 # object rather than a handful of globals.
-module kemal/config
+module iyi_web/config
 
-import kemal/handler
+import iyi_web/handler
 
-using kemal/handler::{Handler}
+using iyi_web/handler::{Handler}
 
 pub class Config
   @app_name : String
@@ -24,10 +24,10 @@ pub class Config
   @shutdown_message : Bool
 
   def initialize
-    @app_name = "Kemal"
+    @app_name = "iyi-web"
     @host = "0.0.0.0"
     @port = 3000
-    env = Program.env("KEMAL_ENV")
+    env = Program.env("IYI_WEB_ENV")
     @env = env ? env : "development"
     port_env = Program.env("PORT")
     parsed = port_env ? port_env.to_i? : nil

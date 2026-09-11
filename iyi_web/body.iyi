@@ -3,7 +3,7 @@
 # the line the handler is written on, and lets a consumer make their own
 # type returnable by implementing it — which Kemal cannot offer, because
 # the coercion is a runtime `is_a?`.
-module kemal/body
+module iyi_web/body
 
 pub trait IntoBody
   abstract def into_body : String

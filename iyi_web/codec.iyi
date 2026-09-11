@@ -4,7 +4,7 @@
 #
 # Kept in its own module so request, params and static files compile against
 # declarations rather than against one another's bodies (R-1).
-module kemal/codec
+module iyi_web/codec
 
 pub def join_paths(a : String, b : String) : String
   left = a.chomp('/')

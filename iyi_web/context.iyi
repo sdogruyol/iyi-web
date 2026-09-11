@@ -4,15 +4,15 @@
 # Crystal's Kemal reopens `HTTP::Server::Context`. That is the open-class
 # move R-3 exists to forbid, so this type lives here and is the whole of
 # what a handler sees.
-module kemal/context
+module iyi_web/context
 
-import kemal/request
-import kemal/response
-import kemal/params
+import iyi_web/request
+import iyi_web/response
+import iyi_web/params
 
-using kemal/request::{Request}
-using kemal/response::{Response}
-using kemal/params::{Params}
+using iyi_web/request::{Request}
+using iyi_web/response::{Response}
+using iyi_web/params::{Params}
 
 pub class Context
   @request : Request

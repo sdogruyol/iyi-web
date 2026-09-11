@@ -1,14 +1,14 @@
 # A first compile of the HTTP value types, without a server. Exits 0 only
 # when parse, query and header lookup agree with what was written.
-module kemal/codec_test
+module iyi_web/codec_test
 
-import kemal/codec
-import kemal/headers
-import kemal/request
+import iyi_web/codec
+import iyi_web/headers
+import iyi_web/request
 
-using kemal/codec
-using kemal/headers::{Headers}
-using kemal/request::{Request, ParseError, parse_head, with_body, split_target}
+using iyi_web/codec
+using iyi_web/headers::{Headers}
+using iyi_web/request::{Request, ParseError, parse_head, with_body, split_target}
 
 assert decode_form("hello+world") == "hello world", "plus is space in forms"
 assert decode_path("%2Ftmp") == "/tmp", "percent-decode path"

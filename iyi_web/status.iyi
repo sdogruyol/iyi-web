@@ -1,6 +1,6 @@
 # Status phrases RFC 9110 names, and nothing else. A code this table does
 # not know still serialises; it just gets a generic reason-phrase.
-module kemal/status
+module iyi_web/status
 
 pub def phrase(code : Int32) : String
   case code

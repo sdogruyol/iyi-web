@@ -1,13 +1,13 @@
 # Request logging. One line per request, after the handler has run, so the
 # status is the one that was actually sent.
-module kemal/log
+module iyi_web/log
 
-import kemal/handler
-import kemal/context
+import iyi_web/handler
+import iyi_web/context
 import std/time
 
-using kemal/handler::{Handler}
-using kemal/context::{Context}
+using iyi_web/handler::{Handler}
+using iyi_web/context::{Context}
 using std/time::{Time}
 
 pub class LogHandler < Handler

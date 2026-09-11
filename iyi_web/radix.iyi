@@ -1,11 +1,11 @@
 # A segment trie keyed on HTTP method + path. Not a compressed radix tree:
 # the nodes are one path segment each, which is enough for the routes a
-# Kemal app actually writes and far cheaper to get right than a compressed
+# iyi-web app actually writes and far cheaper to get right than a compressed
 # form. `:name` captures a segment, `*name` captures the rest.
 #
 # The tree is generic over the payload so the router can store a handler
 # without this module knowing what a handler is.
-module kemal/radix
+module iyi_web/radix
 
 pub class Match(T)
   def initialize(@payload : T, @params : Hash(String, String))

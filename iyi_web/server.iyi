@@ -4,21 +4,21 @@
 # the listen loop parks with `wait_readable` first and only then accepts.
 # Each connection is a task in the same group; the group's end is the
 # server shutting down.
-module kemal/server
+module iyi_web/server
 
 import std/socket
-import kemal/codec
-import kemal/handler
-import kemal/context
-import kemal/request
-import kemal/config
+import iyi_web/codec
+import iyi_web/handler
+import iyi_web/context
+import iyi_web/request
+import iyi_web/config
 
 using std/socket::{IyiSocket}
-using kemal/codec
-using kemal/handler::{Handler}
-using kemal/context::{Context}
-using kemal/request::{Request, ParseError, parse_head, with_body}
-using kemal/config::{Config}
+using iyi_web/codec
+using iyi_web/handler::{Handler}
+using iyi_web/context::{Context}
+using iyi_web/request::{Request, ParseError, parse_head, with_body}
+using iyi_web/config::{Config}
 
 MAX_HEADER_SIZE = 64 * 1024
 

@@ -1,15 +1,15 @@
 # Router dispatch without a socket: path params, HEAD fallback, 404, 405.
-module kemal/router_test
+module iyi_web/router_test
 
-import kemal/router
-import kemal/request
-import kemal/context
-import kemal/headers
+import iyi_web/router
+import iyi_web/request
+import iyi_web/context
+import iyi_web/headers
 
-using kemal/router::{Router, RouteHandler}
-using kemal/request::{Request}
-using kemal/context::{Context}
-using kemal/headers::{Headers}
+using iyi_web/router::{Router, RouteHandler}
+using iyi_web/request::{Request}
+using iyi_web/context::{Context}
+using iyi_web/headers::{Headers}
 
 def request(method : String, path : String) : Request
   request_with_query(method, path, "")

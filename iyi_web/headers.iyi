@@ -4,7 +4,7 @@
 # R-3 forbids that, so this is a type this module owns. A consumer that wants
 # a header writes `ctx.request.headers["content-type"]` and the case of the
 # name they used does not matter.
-module kemal/headers
+module iyi_web/headers
 
 pub class Headers
   @pairs : Array(Tuple(String, String))
