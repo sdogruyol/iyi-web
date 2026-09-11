@@ -136,6 +136,15 @@ bare.get "/bare" do |env|
 end
 router.mount(bare)
 
+router.get "/plain" do |env|
+  env.text("OK")
+  nil
+end
+router.get "/created" do |env|
+  env.status(201).json("{\"ok\":true}")
+  nil
+end
+
 handler = RouteHandler.new(router)
 
 home = dispatch(handler, "GET", "/")
@@ -156,6 +165,18 @@ assert options.response.headers["allow"] == "GET, POST", "OPTIONS Allow as writt
 assert dispatch(handler, "QUERY", "/search-body").response.body == "query-ok", "QUERY without body"
 query_form = dispatch(handler, http_request("QUERY", "/search-body", "", "q=iyi", "application/x-www-form-urlencoded"))
 assert query_form.response.body == "iyi", "QUERY form body"
+query_bare = dispatch(handler, http_request("QUERY", "/search-body", "", "q=iyi"))
+assert query_bare.response.status_code == 400, "QUERY body without Content-Type"
+assert query_bare.response.body == "400 Bad Request", "QUERY 400 body"
+
+plain = dispatch(handler, "GET", "/plain")
+assert plain.response.body == "OK", "env.text survives a nil return"
+assert plain.response.content_type == "text/plain; charset=utf-8", "env.text content-type"
+
+created = dispatch(handler, "GET", "/created")
+assert created.response.status_code == 201, "env.status"
+assert created.response.body == "{\"ok\":true}", "env.json body"
+assert created.response.content_type == "application/json; charset=utf-8", "env.json type"
 
 assert dispatch(handler, "GET", "/count").response.body == "42", "IntoBody Int32"
 assert dispatch(handler, "GET", "/empty").response.body == "", "IntoBody Nil"

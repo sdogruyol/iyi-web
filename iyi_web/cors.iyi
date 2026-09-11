@@ -1,0 +1,37 @@
+# CORS. A preflight (`OPTIONS` + `Access-Control-Request-Method`) is
+# answered here with 204 so the application's OPTIONS routes stay for
+# real ones. Ordinary requests get `Access-Control-Allow-Origin` and
+# continue down the chain.
+#
+# Not in the default stack: `use CORSHandler.new`.
+module iyi_web/cors
+
+import iyi_web/handler
+import iyi_web/context
+
+using iyi_web/handler::{Handler}
+using iyi_web/context::{Context}
+
+pub class CORSHandler < Handler
+  @origin : String
+  @methods : String
+  @headers : String
+  @max_age : String
+
+  def initialize(@origin : String = "*", @methods : String = "GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD, QUERY", @headers : String = "*", @max_age : String = "86400")
+    super()
+  end
+
+  pub def call(ctx : Context) : Nil
+    ctx.response.headers["Access-Control-Allow-Origin"] = @origin
+    preflight = ctx.request.method == "OPTIONS" && ctx.request.headers.has_key?("Access-Control-Request-Method")
+    if preflight
+      ctx.response.headers["Access-Control-Allow-Methods"] = @methods
+      ctx.response.headers["Access-Control-Allow-Headers"] = @headers
+      ctx.response.headers["Access-Control-Max-Age"] = @max_age
+      ctx.halt(204, "")
+      return
+    end
+    call_next(ctx)
+  end
+end

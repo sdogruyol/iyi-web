@@ -48,4 +48,9 @@ headless = Response.new
 headless.set_body("ok")
 assert headless.to_http("HTTP/1.1", false) == "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 2\r\n\r\n", "HEAD omits the body and keeps the length"
 
+empty = Response.new
+empty.status_code = 204
+empty.set_body("nope")
+assert empty.to_http("HTTP/1.1") == "HTTP/1.1 204 No Content\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 0\r\n\r\n", "204 has no entity"
+
 puts "response_test ok"

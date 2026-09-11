@@ -1,0 +1,42 @@
+# RFC 9110 HTTP-date (`IMF-fixdate`). The prelude has UTC civil time and
+# no strftime, so the weekday and month tables live here.
+module iyi_web/http_date
+
+import std/time
+
+using std/time::{Time, DayOfWeek}
+
+pub def http_date(time : Time) : String
+  weekday_name(time.day_of_week) + ", " + pad2(time.day) + " " + month_name(time.month) + " " + time.year.to_s + " " + pad2(time.hour) + ":" + pad2(time.minute) + ":" + pad2(time.second) + " GMT"
+end
+
+private def pad2(n : Int32) : String
+  n < 10 ? "0" + n.to_s : n.to_s
+end
+
+private def weekday_name(day : DayOfWeek) : String
+  return "Mon" if day.monday?
+  return "Tue" if day.tuesday?
+  return "Wed" if day.wednesday?
+  return "Thu" if day.thursday?
+  return "Fri" if day.friday?
+  return "Sat" if day.saturday?
+  "Sun"
+end
+
+private def month_name(month : Int32) : String
+  case month
+  when 1  then "Jan"
+  when 2  then "Feb"
+  when 3  then "Mar"
+  when 4  then "Apr"
+  when 5  then "May"
+  when 6  then "Jun"
+  when 7  then "Jul"
+  when 8  then "Aug"
+  when 9  then "Sep"
+  when 10 then "Oct"
+  when 11 then "Nov"
+  else         "Dec"
+  end
+end

@@ -214,6 +214,13 @@ pub class RouteHandler < Handler
 
     method = ctx.request.method
     path = ctx.request.path
+
+    if method == "QUERY" && !ctx.request.body.empty? && ctx.request.content_type.empty?
+      render_error(ctx, 400)
+      drop_head_body(ctx)
+      return
+    end
+
     match = lookup(method, path)
 
     unless match
@@ -239,7 +246,11 @@ pub class RouteHandler < Handler
     end
 
     body = route.handler.call(ctx)
-    ctx.response.set_body(body) unless ctx.halted?
+    unless ctx.halted?
+      # A helper like `env.text` already wrote the body and returned nil.
+      # Replacing that with the empty IntoBody would wipe it.
+      ctx.response.set_body(body) unless body.empty? && !ctx.response.body.empty?
+    end
 
     if ctx.halted?
       drop_head_body(ctx)
@@ -311,6 +322,8 @@ pub class RouteHandler < Handler
         ctx.response.set_body("404 Not Found")
       elsif status == 405
         ctx.response.set_body("405 Method Not Allowed")
+      elsif status == 400
+        ctx.response.set_body("400 Bad Request")
       else
         ctx.response.set_body(status.to_s)
       end

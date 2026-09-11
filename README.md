@@ -57,6 +57,10 @@ run
 | `env.cookies` / `env.set_cookie` | Cookie / Set-Cookie |
 | `env.send_file` | whole-file response |
 | `_method` | `use OverrideMethodHandler.new` |
+| `use "/api", handler` | path-scoped middleware |
+| `use CORSHandler.new` | CORS + preflight 204 |
+| `env.text` / `html` / `xml` / `json` | content-type + body |
+| `Date` | RFC 9110 IMF-fixdate |
 
 iyi's own prelude has no `HTTP::Server` and no TLS. The server is
 `std/socket` plus the cooperative scheduler (`wait_readable`, `group` /
@@ -75,6 +79,9 @@ iyi_web/server     HTTP/1.1 keep-alive on IyiSocket
 iyi_web/config     port, env, public_folder, logging, keepalive
 iyi_web/cookies    Cookie header table
 iyi_web/override   POST `_method` → PUT/PATCH/DELETE
+iyi_web/path       prefix-scoped middleware
+iyi_web/cors       CORS + preflight
+iyi_web/http_date  RFC 9110 Date
 ```
 
 A program that only wants a sub-router imports `iyi_web/router` and never

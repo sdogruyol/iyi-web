@@ -1,0 +1,13 @@
+# RFC 9110 IMF-fixdate, including the example from the spec itself.
+module iyi_web/http_date_test
+
+import iyi_web/http_date
+import std/time
+
+using iyi_web/http_date
+using std/time::{Time}
+
+assert http_date(Time.utc(1994, 11, 6, 8, 49, 37)) == "Sun, 06 Nov 1994 08:49:37 GMT", "RFC example"
+assert http_date(Time.utc(2026, 1, 2, 3, 4, 5)) == "Fri, 02 Jan 2026 03:04:05 GMT", "padded fields"
+
+puts "http_date_test ok"

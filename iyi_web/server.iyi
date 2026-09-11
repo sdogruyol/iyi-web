@@ -12,6 +12,8 @@ import iyi_web/handler
 import iyi_web/context
 import iyi_web/request
 import iyi_web/config
+import iyi_web/http_date
+import std/time
 
 using std/socket::{IyiSocket}
 using iyi_web/codec
@@ -19,6 +21,8 @@ using iyi_web/handler::{Handler}
 using iyi_web/context::{Context}
 using iyi_web/request::{Request, ParseError, parse_head, with_body}
 using iyi_web/config::{Config}
+using iyi_web/http_date
+using std/time::{Time}
 
 MAX_HEADER_SIZE = 64 * 1024
 
@@ -134,6 +138,9 @@ pub class Server
     ctx = Context.for(request)
     if @config.powered_by_header
       ctx.response.headers["X-Powered-By"] = "iyi-web"
+    end
+    unless ctx.response.headers.has_key?("Date")
+      ctx.response.headers["Date"] = http_date(Time.utc)
     end
     @handler.call(ctx)
     if conn = ctx.response.headers["connection"]?

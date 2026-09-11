@@ -77,12 +77,14 @@ pub class Response
     unless @headers.has_key?("Content-Type")
       @headers["Content-Type"] = @content_type
     end
+
+    no_entity = @status_code == 204 || @status_code == 304 || (@status_code >= 100 && @status_code < 200)
     unless @headers.has_key?("Content-Length")
-      @headers["Content-Length"] = @body.bytesize.to_s
+      @headers["Content-Length"] = no_entity ? "0" : @body.bytesize.to_s
     end
 
     reason = phrase(@status_code)
-    payload = include_body ? @body : ""
+    payload = include_body && !no_entity ? @body : ""
     version + " " + @status_code.to_s + " " + reason + "\r\n" + @headers.to_s + "\r\n" + payload
   end
 end

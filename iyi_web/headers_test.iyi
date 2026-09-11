@@ -34,4 +34,8 @@ end
 assert names.size == 3, "each visits every pair"
 assert names[0] == "content-type=text/html", "each starts at the first pair"
 
+headers.delete("X-A")
+assert !headers.has_key?("x-a"), "delete drops every case-insensitive match"
+assert headers.to_s == "content-type: text/html\r\n", "delete leaves the rest"
+
 puts "headers_test ok"

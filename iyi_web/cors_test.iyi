@@ -1,0 +1,38 @@
+# CORS: preflight is 204 here; a plain OPTIONS still reaches the router.
+module iyi_web/cors_test
+
+import iyi_web/cors
+import iyi_web/handler
+import iyi_web/router
+import iyi_web/harness
+
+using iyi_web/cors::{CORSHandler}
+using iyi_web/handler::{chain}
+using iyi_web/router::{Router, RouteHandler}
+using iyi_web/harness
+
+router = Router.new
+router.get "/x" do |env|
+  "ok"
+end
+router.options "/x" do |env|
+  "opt"
+end
+
+head = chain([CORSHandler.new, RouteHandler.new(router)])
+
+get = dispatch(head, "GET", "/x")
+assert get.response.body == "ok", "GET still hits the route"
+assert get.response.headers["access-control-allow-origin"] == "*", "CORS origin on GET"
+
+opt = dispatch(head, "OPTIONS", "/x")
+assert opt.response.body == "opt", "plain OPTIONS is the route"
+
+pre = http_request("OPTIONS", "/x")
+pre.headers["Access-Control-Request-Method"] = "POST"
+preflight = dispatch(head, pre)
+assert preflight.response.status_code == 204, "preflight 204"
+assert preflight.response.body == "", "preflight no body"
+assert preflight.response.headers["access-control-allow-methods"].includes?("POST"), "allow methods"
+
+puts "cors_test ok"

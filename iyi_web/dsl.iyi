@@ -15,6 +15,7 @@ import iyi_web/config
 import iyi_web/log
 import iyi_web/server
 import iyi_web/static
+import iyi_web/path
 
 using iyi_web/body::{IntoBody}
 using iyi_web/context::{Context}
@@ -24,6 +25,7 @@ using iyi_web/config
 using iyi_web/log::{LogHandler}
 using iyi_web/server::{Server}
 using iyi_web/static::{StaticHandler}
+using iyi_web/path::{PathHandler}
 
 HTTP_METHODS   = %w(get post put patch delete options head query)
 FILTER_METHODS = %w(get post put patch delete options query)
@@ -72,6 +74,18 @@ end
 
 pub def use(handler : Handler) : Nil
   add_handler(handler)
+end
+
+pub def use(path : String, handler : Handler) : Nil
+  add_handler(PathHandler.new(path, handler))
+end
+
+pub def host(value : String) : Nil
+  config.host = value
+end
+
+pub def powered_by(status : Bool) : Nil
+  config.powered_by_header = status
 end
 
 pub def logging(status : Bool) : Nil

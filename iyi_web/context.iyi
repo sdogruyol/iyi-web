@@ -81,15 +81,43 @@ pub class Context
     jar
   end
 
-  pub def set_cookie(name : String, value : String, path : String = "/", http_only : Bool = false) : Nil
+  pub def set_cookie(name : String, value : String, path : String = "/", http_only : Bool = false, secure : Bool = false, max_age : Int32 = 0, same_site : String = "") : Nil
     cookie = name + "=" + value + "; Path=" + path
     cookie = cookie + "; HttpOnly" if http_only
+    cookie = cookie + "; Secure" if secure
+    cookie = cookie + "; Max-Age=" + max_age.to_s if max_age > 0
+    cookie = cookie + "; SameSite=" + same_site unless same_site.empty?
     @response.headers.add("Set-Cookie", cookie)
+  end
+
+  pub def status(code : Int32) : Context
+    @response.status_code = code
+    self
+  end
+
+  pub def text(content : String) : Nil
+    @response.content_type = "text/plain; charset=utf-8"
+    @response.set_body(content)
+  end
+
+  pub def html(content : String) : Nil
+    @response.content_type = "text/html; charset=utf-8"
+    @response.set_body(content)
+  end
+
+  pub def xml(content : String) : Nil
+    @response.content_type = "application/xml; charset=utf-8"
+    @response.set_body(content)
+  end
+
+  pub def json(content : String) : Nil
+    @response.content_type = "application/json; charset=utf-8"
+    @response.set_body(content)
   end
 
   # Whole-file send. Missing paths and directories 404 rather than panicking
   # inside File.read; MIME follows the extension unless the caller names one.
-  pub def send_file(path : String, mime_type : String = "") : Nil
+  pub def send_file(path : String, mime_type : String = "", filename : String = "") : Nil
     if !File.exists?(path) || directory?(path)
       halt(404, "404 Not Found")
       return
@@ -98,6 +126,9 @@ pub class Context
     type = mime_type.empty? ? mime_type_of(path) : mime_type
     @response.content_type = type
     @response.headers["X-Content-Type-Options"] = "nosniff"
+    unless filename.empty?
+      @response.headers["Content-Disposition"] = "attachment; filename=\"" + filename + "\""
+    end
     @response.set_body(File.read(path))
   end
 

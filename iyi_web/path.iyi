@@ -1,0 +1,33 @@
+# Prefix-scoped middleware. `use "/api", AuthHandler.new` runs Auth only
+# for `/api` and its descendants; everything else skips to the next handler.
+module iyi_web/path
+
+import iyi_web/codec
+import iyi_web/handler
+import iyi_web/context
+
+using iyi_web/codec
+using iyi_web/handler::{Handler}
+using iyi_web/context::{Context}
+
+pub class PathHandler < Handler
+  @prefix : String
+  @inner : Handler
+
+  def initialize(@prefix : String, @inner : Handler)
+    super()
+  end
+
+  pub def next_handler=(handler : Handler) : Handler
+    @inner.next_handler = handler
+    super
+  end
+
+  pub def call(ctx : Context) : Nil
+    if matches_path_prefix?(@prefix, ctx.request.path)
+      @inner.call(ctx)
+    else
+      call_next(ctx)
+    end
+  end
+end

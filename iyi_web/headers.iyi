@@ -61,4 +61,13 @@ pub class Headers
   pub def empty? : Bool
     @pairs.empty?
   end
+
+  pub def delete(name : String) : Nil
+    key = name.downcase
+    kept = [] of Tuple(String, String)
+    @pairs.each do |pair|
+      kept << pair unless pair[0].downcase == key
+    end
+    @pairs = kept
+  end
 end

@@ -101,6 +101,11 @@ group do |g|
     assert http_header(home, "X-Powered-By") == "iyi-web", "powered-by"
     assert http_header(home, "Connection") == "close", "close"
     assert http_body(home) == "home", "GET / body"
+    date = http_header(home, "Date")
+    assert !date.nil?, "Date header"
+    if dated = date
+      assert dated.includes?("GMT"), "Date is HTTP-date"
+    end
 
     named = exchange(port, "GET /hello/dunya HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
     assert http_body(named) == "Hello, dunya!", "url param over TCP"

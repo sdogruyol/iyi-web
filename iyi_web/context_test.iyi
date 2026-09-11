@@ -65,8 +65,21 @@ written = set.response.headers.to_s
 assert written.includes?("Set-Cookie: sid=1; Path=/\r\n"), "set_cookie"
 assert written.includes?("Set-Cookie: x=y; Path=/; HttpOnly\r\n"), "HttpOnly cookie"
 
+secure = Context.for(http_request("GET", "/"))
+secure.set_cookie("sid", "1", "/", true, true, 60, "Lax")
+assert secure.response.headers.to_s.includes?("Secure"), "Secure cookie"
+assert secure.response.headers.to_s.includes?("Max-Age=60"), "Max-Age"
+assert secure.response.headers.to_s.includes?("SameSite=Lax"), "SameSite"
+
+typed = Context.for(http_request("GET", "/"))
+typed.status(201).html("<p>hi</p>")
+assert typed.response.status_code == 201, "status chains"
+assert typed.response.content_type == "text/html; charset=utf-8", "env.html"
+assert typed.response.body == "<p>hi</p>", "html body"
+
 file_ctx = Context.for(http_request("GET", "/"))
-file_ctx.send_file(__DIR__ + "/fixtures/hello.txt")
+file_ctx.send_file(__DIR__ + "/fixtures/hello.txt", "", "hello.txt")
+assert file_ctx.response.headers["content-disposition"] == "attachment; filename=\"hello.txt\"", "send_file filename"
 assert file_ctx.response.body == File.read(__DIR__ + "/fixtures/hello.txt"), "send_file body"
 assert file_ctx.response.content_type == "text/plain; charset=utf-8", "send_file mime"
 assert file_ctx.response.headers["x-content-type-options"] == "nosniff", "nosniff"
