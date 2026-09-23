@@ -140,7 +140,7 @@ private def start(port : Int32 | Nil) : Nil
   cfg.custom_handlers.each { |handler| handlers << handler }
   handlers << RouteHandler.new(app)
 
-  server = Server.new(chain(handlers), cfg)
+  server = Server.new(chain(handlers), cfg, app.error_handlers)
   bound = server.bind(cfg.host, cfg.port)
   cfg.port = bound
   HOLDER.server = server

@@ -24,6 +24,7 @@ pub class Config
   @max_request_body_size : Int32
   @custom_handlers : Array(Handler)
   @shutdown_message : Bool
+  @show_exceptions : Bool?
 
   def initialize
     @app_name = "iyi-web"
@@ -44,6 +45,7 @@ pub class Config
     @max_request_body_size = 8 * 1024 * 1024
     @custom_handlers = [] of Handler
     @shutdown_message = true
+    @show_exceptions = nil
   end
 
   pub def app_name : String
@@ -156,6 +158,18 @@ pub class Config
 
   pub def development? : Bool
     @env == "development"
+  end
+
+  # Whether a panic's message reaches the client on the 500 page. Unset, it
+  # follows the environment: shown in development, hidden everywhere else.
+  pub def show_exceptions? : Bool
+    explicit = @show_exceptions
+    explicit.nil? ? development? : explicit
+  end
+
+  pub def show_exceptions=(value : Bool) : Bool
+    @show_exceptions = value
+    value
   end
 end
 

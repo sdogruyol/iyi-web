@@ -8,13 +8,18 @@ import std/time
 
 using iyi_web/handler::{Handler}
 using iyi_web/context::{Context}
-using std/time::{Time}
+using std/time::{Time, Span}
 
 pub class LogHandler < Handler
   pub def call(ctx : Context) : Nil
     started = Time.monotonic
     call_next(ctx)
-    elapsed = Time.monotonic - started
-    puts ctx.request.method + " " + ctx.request.path + " " + ctx.response.status_code.to_s + " " + elapsed.total_milliseconds.to_s + "ms"
+    puts request_log_line(ctx.request.method, ctx.request.path, ctx.response.status_code, Time.monotonic - started)
   end
+end
+
+# The one line format, shared with the server's own line for a request
+# whose handler panicked before `LogHandler` could write it.
+pub def request_log_line(method : String, path : String, status : Int32, elapsed : Span) : String
+  method + " " + path + " " + status.to_s + " " + elapsed.total_milliseconds.to_s + "ms"
 end

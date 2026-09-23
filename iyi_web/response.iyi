@@ -69,6 +69,16 @@ pub class Response
     @body = text
   end
 
+  # A fresh 200 with no headers and no body, for a response that has to be
+  # rebuilt after its handler failed part-way through writing it.
+  pub def reset : Nil
+    @status_code = 200
+    @headers = Headers.new
+    @body = ""
+    @closed = false
+    @content_type = "text/html; charset=utf-8"
+  end
+
   # Serialise to the bytes a TCP connection is owed. `Content-Length` is
   # always written here so a keep-alive connection has a frame; a handler
   # that already set one is left alone. HEAD omits the body (RFC 9110 §9.3.2)

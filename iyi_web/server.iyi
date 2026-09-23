@@ -6,10 +6,17 @@
 # `listen`. The response is still this library's: handlers mutate a
 # class, and `Set-Cookie` may appear more than once, which a Hash cannot
 # hold.
+#
+# Every connection runs as its own task inside its own group. `listen`'s
+# group cancels every live child on the first failure (III.4.3), so a
+# handler's panic, or a write to a client that has gone, would otherwise
+# close every other connection too. Reading a task's value is what
+# catches its panic; the request being handled then gets a 500.
 module iyi_web/server
 
 import std/socket
 import std/http
+import std/html
 import std/time
 import iyi_web/handler
 import iyi_web/context
@@ -17,26 +24,32 @@ import iyi_web/request
 import iyi_web/response
 import iyi_web/config
 import iyi_web/http_date
+import iyi_web/log
 
 using std/socket::{IyiSocket}
 using std/http::{HTTP}
+using std/html::{HTML}
 using iyi_web/handler::{Handler}
 using iyi_web/context::{Context}
 using iyi_web/request::{Request, ParseError, Incoming, parse_incoming}
 using iyi_web/response::{Response}
 using iyi_web/config::{Config}
 using iyi_web/http_date
-using std/time::{Time}
+using iyi_web/log::{request_log_line}
+using std/time::{Time, Span}
 
 pub class Server
   @handler : Handler
   @config : Config
+  @error_pages : Hash(Int32, Proc(Context, String))
   @socket : IyiSocket?
   @in_flight : Int32
   @host : String
   @port : Int32
 
-  def initialize(@handler : Handler, @config : Config)
+  # *error_pages* are the application's `error` handlers; the one for 500
+  # renders the page a panicking request gets.
+  def initialize(@handler : Handler, @config : Config, @error_pages : Hash(Int32, Proc(Context, String)) = {} of Int32 => Proc(Context, String))
     @socket = nil
     @in_flight = 0
     @host = "127.0.0.1"
@@ -63,7 +76,7 @@ pub class Server
         in IyiSocket
           accepted = client
           g.spawn do
-            serve_connection(accepted)
+            serve_isolated(accepted)
             0
           end
         end
@@ -86,8 +99,31 @@ pub class Server
     @port
   end
 
-  private def serve_connection(client : IyiSocket) : Nil
-    defer client.close
+  private def serve_isolated(client : IyiSocket) : Nil
+    exchange = Exchange.new
+    failure = isolated { serve_connection(client, exchange) }
+    if failure && !exchange.writing
+      if ctx = exchange.context
+        isolated { answer_panic(client, ctx, exchange.started, failure) }
+      end
+    end
+    client.close
+  end
+
+  # Runs *block* as its own task and answers its panic, if it had one. The
+  # group is this call's alone, so the failure goes no further.
+  private def isolated(&block : -> Nil) : Panicked?
+    outcome = group do |g|
+      task = g.spawn do
+        block.call
+        0
+      end
+      task.value
+    end
+    outcome.is_a?(Panicked) ? outcome : nil
+  end
+
+  private def serve_connection(client : IyiSocket, exchange : Exchange) : Nil
     leftover = ""
     requests = 0
     loop do
@@ -101,7 +137,7 @@ pub class Server
       in Tuple(Request, String, Bool)
         leftover = it[1]
         keepalive = wants_keepalive?(it[2], requests)
-        dispatch(client, it[0], keepalive)
+        dispatch(client, it[0], keepalive, exchange)
         return unless keepalive
         requests = requests + 1
       end
@@ -114,23 +150,84 @@ pub class Server
     already + 1 < @config.max_keepalive_requests
   end
 
-  private def dispatch(client : IyiSocket, request : Request, keepalive : Bool) : Nil
+  private def dispatch(client : IyiSocket, request : Request, keepalive : Bool, exchange : Exchange) : Nil
     @in_flight = @in_flight + 1
+    defer leave
     ctx = Context.for(request)
+    exchange.context = ctx
+    exchange.started = Time.monotonic
+    stamp(ctx)
+    @handler.call(ctx)
+    if conn = ctx.response.headers["connection"]?
+      keepalive = false if conn.downcase == "close"
+    end
+    ctx.response.headers["Connection"] = keepalive ? "keep-alive" : "close"
+    exchange.writing = true
+    write_raw(client, ctx.response.to_http(wire_version(request), !HTTP.same_name?(request.method, "HEAD")))
+    exchange.writing = false
+    exchange.context = nil
+  end
+
+  private def leave : Nil
+    @in_flight = @in_flight - 1
+  end
+
+  private def stamp(ctx : Context) : Nil
     if @config.powered_by_header
       ctx.response.headers["X-Powered-By"] = "iyi-web"
     end
     unless ctx.response.headers.has_key?("Date")
       ctx.response.headers["Date"] = http_date(Time.utc)
     end
-    @handler.call(ctx)
-    if conn = ctx.response.headers["connection"]?
-      keepalive = false if conn.downcase == "close"
+  end
+
+  # The handler panicked before its response went out. The response is
+  # rebuilt from nothing: whatever the handler had written is not a page
+  # anyone meant to send. The application's `error 500` page is used when
+  # it renders; it is application code, so it may panic too, and then the
+  # built-in page is sent instead.
+  private def answer_panic(client : IyiSocket, ctx : Context, started : Span, failure : Panicked) : Nil
+    request = ctx.request
+    rendered = false
+    if page = @error_pages[500]?
+      body = ""
+      prepare_500(ctx)
+      page_failed = isolated { body = page.call(ctx) }
+      unless page_failed
+        ctx.response.set_body(body)
+        rendered = true
+      end
     end
-    ctx.response.headers["Connection"] = keepalive ? "keep-alive" : "close"
-    include_body = !HTTP.same_name?(request.method, "HEAD")
-    write_raw(client, ctx.response.to_http(request.version.empty? ? "HTTP/1.1" : request.version, include_body))
-    @in_flight = @in_flight - 1
+    unless rendered
+      prepare_500(ctx)
+      ctx.response.set_body(panic_page(request, failure))
+      if @config.show_exceptions?
+        ctx.response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'"
+        ctx.response.headers["X-Content-Type-Options"] = "nosniff"
+      end
+    end
+    ctx.response.headers["Connection"] = "close"
+    if @config.logging
+      puts request_log_line(request.method, request.path, 500, Time.monotonic - started)
+    end
+    write_raw(client, ctx.response.to_http(wire_version(request), !HTTP.same_name?(request.method, "HEAD")))
+  end
+
+  private def prepare_500(ctx : Context) : Nil
+    ctx.response.reset
+    ctx.response.status_code = 500
+    stamp(ctx)
+  end
+
+  private def panic_page(request : Request, failure : Panicked) : String
+    title = "500 Internal Server Error"
+    return "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>" + title + "</title></head><body><h1>" + title + "</h1></body></html>\n" unless @config.show_exceptions?
+    "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>" + title + "</title></head><body><h1>" + title + "</h1><p>" +
+      HTML.escape(request.method) + " " + HTML.escape(request.path) + "</p><pre>" + HTML.escape(failure.text) + "</pre></body></html>\n"
+  end
+
+  private def wire_version(request : Request) : String
+    request.version.empty? ? "HTTP/1.1" : request.version
   end
 
   private def read_request(client : IyiSocket, leftover : String) : Tuple(Request, String, Bool) | ParseError | Closed
@@ -177,4 +274,18 @@ pub class Server
 end
 
 pub struct Closed
+end
+
+# What a connection's task was doing when it stopped: the request being
+# handled, until its response starts going out.
+class Exchange
+  property context : Context?
+  property started : Span
+  property writing : Bool
+
+  def initialize
+    @context = nil
+    @started = Time.monotonic
+    @writing = false
+  end
 end

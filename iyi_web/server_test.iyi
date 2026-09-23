@@ -76,8 +76,24 @@ router.get "/go" do |env|
   env.redirect("/there")
   ""
 end
+router.get "/go-to" do |env|
+  env.redirect(env.params.query["to"]? || "/")
+  ""
+end
 router.error 404 do |env|
   "nope"
+end
+router.get "/boom" do |env|
+  raise "kaboom <b>" if env.request.path == "/boom"
+  "unreachable"
+end
+router.get "/boom-twice" do |env|
+  raise "handler failed" if env.request.path == "/boom-twice"
+  "unreachable"
+end
+router.error 500 do |env|
+  raise "page failed" if env.request.path == "/boom-twice"
+  "sorry: " + env.request.path
 end
 
 cfg = config
@@ -85,7 +101,7 @@ cfg.logging = false
 cfg.serve_static = false
 cfg.powered_by_header = true
 
-server = Server.new(chain([RouteHandler.new(router)]), cfg)
+server = Server.new(chain([RouteHandler.new(router)]), cfg, router.error_handlers)
 port = server.bind("127.0.0.1", 0)
 
 group do |g|
@@ -195,6 +211,47 @@ group do |g|
         alive.close
         assert http_body(second) == "{}"
         assert http_header(second, "Connection") == "close"
+      end
+
+      it "answers a panicking route with the error 500 page and closes" do
+        boom = exchange(port, "GET /boom HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        assert status_line(boom) == "HTTP/1.1 500 Internal Server Error"
+        assert http_header(boom, "Connection") == "close"
+        assert http_body(boom) == "sorry: /boom"
+      end
+
+      it "falls back to the built-in 500 page when the error page panics" do
+        cfg.show_exceptions = true
+        shown = exchange(port, close_request("GET", "/boom-twice"))
+        assert status_line(shown) == "HTTP/1.1 500 Internal Server Error"
+        assert http_body(shown).includes?("handler failed")
+        assert http_header(shown, "Content-Security-Policy") == "default-src 'none'; style-src 'unsafe-inline'"
+
+        cfg.show_exceptions = false
+        hidden = exchange(port, close_request("GET", "/boom-twice"))
+        assert status_line(hidden) == "HTTP/1.1 500 Internal Server Error"
+        assert !http_body(hidden).includes?("handler failed")
+      end
+
+      it "keeps other connections open when one request panics" do
+        alive = IyiSocket.connect("127.0.0.1", port).or_panic
+        alive.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+        assert http_body(read_frame(alive)) == "home"
+
+        boom = exchange(port, close_request("GET", "/boom"))
+        assert status_line(boom) == "HTTP/1.1 500 Internal Server Error"
+
+        alive.write("GET /json HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+        again = read_frame(alive)
+        alive.close
+        assert status_line(again) == "HTTP/1.1 200 OK"
+        assert http_body(again) == "{}"
+      end
+
+      it "refuses a redirect to a location carrying CR and LF" do
+        forged = exchange(port, close_request("GET", "/go-to?to=/next%0d%0aSet-Cookie:%20injected=1"))
+        assert status_line(forged) == "HTTP/1.1 500 Internal Server Error"
+        assert http_header(forged, "Set-Cookie").nil?
       end
     end
 
