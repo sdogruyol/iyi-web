@@ -1,30 +1,32 @@
-# An HTTP/1.1 server on iyi's own sockets and scheduler.
+# An HTTP/1.1 server on `std/http`'s parser and iyi's parking sockets.
 #
-# `IyiSocket` is blocking. A blocking `accept` would stall every fiber, so
-# the listen loop parks with `wait_readable` first and only then accepts.
-# Each connection is a task in the same group; the group's end is the
-# server shutting down.
+# `IyiSocket#accept` / `#read` / `#write` park the calling fiber, so a
+# slow client costs one task, not the thread. Closing the listener
+# answers `Cancelled` on a parked `accept`, which is how `close` ends
+# `listen`. The response is still this library's: handlers mutate a
+# class, and `Set-Cookie` may appear more than once, which a Hash cannot
+# hold.
 module iyi_web/server
 
 import std/socket
-import iyi_web/codec
+import std/http
+import std/time
 import iyi_web/handler
 import iyi_web/context
 import iyi_web/request
+import iyi_web/response
 import iyi_web/config
 import iyi_web/http_date
-import std/time
 
 using std/socket::{IyiSocket}
-using iyi_web/codec
+using std/http::{HTTP}
 using iyi_web/handler::{Handler}
 using iyi_web/context::{Context}
-using iyi_web/request::{Request, ParseError, parse_head, with_body}
+using iyi_web/request::{Request, ParseError, Incoming, parse_incoming}
+using iyi_web/response::{Response}
 using iyi_web/config::{Config}
 using iyi_web/http_date
 using std/time::{Time}
-
-MAX_HEADER_SIZE = 64 * 1024
 
 pub class Server
   @handler : Handler
@@ -54,41 +56,26 @@ pub class Server
     raise "server is not bound" unless listener
 
     group do |g|
-      loop do
-        break unless @socket
-        case wait_readable(listener.fd)
+      while !listener.closed?
+        case client = listener.accept
         in Cancelled
           break
-        in Nil
-          break unless @socket
-          client = accept_one(listener)
-          next unless client
-          unless @socket
-            client.close
-            break
-          end
+        in IyiSocket
+          accepted = client
           g.spawn do
-            serve_connection(client)
+            serve_connection(accepted)
             0
           end
         end
       end
+      0
     end
   end
 
-  # Closing the listen fd from another fiber does not wake `wait_readable`
-  # (epoll has no event for a close it did not see). A loopback connect
-  # produces the readable event the park is waiting for; the loop then
-  # sees `@socket` gone and returns.
   pub def close : Nil
     listener = @socket
     @socket = nil
-    return unless listener
-
-    wake_host = @host == "0.0.0.0" ? "127.0.0.1" : @host
-    waker = IyiSocket.connect(wake_host, @port)
-    waker.close
-    listener.close
+    listener.close if listener
   end
 
   pub def in_flight : Int32
@@ -97,12 +84,6 @@ pub class Server
 
   pub def bound_port : Int32
     @port
-  end
-
-  private def accept_one(listener : IyiSocket) : IyiSocket?
-    listener.accept
-  rescue
-    nil
   end
 
   private def serve_connection(client : IyiSocket) : Nil
@@ -115,11 +96,11 @@ pub class Server
       in Closed
         return
       in ParseError
-        write_raw(client, "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request")
+        write_error(client, 400, "Bad Request")
         return
-      in Tuple(Request, String)
+      in Tuple(Request, String, Bool)
         leftover = it[1]
-        keepalive = wants_keepalive?(it[0], requests)
+        keepalive = wants_keepalive?(it[2], requests)
         dispatch(client, it[0], keepalive)
         return unless keepalive
         requests = requests + 1
@@ -127,9 +108,9 @@ pub class Server
     end
   end
 
-  private def wants_keepalive?(request : Request, already : Int32) : Bool
+  private def wants_keepalive?(wire_close : Bool, already : Int32) : Bool
     return false unless @config.keepalive
-    return false unless request.keep_alive?
+    return false if wire_close
     already + 1 < @config.max_keepalive_requests
   end
 
@@ -147,80 +128,51 @@ pub class Server
       keepalive = false if conn.downcase == "close"
     end
     ctx.response.headers["Connection"] = keepalive ? "keep-alive" : "close"
-    include_body = request.method != "HEAD"
+    include_body = !HTTP.same_name?(request.method, "HEAD")
     write_raw(client, ctx.response.to_http(request.version.empty? ? "HTTP/1.1" : request.version, include_body))
     @in_flight = @in_flight - 1
   end
 
-  private def read_request(client : IyiSocket, leftover : String) : Tuple(Request, String) | ParseError | Closed
+  private def read_request(client : IyiSocket, leftover : String) : Tuple(Request, String, Bool) | ParseError | Closed
     buffer = leftover
-    header_end = find_substring(buffer, "\r\n\r\n")
-    while header_end.nil?
-      chunk = read_available(client)
-      return Closed.new if chunk.empty? && buffer.empty?
-      return ParseError.new("connection closed mid-headers") if chunk.empty?
-      buffer = buffer + chunk
-      return ParseError.new("headers too large") if buffer.bytesize > MAX_HEADER_SIZE
-      header_end = find_substring(buffer, "\r\n\r\n")
-    end
+    loop do
+      incoming = parse_incoming(buffer)
+      if req = incoming.request
+        if req.body.bytesize > @config.max_request_body_size
+          return ParseError.new("request body too large")
+        end
+        leftover_after = buffer[incoming.consumed, buffer.bytesize - incoming.consumed]
+        return {req, leftover_after, incoming.close}
+      end
+      if reason = incoming.error
+        return ParseError.new(reason)
+      end
 
-    end_index = header_end
-    return ParseError.new("headers too large") unless end_index
-
-    block = buffer[0, end_index]
-    rest = buffer[end_index + 4, buffer.bytesize - end_index - 4]
-
-    head = parse_head(block)
-    case head
-    in ParseError
-      it
-    in Request
-      length = it.content_length
-      return ParseError.new("request body too large") if length > @config.max_request_body_size
-      body, leftover_after = read_body(client, rest, length)
-      {with_body(it, body), leftover_after}
-    end
-  end
-
-  private def read_body(client : IyiSocket, already : String, length : Int32) : Tuple(String, String)
-    if already.bytesize >= length
-      body = already[0, length]
-      leftover = already[length, already.bytesize - length]
-      return {body, leftover}
-    end
-
-    parts = already
-    while parts.bytesize < length
-      chunk = read_available(client)
-      break if chunk.empty?
-      parts = parts + chunk
-      if parts.bytesize > @config.max_request_body_size
-        parts = parts[0, @config.max_request_body_size]
-        break
+      case chunk = client.read(65536)
+      in Cancelled
+        return Closed.new
+      in String
+        return Closed.new if chunk.empty? && buffer.empty?
+        return ParseError.new("connection closed mid-headers") if chunk.empty?
+        buffer = buffer + chunk
       end
     end
-
-    if parts.bytesize > length
-      {parts[0, length], parts[length, parts.bytesize - length]}
-    else
-      {parts, ""}
-    end
   end
 
-  private def read_available(client : IyiSocket) : String
-    case wait_readable(client.fd)
-    in Cancelled
-      ""
-    in Nil
-      client.read(4096)
-    end
-  rescue
-    ""
+  private def write_error(client : IyiSocket, status : Int32, body : String) : Nil
+    res = Response.new
+    res.status_code = status
+    res.content_type = "text/plain; charset=utf-8"
+    res.set_body(body)
+    res.headers["Connection"] = "close"
+    write_raw(client, res.to_http("HTTP/1.1"))
   end
 
   private def write_raw(client : IyiSocket, bytes : String) : Nil
-    client.write(bytes)
-  rescue
+    case client.write(bytes)
+    in Cancelled
+    in Int32
+    end
   end
 end
 

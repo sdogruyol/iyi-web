@@ -58,7 +58,7 @@ describe "Response" do
     res = Response.new
     res.status_code = 599
     res.set_body("")
-    assert res.to_http("HTTP/1.1").starts_with?("HTTP/1.1 599 Unknown\r\n")
+    assert res.to_http("HTTP/1.1").starts_with?("HTTP/1.1 599 Server Error\r\n")
   end
 
   it "omits the body on HEAD and keeps the length" do

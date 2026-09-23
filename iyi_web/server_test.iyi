@@ -1,10 +1,11 @@
 # A real TCP round-trip. Assertions read the status line, headers and body
-# as frames, not as a bag of substrings. Closing the listen socket does not
-# wake `wait_readable`, so the client ends the process rather than joining
-# the accept loop.
+# as frames, not as a bag of substrings. `IyiSocket` parks, so a read waits
+# without `wait_readable`; closing the listener answers `Cancelled` on
+# `accept` and the group ends.
 module iyi_web/server_test
 
 import std/socket
+import std/http
 import iyi_web/router
 import iyi_web/handler
 import iyi_web/server
@@ -13,6 +14,7 @@ import iyi_web/harness
 import iyi_web/spec
 
 using std/socket::{IyiSocket}
+using std/http::{HTTP}
 using iyi_web/router::{Router, RouteHandler}
 using iyi_web/handler::{chain}
 using iyi_web/server::{Server}
@@ -20,23 +22,14 @@ using iyi_web/config
 using iyi_web/harness
 using iyi_web/spec
 
-lib LibExit
-  fun exit(status : Int32) : NoReturn
-end
-
 def exchange(port : Int32, request : String) : String
-  client = IyiSocket.connect("127.0.0.1", port)
-  client.write(request)
+  client = IyiSocket.connect("127.0.0.1", port).or_panic
+  client.write(request).or_panic
   buffer = ""
   loop do
-    case wait_readable(client.fd)
-    in Cancelled
-      break
-    in Nil
-      chunk = client.read(4096)
-      break if chunk.empty?
-      buffer = buffer + chunk
-    end
+    chunk = client.read(4096).or_panic
+    break if chunk.empty?
+    buffer = buffer + chunk
   end
   client.close
   buffer
@@ -47,14 +40,9 @@ def read_frame(client : IyiSocket) : String
   loop do
     size = http_frame_size(buffer)
     break if size && buffer.bytesize >= size
-    case wait_readable(client.fd)
-    in Cancelled
-      break
-    in Nil
-      chunk = client.read(4096)
-      break if chunk.empty?
-      buffer = buffer + chunk
-    end
+    chunk = client.read(4096).or_panic
+    break if chunk.empty?
+    buffer = buffer + chunk
   end
   size = http_frame_size(buffer)
   size && size <= buffer.bytesize ? buffer[0, size] : buffer
@@ -175,9 +163,10 @@ group do |g|
         assert status_line(low) == "HTTP/1.1 405 Method Not Allowed"
       end
 
-      it "answers a malformed request with the canned 400" do
+      it "answers a malformed request with 400" do
         bad = exchange(port, "GET / HTTP/1.1\r\nNotAHeader\r\n\r\n")
-        assert bad == "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request"
+        assert status_line(bad) == "HTTP/1.1 400 Bad Request"
+        assert http_header(bad, "Connection") == "close"
         short = exchange(port, "GET\r\n\r\n")
         assert status_line(short) == "HTTP/1.1 400 Bad Request"
       end
@@ -190,23 +179,18 @@ group do |g|
       end
 
       it "serves a second request on a keep-alive connection" do
-        alive = IyiSocket.connect("127.0.0.1", port)
-        alive.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        alive = IyiSocket.connect("127.0.0.1", port).or_panic
+        alive.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
         first = read_frame(alive)
         assert status_line(first) == "HTTP/1.1 200 OK"
         assert http_header(first, "Connection") == "keep-alive"
         assert http_body(first) == "home"
-        alive.write("GET /json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        alive.write("GET /json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").or_panic
         second = ""
         loop do
-          case wait_readable(alive.fd)
-          in Cancelled
-            break
-          in Nil
-            chunk = alive.read(4096)
-            break if chunk.empty?
-            second = second + chunk
-          end
+          chunk = alive.read(4096).or_panic
+          break if chunk.empty?
+          second = second + chunk
         end
         alive.close
         assert http_body(second) == "{}"
@@ -214,7 +198,7 @@ group do |g|
       end
     end
 
-    LibExit.exit(0)
+    server.close
     0
   end
 

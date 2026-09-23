@@ -168,7 +168,7 @@ pub class Router
   end
 
   private def add_route(method : String, path : String, &block : Context -> B) : Nil forall B : IntoBody
-    raise "path must start with /" unless path_starts_with_slash?(path)
+    raise "path must start with /" unless path.starts_with?('/')
     handler = ->(ctx : Context) { block.call(ctx).into_body }
     @routes << RouteDefinition.new(method: method, path: path, handler: handler)
   end

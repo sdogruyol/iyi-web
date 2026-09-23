@@ -1,4 +1,5 @@
-# RFC 9110 phrases, and a generic reason for a code the table does not name.
+# RFC 9110 phrases: std/http's table plus the codes Kemal sends that it
+# does not name.
 module iyi_web/status_test
 
 import iyi_web/status
@@ -22,7 +23,7 @@ describe "phrase" do
     assert phrase(500) == "Internal Server Error"
   end
 
-  it "falls back to Unknown for an unnamed code" do
-    assert phrase(599) == "Unknown"
+  it "falls back to the status class for an unnamed code" do
+    assert phrase(599) == "Server Error"
   end
 end

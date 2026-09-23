@@ -6,18 +6,18 @@
 # what a handler sees.
 module iyi_web/context
 
+import std/file
 import iyi_web/request
 import iyi_web/response
 import iyi_web/params
 import iyi_web/cookies
-import iyi_web/codec
 import iyi_web/mime
 
+using std/file::{File}
 using iyi_web/request::{Request}
 using iyi_web/response::{Response}
 using iyi_web/params::{Params}
 using iyi_web/cookies::{CookieJar}
-using iyi_web/codec
 using iyi_web/mime
 
 pub class Context
@@ -118,7 +118,7 @@ pub class Context
   # Whole-file send. Missing paths and directories 404 rather than panicking
   # inside File.read; MIME follows the extension unless the caller names one.
   pub def send_file(path : String, mime_type : String = "", filename : String = "") : Nil
-    if !File.exists?(path) || directory?(path)
+    if !File.exists?(path) || File.directory?(path)
       halt(404, "404 Not Found")
       return
     end

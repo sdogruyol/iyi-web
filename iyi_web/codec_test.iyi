@@ -114,37 +114,3 @@ describe "extension_of" do
     assert extension_of("/dir/") == ""
   end
 end
-
-describe "path_starts_with_slash?" do
-  it "is true only for a leading slash" do
-    assert path_starts_with_slash?("/x")
-    assert !path_starts_with_slash?("x")
-  end
-end
-
-describe "find_substring" do
-  it "returns the byte index of a hit" do
-    assert find_substring("abcdef", "cd") == 2
-    assert find_substring("abcdef", "ab") == 0
-    assert find_substring("abcdef", "ef") == 4
-  end
-
-  it "returns nil when the needle is absent or longer than the haystack" do
-    assert find_substring("abcdef", "xyz").nil?
-    assert find_substring("ab", "abc").nil?
-  end
-
-  it "treats an empty needle as a hit at zero" do
-    assert find_substring("abc", "") == 0
-  end
-end
-
-describe "rindex_char" do
-  it "returns the last index of a character" do
-    assert rindex_char("a.b.c", '.') == 3
-  end
-
-  it "returns nil when the character is absent" do
-    assert rindex_char("abc", '.').nil?
-  end
-end

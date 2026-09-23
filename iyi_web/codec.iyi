@@ -1,10 +1,12 @@
-# Byte-level HTTP helpers the rest of the framework shares: percent-coding,
-# path joining, and the scans a parser does because the prelude has no
-# substring `index`.
+# HTTP path helpers the rest of the framework shares: joining, prefix
+# matching, and the percent-decoding RFC 3986 asks for on a path.
 #
-# Kept in its own module so request, params and static files compile against
-# declarations rather than against one another's bodies (R-1).
+# `std/uri` panics on a `%` that is not two hex digits; a request path
+# is not a place to 400 over `%GG`, so the decoder lives here. Query
+# tables are last-wins `Hash`, which is what `env.params` is.
 module iyi_web/codec
+
+import std/text
 
 pub def join_paths(a : String, b : String) : String
   left = a.chomp('/')
@@ -14,16 +16,6 @@ pub def join_paths(a : String, b : String) : String
   left + "/" + right
 end
 
-# iyi's File has no `directory?`. A directory accepts `path/.` as an open;
-# a regular file does not.
-pub def directory?(path : String) : Bool
-  File.exists?(path) && File.exists?(join_paths(path, "."))
-end
-
-pub def path_starts_with_slash?(path : String) : Bool
-  path.starts_with?('/')
-end
-
 # True when *path* is *prefix* or a descendant of it. `/api` matches `/api`
 # and `/api/users`, and does not match `/apiv2`.
 pub def matches_path_prefix?(prefix : String, path : String) : Bool
@@ -31,33 +23,6 @@ pub def matches_path_prefix?(prefix : String, path : String) : Bool
   trimmed = prefix.chomp('/')
   return true if path == trimmed
   path.starts_with?(trimmed + "/")
-end
-
-pub def find_substring(haystack : String, needle : String) : Int32?
-  return 0 if needle.empty?
-  return nil if needle.bytesize > haystack.bytesize
-
-  limit = haystack.bytesize - needle.bytesize
-  start = 0
-  while start <= limit
-    index = 0
-    while index < needle.bytesize && haystack.to_unsafe[start + index] == needle.to_unsafe[index]
-      index = index + 1
-    end
-    return start if index == needle.bytesize
-    start = start + 1
-  end
-  nil
-end
-
-pub def rindex_char(text : String, char : Char) : Int32?
-  wanted = char.ord.to_u8
-  index = text.bytesize - 1
-  while index >= 0
-    return index if text.to_unsafe[index] == wanted
-    index = index - 1
-  end
-  nil
 end
 
 # RFC 3986 percent-decoding, and `+` as space for form bodies. Invalid
@@ -127,10 +92,10 @@ pub def parse_query(text : String) : Hash(String, String)
 end
 
 pub def extension_of(path : String) : String
-  slash = rindex_char(path, '/')
+  slash = path.rindex("/")
   start = slash ? slash + 1 : 0
   name = path[start, path.bytesize - start]
-  dot = rindex_char(name, '.')
+  dot = name.rindex(".")
   return "" unless dot
   return "" if dot == 0
   name[dot + 1, name.bytesize - dot - 1].downcase

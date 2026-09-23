@@ -3,14 +3,15 @@
 # instead.
 module iyi_web/harness
 
-import iyi_web/codec
+import std/http
+import std/text
 import iyi_web/headers
 import iyi_web/request
 import iyi_web/context
 import iyi_web/handler
 import iyi_web/router
 
-using iyi_web/codec
+using std/http::{HTTP}
 using iyi_web/headers::{Headers}
 using iyi_web/request::{Request}
 using iyi_web/context::{Context}
@@ -53,28 +54,21 @@ end
 
 # First line of an HTTP/1.1 response, without the CRLF.
 pub def status_line(raw : String) : String
-  ending = find_substring(raw, "\r\n")
+  ending = raw.index("\r\n")
   ending ? raw[0, ending] : raw
 end
 
 # Header value, last-wins, case-insensitive. Nil when absent.
 pub def http_header(raw : String, name : String) : String?
-  sep = find_substring(raw, "\r\n\r\n")
+  sep = HTTP.find_headers_end(raw)
   return nil unless sep
 
   block = raw[0, sep]
   want = name.downcase
   found = nil
-  start = 0
   first = true
 
-  while start <= block.bytesize
-    rest = block.bytesize - start
-    break if rest <= 0
-
-    relative = find_substring(block[start, rest], "\r\n")
-    line = relative ? block[start, relative] : block[start, rest]
-
+  HTTP.split_crlf(block).each do |line|
     unless first
       colon = line.index(':')
       if colon
@@ -84,9 +78,6 @@ pub def http_header(raw : String, name : String) : String?
         end
       end
     end
-
-    break unless relative
-    start = start + relative + 2
     first = false
   end
 
@@ -94,7 +85,7 @@ pub def http_header(raw : String, name : String) : String?
 end
 
 pub def http_body(raw : String) : String
-  sep = find_substring(raw, "\r\n\r\n")
+  sep = HTTP.find_headers_end(raw)
   return "" unless sep
   raw[sep + 4, raw.bytesize - sep - 4]
 end
@@ -104,7 +95,7 @@ end
 # advertises a length and sends no body: if the bytes after the blank
 # line already look like the next response, the body is treated as empty.
 pub def http_frame_size(raw : String) : Int32?
-  sep = find_substring(raw, "\r\n\r\n")
+  sep = HTTP.find_headers_end(raw)
   return nil unless sep
   header = http_header(raw, "Content-Length")
   extra = header ? (header.to_i? || 0) : 0

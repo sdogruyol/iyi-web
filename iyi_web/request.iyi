@@ -1,13 +1,16 @@
 # An HTTP/1.1 request as a value: method, path, query, headers, body.
 #
-# Parsed from bytes, not from Crystal's `HTTP::Request`. The parser is
-# strict about the request-line and generous about header names, which is
-# the split RFC 9112 actually asks for.
+# The bytes come from `std/http`'s parser. This type is what a handler
+# mutates — `_method` override, a content-type chop — so it is a class
+# this module owns rather than `std/http`'s struct.
 module iyi_web/request
 
+import std/http
+import std/text
 import iyi_web/codec
 import iyi_web/headers
 
+using std/http::{HTTP, Server}
 using iyi_web/codec
 using iyi_web/headers::{Headers}
 
@@ -26,6 +29,17 @@ end
 
 pub class Request
   def initialize(@method : String, @path : String, @query_string : String, @version : String, @headers : Headers, @body : String)
+  end
+
+  # `std/http`'s request as this type: path percent-decoded, query left
+  # encoded, headers in the case-insensitive table a handler writes.
+  def self.from_http(method : String, path : String, query : String?, headers : Hash(String, String), body : String, version : String = "HTTP/1.1") : Request
+    table = Headers.new
+    headers.each { |name, value| table[name] = value }
+
+    raw = path == "*" || path.empty? ? "/" : path
+    decoded = decode_path(raw)
+    Request.new(method, decoded.empty? ? "/" : decoded, query ? query : "", version, table, body)
   end
 
   pub def method : String
@@ -84,6 +98,17 @@ pub class Request
   end
 end
 
+# One pass of `std/http`'s parser: a request, a refusal, or "not yet".
+pub struct Incoming
+  getter request : Request?
+  getter error : String?
+  getter close : Bool
+  getter consumed : Int32
+
+  def initialize(@request : Request?, @error : String?, @close : Bool, @consumed : Int32)
+  end
+end
+
 # Split a request-target into path and query, percent-decoding the path.
 # The query is left encoded; `parse_query` is what turns it into a table,
 # and form bodies share that function.
@@ -99,73 +124,38 @@ pub def split_target(target : String) : Tuple(String, String)
   end
 end
 
-# Parse a complete header block (request-line + headers, no body) that
-# already had its trailing `\r\n\r\n` stripped.
+# A complete request off the wire, or why not. Headers-only text is
+# completed with a blank line so a unit test can share the parser the
+# server uses.
 pub def parse_head(block : String) : Request | ParseError
-  lines = split_headers(block)
-  return ParseError.new("empty request") if lines.empty?
-
-  parts = split_spaces(lines[0])
-  return ParseError.new("malformed request line") if parts.size < 3
-
-  method = parts[0]
-  target = parts[1]
-  version = parts[2]
-  return ParseError.new("unsupported method") if method.empty?
-  return ParseError.new("path must start with /") unless target.starts_with?('/') || target == "*"
-
-  path_and_query = split_target(target == "*" ? "/" : target)
-  headers = Headers.new
-
-  index = 1
-  while index < lines.size
-    line = lines[index]
-    colon = line.index(':')
-    return ParseError.new("malformed header") unless colon
-    name = line[0, colon].strip
-    value = line[colon + 1, line.bytesize - colon - 1].strip
-    return ParseError.new("empty header name") if name.empty?
-    headers.add(name, value)
-    index = index + 1
+  text = block.includes?("\r\n\r\n") ? block : block + "\r\n\r\n"
+  incoming = parse_incoming(text)
+  if req = incoming.request
+    req
+  elsif err = incoming.error
+    ParseError.new(err)
+  else
+    ParseError.new("incomplete request")
   end
+end
 
-  Request.new(method, path_and_query[0], path_and_query[1], version, headers, "")
+pub def parse_incoming(text : String) : Incoming
+  parsed = Server.parse_request(text)
+  if req = parsed.request
+    Incoming.new(Request.from_http(req.method, req.path, req.query, req.headers, req.body, wire_version(text)), nil, parsed.close, parsed.consumed)
+  else
+    Incoming.new(nil, parsed.error, parsed.close, parsed.consumed)
+  end
 end
 
 pub def with_body(request : Request, body : String) : Request
   Request.new(request.method, request.path, request.query_string, request.version, request.headers, body)
 end
 
-private def split_headers(block : String) : Array(String)
-  lines = [] of String
-  start = 0
-  index = 0
-  while index < block.bytesize
-    if block[index] == '\r' && index + 1 < block.bytesize && block[index + 1] == '\n'
-      lines << block[start, index - start]
-      index = index + 2
-      start = index
-    else
-      index = index + 1
-    end
-  end
-  lines << block[start, block.bytesize - start] if start < block.bytesize
-  lines
-end
-
-private def split_spaces(line : String) : Array(String)
-  parts = [] of String
-  start = 0
-  index = 0
-  while index < line.bytesize
-    if line[index] == ' '
-      parts << line[start, index - start] unless index == start
-      index = index + 1
-      start = index
-    else
-      index = index + 1
-    end
-  end
-  parts << line[start, line.bytesize - start] unless start == line.bytesize
-  parts
+private def wire_version(text : String) : String
+  lines = HTTP.split_crlf(text)
+  return "HTTP/1.1" if lines.empty?
+  line = lines[0]
+  sp = line.rindex(" ")
+  sp ? line[sp + 1, line.bytesize - sp - 1] : "HTTP/1.1"
 end

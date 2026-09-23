@@ -3,11 +3,13 @@
 # folder. Directory listing is not served: Kemal's default is the same.
 module iyi_web/static
 
+import std/file
 import iyi_web/codec
 import iyi_web/mime
 import iyi_web/handler
 import iyi_web/context
 
+using std/file::{File}
 using iyi_web/codec
 using iyi_web/mime
 using iyi_web/handler::{Handler}
@@ -30,7 +32,7 @@ pub class StaticHandler < Handler
     path = join_paths(@root, relative)
     path = join_paths(path, "index.html") if File.exists?(join_paths(path, "index.html"))
     return call_next(ctx) unless File.exists?(path)
-    return call_next(ctx) if directory?(path)
+    return call_next(ctx) if File.directory?(path)
 
     body = File.read(path)
     ctx.response.content_type = mime_type_of(path)
