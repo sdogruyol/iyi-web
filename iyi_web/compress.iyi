@@ -1,0 +1,213 @@
+# Response compression. `CompressHandler` lets the rest of the chain build
+# the response, then gzip- or deflate-encodes the body when the client asked
+# for it in `Accept-Encoding` and the body is worth the trouble: large enough,
+# of a textual type, and not already encoded.
+#
+# The negotiation follows RFC 9110 §12.5.3: qvalues count, `gzip;q=0` is a
+# refusal, `x-gzip` is `gzip`, `*` stands for every coding not named, and
+# `identity` is ranked like any other coding once the client gives it a
+# qvalue. `deflate` is the zlib format of RFC 1950 (§8.4.1.2), not a bare
+# DEFLATE stream.
+#
+# The helpers are public so the static file handler negotiates and encodes
+# the same way this handler does.
+#
+# Not in the default stack: `use CompressHandler.new`.
+module iyi_web/compress
+
+import std/compress
+import std/text
+import iyi_web/headers
+import iyi_web/handler
+import iyi_web/context
+
+using std/compress::{Gzip, Zlib}
+using iyi_web/headers::{Headers}
+using iyi_web/handler::{Handler}
+using iyi_web/context::{Context}
+
+# Below this many bytes the framing a coding adds costs more than it saves.
+pub COMPRESS_MIN_SIZE = 860
+
+# The codings this module can produce, most preferred first: the order
+# breaks ties between codings the client likes equally.
+CONTENT_CODINGS = ["gzip", "deflate"]
+
+# `application/*` types that are text in all but name. `text/*` and the
+# `+json` / `+xml` structured suffixes (RFC 6839) are matched by shape.
+COMPRESSIBLE_TYPES = ["application/json", "application/javascript", "application/xml", "image/svg+xml"]
+
+pub class CompressHandler < Handler
+  @min_size : Int32
+
+  def initialize(@min_size : Int32 = 860)
+    super()
+  end
+
+  pub def min_size : Int32
+    @min_size
+  end
+
+  pub def call(ctx : Context) : Nil
+    call_next(ctx)
+    compress(ctx)
+  end
+
+  private def compress(ctx : Context) : Nil
+    response = ctx.response
+    headers = response.headers
+
+    # A HEAD has no body left to encode by the time the router is done, and
+    # a body someone else encoded is theirs.
+    return if ctx.request.method == "HEAD"
+    return if headers.has_key?("Content-Encoding")
+
+    # No entity (1xx, 204, 304), or a byte range of the identity body whose
+    # `Content-Range` would no longer describe an encoded one.
+    status = response.status_code
+    return if status < 200 || status == 204 || status == 304
+    return if headers.has_key?("Content-Range")
+
+    body = response.body
+    return if body.bytesize < @min_size
+    return unless compressible_type?(headers["Content-Type"]? || response.content_type)
+
+    # From here the answer depends on `Accept-Encoding`, so the response has
+    # to say so even when this request gets the identity body (§12.5.5).
+    append_vary(headers, "Accept-Encoding")
+
+    accept = ctx.request.headers["Accept-Encoding"]?
+    return unless accept
+    coding = select_content_coding(accept)
+    return unless coding
+
+    response.set_body(encode_body(body, coding))
+    headers["Content-Encoding"] = coding
+    # A length the application set described the identity body; the one
+    # written with the response is computed from the encoded body.
+    headers.delete("Content-Length")
+    if etag = headers["ETag"]?
+      headers["ETag"] = etag_with_coding(etag, coding)
+    end
+  end
+end
+
+# The coding to apply for a request whose `Accept-Encoding` is *accept*:
+# `"gzip"`, `"deflate"`, or nil when the body should go out unencoded,
+# whether because the client prefers `identity`, refused every coding, or
+# sent a field value that names none of them.
+pub def select_content_coding(accept : String) : String?
+  codings = parse_accept_encoding(accept)
+  wildcard = codings["*"]?
+
+  best = nil
+  best_q = 0.0
+  CONTENT_CODINGS.each do |coding|
+    q = codings[coding]? || wildcard || 0.0
+    if q > best_q
+      best = coding
+      best_q = q
+    end
+  end
+
+  chosen = best
+  return nil unless chosen
+
+  # An unstated `identity` loses to any coding the client listed; one with a
+  # qvalue, given directly or through `*`, is ranked like the others.
+  identity = codings["identity"]? || wildcard
+  return chosen unless identity
+  best_q >= identity ? chosen : nil
+end
+
+# Whether a body of *content_type* gains from compression: `text/*`, JSON,
+# JavaScript, XML, SVG, and any `+json` or `+xml` type. Parameters such as
+# `charset` are ignored and the match is case-insensitive.
+pub def compressible_type?(content_type : String) : Bool
+  media = content_type.partition(';')[0].strip.downcase
+  return false if media.empty?
+  return true if media.starts_with?("text/")
+  return true if media.ends_with?("+json") || media.ends_with?("+xml")
+  COMPRESSIBLE_TYPES.includes?(media)
+end
+
+# *body* encoded with *coding*, `"gzip"` (RFC 1952) or `"deflate"` (the zlib
+# format of RFC 1950). Any other coding is a programming error and panics.
+pub def encode_body(body : String, coding : String) : String
+  case coding
+  when "gzip"
+    Gzip.compress(body)
+  when "deflate"
+    Zlib.compress(body)
+  else
+    raise "unsupported content coding #{coding.inspect}"
+  end
+end
+
+# Adds *field* to `Vary`, keeping the fields already listed. A field already
+# present (in any case), or a `*` that covers every field, is left alone.
+pub def append_vary(headers : Headers, field : String) : Nil
+  existing = headers["Vary"]?
+  if existing.nil? || existing.strip.empty?
+    headers["Vary"] = field
+    return
+  end
+
+  want = field.downcase
+  existing.split(',').each do |name|
+    token = name.strip
+    return if token == "*" || token.downcase == want
+  end
+  headers["Vary"] = existing + ", " + field
+end
+
+# *etag* marked as naming the *coding* form of a representation, so the
+# encoded and identity bodies of one resource cannot share a validator
+# (RFC 9110 §8.8.1): `W/"123"` becomes `W/"123-gzip"`. A tag that does not
+# end in a quote is returned as it is.
+pub def etag_with_coding(etag : String, coding : String) : String
+  return etag unless etag.ends_with?("\"")
+  etag[0, etag.bytesize - 1] + "-" + coding + "\""
+end
+
+# Each coding named in *value*, lowercased, with its qvalue. `x-gzip` folds
+# into `gzip`. An element whose qvalue is not a number in 0..1 is dropped
+# rather than read as `q=1`, and a coding listed twice keeps its lowest
+# qvalue, so a later duplicate cannot undo a refusal.
+private def parse_accept_encoding(value : String) : Hash(String, Float64)
+  codings = {} of String => Float64
+
+  value.split(',').each do |element|
+    parts = element.partition(';')
+    coding = parts[0].strip.downcase
+    unless coding.empty?
+      if q = qvalue(parts[2])
+        coding = "gzip" if coding == "x-gzip"
+        previous = codings[coding]?
+        codings[coding] = previous && previous < q ? previous : q
+      end
+    end
+  end
+
+  codings
+end
+
+# The `q` parameter among the parameters of one element: 1.0 when absent,
+# nil when present but not a number in 0..1.
+private def qvalue(parameters : String) : Float64?
+  return 1.0 if parameters.strip.empty?
+
+  parameters.split(';').each do |parameter|
+    pair = parameter.partition('=')
+    unless pair[1].empty?
+      if pair[0].strip.downcase == "q"
+        q = pair[2].strip.to_f?
+        return nil unless q
+        return nil unless q >= 0.0 && q <= 1.0
+        return q
+      end
+    end
+  end
+
+  1.0
+end

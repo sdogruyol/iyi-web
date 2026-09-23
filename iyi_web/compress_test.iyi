@@ -1,0 +1,240 @@
+# Compression: negotiation by qvalue, the body round-trips, and every
+# response that must go out as it is does.
+module iyi_web/compress_test
+
+import std/compress
+import iyi_web/compress
+import iyi_web/headers
+import iyi_web/handler
+import iyi_web/harness
+import iyi_web/spec
+
+using std/compress::{Gzip, Zlib}
+using iyi_web/compress::{CompressHandler, select_content_coding, compressible_type?, encode_body, append_vary, etag_with_coding}
+using iyi_web/headers::{Headers}
+using iyi_web/handler::{chain}
+using iyi_web/harness
+using iyi_web/spec
+
+TEXT = "The quick brown fox jumps over the lazy dog. " * 40
+
+def compress_app
+  chain([CompressHandler.new, routes { |r|
+    r.get "/text" do |env|
+      env.text(TEXT)
+      TEXT
+    end
+    r.get "/small" do |env|
+      env.text("short")
+      "short"
+    end
+    r.get "/png" do |env|
+      env.response.content_type = "image/png"
+      TEXT
+    end
+    r.get "/empty" do |env|
+      env.response.status_code = 204
+      TEXT
+    end
+    r.get "/encoded" do |env|
+      env.response.headers["Content-Encoding"] = "br"
+      env.text(TEXT)
+      TEXT
+    end
+    r.get "/vary" do |env|
+      env.response.headers["Vary"] = "Origin, accept-encoding"
+      env.text(TEXT)
+      TEXT
+    end
+    r.get "/vary-origin" do |env|
+      env.response.headers["Vary"] = "Origin"
+      env.response.headers["ETag"] = "W/\"42\""
+      env.response.headers["Content-Length"] = TEXT.bytesize.to_s
+      env.json(TEXT)
+      TEXT
+    end
+  }])
+end
+
+def fetch(path : String, accept : String?, method : String = "GET")
+  request = http_request(method, path)
+  request.headers["Accept-Encoding"] = accept if accept
+  dispatch(compress_app, request)
+end
+
+describe "select_content_coding" do
+  it "prefers gzip, and x-gzip is gzip" do
+    assert select_content_coding("gzip, deflate") == "gzip"
+    assert select_content_coding("deflate, gzip") == "gzip"
+    assert select_content_coding("X-GZIP") == "gzip"
+    assert select_content_coding("br, gzip;q=0.5") == "gzip"
+  end
+
+  it "follows qvalues" do
+    assert select_content_coding("gzip;q=0.4, deflate;q=0.8") == "deflate"
+    assert select_content_coding("gzip;q=0, deflate") == "deflate"
+    assert select_content_coding("deflate") == "deflate"
+  end
+
+  it "answers nil when nothing is acceptable or identity wins" do
+    assert select_content_coding("gzip;q=0").nil?
+    assert select_content_coding("gzip;q=0, deflate;q=0").nil?
+    assert select_content_coding("identity").nil?
+    assert select_content_coding("").nil?
+    assert select_content_coding("br").nil?
+    assert select_content_coding("identity;q=1, gzip;q=0.5").nil?
+  end
+
+  it "reads * as every coding not named" do
+    assert select_content_coding("*") == "gzip"
+    assert select_content_coding("gzip;q=0, *") == "deflate"
+    assert select_content_coding("*;q=0").nil?
+    assert select_content_coding("identity;q=0, deflate;q=0.1") == "deflate"
+  end
+
+  it "drops malformed qvalues and keeps the lowest of duplicates" do
+    assert select_content_coding("gzip;q=2").nil?
+    assert select_content_coding("gzip;q=abc, deflate;q=0.2") == "deflate"
+    assert select_content_coding("gzip;q=0, gzip").nil?
+    assert select_content_coding("gzip; Q=0.5 ; level=1") == "gzip"
+  end
+end
+
+describe "compressible_type?" do
+  it "takes text, JSON, JavaScript, XML and SVG" do
+    assert compressible_type?("text/html; charset=utf-8")
+    assert compressible_type?("Text/CSS")
+    assert compressible_type?("application/json")
+    assert compressible_type?("application/problem+json; charset=utf-8")
+    assert compressible_type?("application/atom+xml")
+    assert compressible_type?("image/svg+xml")
+    assert compressible_type?("application/javascript")
+  end
+
+  it "refuses binary and already-compressed types" do
+    assert !compressible_type?("image/png")
+    assert !compressible_type?("application/octet-stream")
+    assert !compressible_type?("application/gzip")
+    assert !compressible_type?("")
+  end
+end
+
+describe "encode_body" do
+  it "writes gzip and zlib streams that decode back" do
+    assert Gzip.decompress(encode_body(TEXT, "gzip")) == TEXT
+    assert Zlib.decompress(encode_body(TEXT, "deflate")) == TEXT
+    assert encode_body(TEXT, "gzip").bytesize < TEXT.bytesize
+  end
+
+  it "panics on a coding it cannot produce" do
+    assert panics? { encode_body(TEXT, "br") }
+  end
+end
+
+describe "append_vary and etag_with_coding" do
+  it "adds a field once and respects *" do
+    headers = Headers.new
+    append_vary(headers, "Accept-Encoding")
+    append_vary(headers, "accept-encoding")
+    assert headers["Vary"] == "Accept-Encoding"
+    headers["Vary"] = "*"
+    append_vary(headers, "Accept-Encoding")
+    assert headers["Vary"] == "*"
+  end
+
+  it "suffixes quoted tags only" do
+    assert etag_with_coding("W/\"42\"", "gzip") == "W/\"42-gzip\""
+    assert etag_with_coding("\"abc\"", "deflate") == "\"abc-deflate\""
+    assert etag_with_coding("bare", "gzip") == "bare"
+  end
+end
+
+describe "CompressHandler" do
+  it "gzips a large text body" do
+    ctx = fetch("/text", "gzip, deflate")
+    assert ctx.response.headers["Content-Encoding"] == "gzip"
+    assert ctx.response.headers["Vary"] == "Accept-Encoding"
+    assert ctx.response.body.bytesize < TEXT.bytesize
+    assert Gzip.decompress(ctx.response.body) == TEXT
+  end
+
+  it "deflates (zlib) when only deflate is accepted" do
+    ctx = fetch("/text", "deflate")
+    assert ctx.response.headers["Content-Encoding"] == "deflate"
+    assert Zlib.decompress(ctx.response.body) == TEXT
+  end
+
+  it "leaves the body alone when the client refuses every coding" do
+    ["gzip;q=0", "identity", "identity;q=1, gzip;q=0.5", "gzip;q=0, deflate;q=0"].each do |accept|
+      ctx = fetch("/text", accept)
+      assert !ctx.response.headers.has_key?("Content-Encoding")
+      assert ctx.response.body == TEXT
+      assert ctx.response.headers["Vary"] == "Accept-Encoding"
+    end
+  end
+
+  it "leaves the body alone without Accept-Encoding, but still varies" do
+    ctx = fetch("/text", nil)
+    assert !ctx.response.headers.has_key?("Content-Encoding")
+    assert ctx.response.body == TEXT
+    assert ctx.response.headers["Vary"] == "Accept-Encoding"
+  end
+
+  it "skips bodies under min_size" do
+    ctx = fetch("/small", "gzip")
+    assert !ctx.response.headers.has_key?("Content-Encoding")
+    assert !ctx.response.headers.has_key?("Vary")
+    assert ctx.response.body == "short"
+  end
+
+  it "honours a custom min_size" do
+    app = chain([CompressHandler.new(1), routes { |r|
+      r.get "/small" do |env|
+        env.text("short")
+        "short"
+      end
+    }])
+    request = http_request("GET", "/small")
+    request.headers["Accept-Encoding"] = "gzip"
+    ctx = dispatch(app, request)
+    assert ctx.response.headers["Content-Encoding"] == "gzip"
+    assert Gzip.decompress(ctx.response.body) == "short"
+  end
+
+  it "skips 204, HEAD, binary types and bodies already encoded" do
+    empty = fetch("/empty", "gzip")
+    assert empty.response.status_code == 204
+    assert !empty.response.headers.has_key?("Content-Encoding")
+
+    head = fetch("/text", "gzip", "HEAD")
+    assert !head.response.headers.has_key?("Content-Encoding")
+    assert head.response.headers["Content-Length"] == TEXT.bytesize.to_s
+
+    png = fetch("/png", "gzip")
+    assert !png.response.headers.has_key?("Content-Encoding")
+    assert png.response.body == TEXT
+
+    encoded = fetch("/encoded", "gzip")
+    assert encoded.response.headers["Content-Encoding"] == "br"
+    assert encoded.response.body == TEXT
+    assert !encoded.response.headers.has_key?("Vary")
+  end
+
+  it "appends to Vary once" do
+    ctx = fetch("/vary", "gzip")
+    assert ctx.response.headers["Vary"] == "Origin, accept-encoding"
+
+    other = fetch("/vary-origin", "gzip")
+    assert other.response.headers["Vary"] == "Origin, Accept-Encoding"
+  end
+
+  it "drops a stale Content-Length and marks the ETag" do
+    ctx = fetch("/vary-origin", "gzip")
+    assert ctx.response.headers["Content-Encoding"] == "gzip"
+    assert !ctx.response.headers.has_key?("Content-Length")
+    assert ctx.response.headers["ETag"] == "W/\"42-gzip\""
+    raw = ctx.response.to_http("HTTP/1.1")
+    assert http_header(raw, "Content-Length") == ctx.response.body.bytesize.to_s
+    assert Gzip.decompress(http_body(raw)) == TEXT
+  end
+end
