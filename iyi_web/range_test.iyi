@@ -1,0 +1,187 @@
+# Range header parsing, Content-Range values, and the multipart/byteranges
+# payload. Sizes are small so every expected pair can be read off by hand.
+module iyi_web/range_test
+
+import iyi_web/range
+import iyi_web/spec
+import std/text
+
+using iyi_web/range
+using iyi_web/spec
+
+# The pairs a header selects, or a panic when it did not select any.
+def pairs(header : String, size : Int32, max_ranges : Int32 = 16) : Array(Tuple(Int32, Int32))
+  case parse_ranges(header, size, max_ranges)
+  in Array(Tuple(Int32, Int32)) then it
+  in Unsatisfiable              then raise "unsatisfiable: #{header}"
+  in Nil                        then raise "ignored: #{header}"
+  end
+end
+
+def ignored?(header : String, size : Int32, max_ranges : Int32 = 16) : Bool
+  parse_ranges(header, size, max_ranges).nil?
+end
+
+def unsatisfiable?(header : String, size : Int32, max_ranges : Int32 = 16) : Bool
+  parse_ranges(header, size, max_ranges).is_a?(Unsatisfiable)
+end
+
+describe "parse_ranges" do
+  it "reads a closed range" do
+    assert pairs("bytes=0-4", 10) == [{0, 4}]
+    assert pairs("bytes=3-3", 10) == [{3, 3}]
+  end
+
+  it "clamps a last position past the end" do
+    assert pairs("bytes=5-100", 10) == [{5, 9}]
+    assert pairs("bytes=0-99999999999999999999", 10) == [{0, 9}]
+  end
+
+  it "runs an open range to the end" do
+    assert pairs("bytes=7-", 10) == [{7, 9}]
+  end
+
+  it "reads a suffix range as the last bytes" do
+    assert pairs("bytes=-3", 10) == [{7, 9}]
+  end
+
+  it "reads a suffix longer than the body as the whole body" do
+    assert pairs("bytes=-50", 10) == [{0, 9}]
+  end
+
+  it "keeps several ranges in the order asked" do
+    assert pairs("bytes=6-7, 0-1", 10) == [{6, 7}, {0, 1}]
+  end
+
+  it "accepts the unit in any case and whitespace around specs" do
+    assert pairs("Bytes=0-1", 10) == [{0, 1}]
+    assert pairs("BYTES= 2 - 3 ", 10) == [{2, 3}]
+  end
+
+  it "ignores a header in another unit" do
+    assert ignored?("items=0-1", 10)
+    assert ignored?("bytes 0-1", 10)
+    assert ignored?("bytes=", 10)
+  end
+
+  it "ignores the whole header when one spec is garbage" do
+    assert ignored?("bytes=abc", 10)
+    assert ignored?("bytes=0-1,x-2", 10)
+    assert ignored?("bytes=0-1,5", 10)
+    assert ignored?("bytes=-", 10)
+    assert ignored?("bytes=1-2-3", 10)
+    assert ignored?("bytes=+1-2", 10)
+  end
+
+  it "ignores the whole header when a last position is below the first" do
+    assert ignored?("bytes=5-2", 10)
+    assert ignored?("bytes=0-1,5-2", 10)
+  end
+
+  it "skips empty list elements" do
+    assert pairs("bytes=,0-1,,", 10) == [{0, 1}]
+  end
+
+  it "drops unsatisfiable specs and keeps the rest" do
+    assert pairs("bytes=20-30,0-1", 10) == [{0, 1}]
+    assert pairs("bytes=-0,0-1", 10) == [{0, 1}]
+  end
+
+  it "answers Unsatisfiable when no spec selects a byte" do
+    assert unsatisfiable?("bytes=10-", 10)
+    assert unsatisfiable?("bytes=10-20", 10)
+    assert unsatisfiable?("bytes=-0", 10)
+    assert unsatisfiable?("bytes=99999999999-", 10)
+    assert unsatisfiable?("bytes=0-", 0)
+    assert unsatisfiable?("bytes=-5", 0)
+  end
+
+  it "ignores a set whose total length exceeds the body" do
+    assert ignored?("bytes=0-5,3-9", 10)
+    assert ignored?("bytes=0-,0-", 10)
+    assert pairs("bytes=0-4,5-9", 10) == [{0, 4}, {5, 9}]
+  end
+
+  it "ignores a set with more parts than allowed" do
+    assert pairs("bytes=0-0,1-1", 10, 2) == [{0, 0}, {1, 1}]
+    assert ignored?("bytes=0-0,1-1,2-2", 10, 2)
+    assert ignored?("bytes=0-0,,", 10, 2)
+  end
+
+  it "ignores every header when no ranges are allowed" do
+    assert ignored?("bytes=0-0", 10, 0)
+  end
+end
+
+describe "Unsatisfiable" do
+  it "is an error value" do
+    assert parse_ranges("bytes=50-", 10, 16).or(nil).nil?
+  end
+end
+
+describe "content_range" do
+  it "names the part and the full length" do
+    assert content_range(0, 4, 10) == "bytes 0-4/10"
+  end
+
+  it "names only the length for a 416" do
+    assert unsatisfied_range(10) == "bytes */10"
+  end
+end
+
+describe "byteranges_boundary" do
+  it "is the prefix and 32 lower-case hex digits" do
+    boundary = byteranges_boundary
+    assert boundary.starts_with?("iyi-web-")
+    assert boundary.bytesize == 40
+    digits = boundary[8, 32]
+    index = 0
+    while index < digits.bytesize
+      assert !"0123456789abcdef".index(digits[index]).nil?
+      index = index + 1
+    end
+  end
+
+  it "differs between calls" do
+    assert byteranges_boundary != byteranges_boundary
+  end
+end
+
+describe "byteranges_body" do
+  it "frames each part and closes the envelope" do
+    body = "0123456789"
+    ranges = pairs("bytes=0-2,7-", body.bytesize)
+    payload = byteranges_body(body, ranges, "text/plain", "b0und")
+
+    assert payload.ends_with?("\r\n--b0und--\r\n")
+    sections = payload.split("--b0und")
+    # Before the first delimiter, two parts, and the closing `--\r\n`.
+    assert sections.size == 4
+    assert sections[0] == ""
+    assert sections[3] == "--\r\n"
+
+    parsed = [] of Tuple(String, String, String)
+    index = 1
+    while index <= 2
+      section = sections[index]
+      assert section.starts_with?("\r\n")
+      split = section.split("\r\n\r\n")
+      assert split.size == 2
+      headers = split[0][2, split[0].bytesize - 2].split("\r\n")
+      assert headers.size == 2
+      assert split[1].ends_with?("\r\n")
+      content = split[1][0, split[1].bytesize - 2]
+      parsed << {headers[0], headers[1], content}
+      index = index + 1
+    end
+
+    assert parsed[0] == {"Content-Type: text/plain", "Content-Range: bytes 0-2/10", "012"}
+    assert parsed[1] == {"Content-Type: text/plain", "Content-Range: bytes 7-9/10", "789"}
+  end
+
+  it "copies arbitrary bytes untouched" do
+    body = "\u0000\r\n\u00ff"
+    payload = byteranges_body(body, [{1, 2}], "application/octet-stream", "x")
+    assert payload == "--x\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes 1-2/" + body.bytesize.to_s + "\r\n\r\n\r\n\r\n--x--\r\n"
+  end
+end

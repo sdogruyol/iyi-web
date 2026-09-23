@@ -1,0 +1,202 @@
+# HTTP byte ranges (RFC 9110 §14): parsing a `Range` header into the
+# inclusive byte pairs a 206 serves, the `Content-Range` values, and the
+# `multipart/byteranges` payload for a request that names several parts.
+#
+# These are pure functions over a size and a body so the static handler
+# and `send_file` share one reading of the header. What they answer:
+#
+# - an `Array` of `{first, last}` pairs: serve 206 with those bytes;
+# - `Unsatisfiable`: serve 416 with `Content-Range: bytes */size`;
+# - `nil`: ignore the header and serve the whole body with 200.
+#
+# `nil` covers a unit other than `bytes`, a malformed spec, and a range
+# set refused as abusive: more parts than the server allows, or parts
+# adding up to more bytes than the body holds. RFC 9110 lets a server
+# ignore such a set instead of amplifying a small request into a large
+# response.
+module iyi_web/range
+
+import std/random
+import std/time
+
+using std/random::{Random}
+using std/time::{Time}
+
+# The range set is valid, but no range in it selects a byte of the body.
+pub struct Unsatisfiable
+end
+
+impl Error for Unsatisfiable
+  def message : String
+    "range not satisfiable"
+  end
+end
+
+# Parses a `Range` header against a body of *size* bytes into inclusive
+# `{first, last}` pairs, in the order the client asked for them. Last
+# positions past the end are clamped to it; `first-` runs to the end;
+# `-n` is the last *n* bytes, or the whole body when it is shorter.
+pub def parse_ranges(header : String, size : Int32, max_ranges : Int32) : Array(Tuple(Int32, Int32)) | Unsatisfiable | Nil
+  return nil if max_ranges <= 0
+  # Range unit names are case-insensitive (RFC 9110 §16.5.1).
+  return nil unless header.bytesize > 6 && header[0, 6].downcase == "bytes="
+
+  specs = header[6, header.bytesize - 6].split(',')
+  ranges = [] of Tuple(Int32, Int32)
+  requested = 0_i64
+  index = 0
+  while index < specs.size
+    # Every list element counts toward the limit, empty ones included: the
+    # limit bounds the work one header can ask for.
+    return nil if index + 1 > max_ranges
+    spec = specs[index].strip
+    index = index + 1
+    # Empty list elements are ignored (RFC 9110 §5.6.1.2).
+    next if spec.empty?
+
+    pair = parse_spec(spec, size)
+    return nil unless pair
+    first = pair[0]
+    last = pair[1]
+    # Selects no byte of the body: dropped, and a 416 if none are left.
+    next if last < first
+
+    # Overlapping or repeated ranges could ask for the body many times over.
+    requested = requested + (last - first).to_i64 + 1_i64
+    return nil if requested > size.to_i64
+
+    ranges << {first, last}
+  end
+
+  return Unsatisfiable.new if ranges.empty?
+  ranges
+end
+
+# The `Content-Range` value of a 206 part: `bytes first-last/size`.
+pub def content_range(first : Int32, last : Int32, size : Int32) : String
+  "bytes " + first.to_s + "-" + last.to_s + "/" + size.to_s
+end
+
+# The `Content-Range` value of a 416: `bytes */size`.
+pub def unsatisfied_range(size : Int32) : String
+  "bytes */" + size.to_s
+end
+
+# The `multipart/byteranges` payload for several ranges of *body*. Each part
+# carries the media type of the body itself, not of the envelope. The
+# response's own type is `multipart/byteranges; boundary=<boundary>`.
+pub def byteranges_body(body : String, ranges : Array(Tuple(Int32, Int32)), content_type : String, boundary : String) : String
+  size = body.bytesize
+  parts = [] of String
+  ranges.each do |pair|
+    first = pair[0]
+    last = pair[1]
+    parts << "--" + boundary + "\r\n"
+    parts << "Content-Type: " + content_type + "\r\n"
+    parts << "Content-Range: " + content_range(first, last, size) + "\r\n"
+    parts << "\r\n"
+    parts << body[first, last - first + 1]
+    parts << "\r\n"
+  end
+  parts << "--" + boundary + "--\r\n"
+  parts.join
+end
+
+# A boundary no part body is likely to contain: `iyi-web-` and 32 hex
+# digits, from `/dev/urandom` where it can be read and `std/random`
+# otherwise.
+pub def byteranges_boundary : String
+  "iyi-web-" + hex(random_bytes(16))
+end
+
+# One range-spec into clamped `{first, last}`, or nil when it is malformed
+# or invalid, which invalidates the whole header (RFC 9110 §14.1.1). An
+# unsatisfiable spec, a first position at or past the end or a zero
+# suffix, comes back with `last < first`.
+private def parse_spec(spec : String, size : Int32) : Tuple(Int32, Int32)?
+  dash = spec.index('-')
+  return nil unless dash
+  first_text = spec[0, dash].strip
+  last_text = spec[dash + 1, spec.bytesize - dash - 1].strip
+
+  if first_text.empty?
+    suffix = parse_position(last_text)
+    return nil unless suffix
+    start = size - suffix
+    start = 0 if start < 0
+    return {start, size - 1}
+  end
+
+  first = parse_position(first_text)
+  return nil unless first
+  return {first, size - 1} if last_text.empty?
+
+  last = parse_position(last_text)
+  return nil unless last
+  return nil if last < first
+  last = size - 1 if last > size - 1
+  {first, last}
+end
+
+# One or more ASCII digits. A value too large for `Int32` lies past the end
+# of any body this can describe, so it saturates instead of failing: a
+# first position that overflows is unsatisfiable, and a last position or
+# suffix that overflows reaches the end.
+private def parse_position(text : String) : Int32?
+  return nil if text.empty?
+  value = 0_i64
+  bytes = text.to_unsafe
+  index = 0
+  while index < text.bytesize
+    byte = bytes[index]
+    return nil if byte < 48_u8 || byte > 57_u8
+    value = value * 10_i64 + (byte - 48_u8).to_i64 if value <= 2147483647_i64
+    index = index + 1
+  end
+  return 2147483647 if value > 2147483647_i64
+  value.to_i32
+end
+
+# `File.exists?` is an open for reading, so it answers whether the device
+# can be read. wasm32 has no such path to ask about.
+#
+# The fallback seeds `std/random` itself: its unseeded `Random.new` opens
+# `/dev/urandom` through a `File` that `std/file` shadows, so it does not
+# build in a program that also imports `std/file`, as this framework does.
+# The clocks and a fresh heap address are the seed, the same material
+# `std/random` falls back to where there is no device.
+private def random_bytes(count : Int32) : String
+  {% if !flag?(:wasm32) %}
+    if File.exists?("/dev/urandom")
+      bytes = ""
+      File.open("/dev/urandom", "r", count) do |io|
+        bytes = io.read_bytes(count)
+      end
+      return bytes if bytes.bytesize == count
+    end
+  {% end %}
+
+  seed = Time.utc.to_unix.to_u64 ^ Time.monotonic.total_nanoseconds.to_u64 ^ Pointer(UInt8).malloc(1_u64).address
+  rng = Random.new(seed)
+  String.new(count) do |target|
+    index = 0
+    while index < count
+      target[index] = (rng.next_u32 & 255_u32).to_u8
+      index = index + 1
+    end
+  end
+end
+
+private def hex(bytes : String) : String
+  digits = "0123456789abcdef"
+  source = bytes.to_unsafe
+  String.new(bytes.bytesize * 2) do |target|
+    index = 0
+    while index < bytes.bytesize
+      byte = source[index]
+      target[index * 2] = digits.to_unsafe[(byte >> 4).to_i32]
+      target[index * 2 + 1] = digits.to_unsafe[(byte & 15_u8).to_i32]
+      index = index + 1
+    end
+  end
+end
