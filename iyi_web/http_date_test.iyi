@@ -17,4 +17,19 @@ describe "http_date" do
   it "zero-pads day, hour, minute and second" do
     assert http_date(Time.utc(2026, 1, 2, 3, 4, 5)) == "Fri, 02 Jan 2026 03:04:05 GMT"
   end
+
+  it "parses IMF-fixdate back to the same time" do
+    parsed = parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT")
+    assert !parsed.nil?
+    if at = parsed
+      assert at.to_unix == Time.utc(1994, 11, 6, 8, 49, 37).to_unix
+    end
+  end
+
+  it "refuses other date forms and garbage" do
+    assert parse_http_date("Sunday, 06-Nov-94 08:49:37 GMT").nil?
+    assert parse_http_date("Sun Nov  6 08:49:37 1994").nil?
+    assert parse_http_date("Sun, 06 Foo 1994 08:49:37 GMT").nil?
+    assert parse_http_date("").nil?
+  end
 end

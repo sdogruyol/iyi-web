@@ -5,9 +5,17 @@
 # object rather than a handful of globals.
 module iyi_web/config
 
+import std/file
 import iyi_web/handler
+import iyi_web/context
 
+using std/file::{File}
 using iyi_web/handler::{Handler}
+using iyi_web/context::{Context}
+
+# Called for every file the static handler serves, before its body is
+# written: the context, the file's path and its `File::Info`.
+pub alias StaticHeadersHook = Proc(Context, String, File::Info, Nil)
 
 pub class Config
   @app_name : String
@@ -25,6 +33,11 @@ pub class Config
   @custom_handlers : Array(Handler)
   @shutdown_message : Bool
   @show_exceptions : Bool?
+  @max_ranges : Int32
+  @static_dir_index : Bool
+  @static_dir_listing : Bool
+  @static_gzip : Bool
+  @static_headers : StaticHeadersHook?
 
   def initialize
     @app_name = "iyi-web"
@@ -46,6 +59,11 @@ pub class Config
     @custom_handlers = [] of Handler
     @shutdown_message = true
     @show_exceptions = nil
+    @max_ranges = 16
+    @static_dir_index = true
+    @static_dir_listing = false
+    @static_gzip = true
+    @static_headers = nil
   end
 
   pub def app_name : String
@@ -154,6 +172,48 @@ pub class Config
 
   pub def add_handler(handler : Handler) : Nil
     @custom_handlers << handler
+  end
+
+  # 0 turns `Range` support off.
+  pub def max_ranges : Int32
+    @max_ranges
+  end
+
+  pub def max_ranges=(value : Int32) : Int32
+    @max_ranges = value
+  end
+
+  pub def static_dir_index : Bool
+    @static_dir_index
+  end
+
+  pub def static_dir_index=(value : Bool) : Bool
+    @static_dir_index = value
+  end
+
+  pub def static_dir_listing : Bool
+    @static_dir_listing
+  end
+
+  pub def static_dir_listing=(value : Bool) : Bool
+    @static_dir_listing = value
+  end
+
+  pub def static_gzip : Bool
+    @static_gzip
+  end
+
+  pub def static_gzip=(value : Bool) : Bool
+    @static_gzip = value
+  end
+
+  pub def static_headers : StaticHeadersHook?
+    @static_headers
+  end
+
+  pub def static_headers=(hook : StaticHeadersHook) : StaticHeadersHook
+    @static_headers = hook
+    hook
   end
 
   pub def development? : Bool

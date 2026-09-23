@@ -1,24 +1,54 @@
-# Static files from a public folder. Whole-file reads, MIME from the
-# extension table, and a `..` refusal so a request cannot walk out of the
-# folder. Directory listing is not served: Kemal's default is the same.
+# Static files from a public folder, served before routing.
+#
+# Every file carries `ETag` (weak, from its modification time) and
+# `Last-Modified`, and a matching `If-None-Match` or `If-Modified-Since`
+# gets a 304. A textual file of `COMPRESS_MIN_SIZE` bytes or more is sent
+# gzip- or deflate-encoded when the client accepts it. A GET with `Range`
+# gets 206 or 416. A `..` segment or a NUL byte is refused, so a request
+# cannot walk out of the folder.
+#
+# A directory serves its `index.html` (`dir_index`) or an HTML listing of
+# its entries (`dir_listing`); a directory path without a trailing slash
+# is first redirected to one, so relative links in the page resolve.
 module iyi_web/static
 
 import std/file
+import std/dir
+import std/html
+import std/time
+import std/uri
 import iyi_web/codec
 import iyi_web/mime
 import iyi_web/handler
 import iyi_web/context
+import iyi_web/config
+import iyi_web/http_date
+import iyi_web/compress
+import iyi_web/range
 
 using std/file::{File}
+using std/dir::{Dir}
+using std/html::{HTML}
+using std/time::{Time}
+using std/uri::{URI}
 using iyi_web/codec
 using iyi_web/mime
 using iyi_web/handler::{Handler}
 using iyi_web/context::{Context}
+using iyi_web/config::{StaticHeadersHook}
+using iyi_web/http_date
+using iyi_web/compress::{COMPRESS_MIN_SIZE, select_content_coding, compressible_type?, encode_body, append_vary, etag_with_coding}
+using iyi_web/range
 
 pub class StaticHandler < Handler
   @root : String
+  @dir_index : Bool
+  @dir_listing : Bool
+  @gzip : Bool
+  @max_ranges : Int32
+  @headers_hook : StaticHeadersHook?
 
-  def initialize(@root : String)
+  def initialize(@root : String, @dir_index : Bool = true, @dir_listing : Bool = false, @gzip : Bool = true, @max_ranges : Int32 = 16, @headers_hook : StaticHeadersHook? = nil)
     super()
   end
 
@@ -27,15 +57,142 @@ pub class StaticHandler < Handler
 
     relative = ctx.request.path
     return call_next(ctx) if relative.empty? || !relative.starts_with?('/')
-    return call_next(ctx) if contains_dotdot?(relative)
+    return call_next(ctx) if contains_dotdot?(relative) || relative.includes?("\u0000")
 
     path = join_paths(@root, relative)
-    path = join_paths(path, "index.html") if File.exists?(join_paths(path, "index.html"))
-    return call_next(ctx) unless File.exists?(path)
-    return call_next(ctx) if File.directory?(path)
+    info = File.info?(path)
+    return call_next(ctx) unless info
+
+    if info.directory?
+      serve_directory(ctx, path, relative)
+    elsif info.file?
+      serve_file(ctx, path, info)
+    else
+      call_next(ctx)
+    end
+  end
+
+  private def serve_directory(ctx : Context, dir : String, relative : String) : Nil
+    index = join_paths(dir, "index.html")
+    index_info = @dir_index ? File.info?(index) : nil
+    has_index = index_info ? index_info.file? : false
+    return call_next(ctx) unless has_index || @dir_listing
+
+    unless relative.ends_with?('/')
+      query = ctx.request.query_string
+      ctx.redirect(query.empty? ? relative + "/" : relative + "/?" + query)
+      return
+    end
+
+    if found = index_info
+      if has_index
+        serve_file(ctx, index, found)
+        return
+      end
+    end
+    list_directory(ctx, dir, relative)
+  end
+
+  private def serve_file(ctx : Context, path : String, info : File::Info) : Nil
+    headers = ctx.response.headers
+    type = mime_type_of(path)
+    size = info.size.to_i32
+    etag = "W/\"" + info.modification_time.to_s + "\""
+    headers["Last-Modified"] = http_date(Time.from_unix(info.modification_time))
+    headers["X-Content-Type-Options"] = "nosniff"
+    headers["Accept-Ranges"] = @max_ranges > 0 ? "bytes" : "none"
+
+    range_header = ctx.request.method == "GET" && @max_ranges > 0 ? ctx.request.headers["Range"]? : nil
+    ranged = range_header ? parse_ranges(range_header, size, @max_ranges) : nil
+
+    # A range is always sent identity-encoded; the full body may be
+    # compressed. Either way the ETag names what this request receives.
+    coding = nil
+    if @gzip && compressible_type?(type) && size >= COMPRESS_MIN_SIZE
+      append_vary(headers, "Accept-Encoding")
+      if ranged.nil?
+        if accept = ctx.request.headers["Accept-Encoding"]?
+          coding = select_content_coding(accept)
+        end
+      end
+    end
+    tag = coding ? etag_with_coding(etag, coding) : etag
+    headers["ETag"] = tag
+
+    if not_modified?(ctx, tag, info.modification_time)
+      ctx.response.status_code = 304
+      ctx.response.set_body("")
+      return
+    end
+
+    if hook = @headers_hook
+      hook.call(ctx, path, info)
+    end
 
     body = File.read(path)
-    ctx.response.content_type = mime_type_of(path)
+    ctx.response.content_type = type
+
+    case ranged
+    in Unsatisfiable
+      headers["Content-Range"] = unsatisfied_range(body.bytesize)
+      ctx.response.status_code = 416
+      ctx.response.set_body("")
+      return
+    in Array(Tuple(Int32, Int32))
+      ctx.response.status_code = 206
+      if it.size == 1
+        first = it[0][0]
+        last = it[0][1]
+        headers["Content-Range"] = content_range(first, last, body.bytesize)
+        ctx.response.set_body(body[first, last - first + 1])
+      else
+        boundary = byteranges_boundary
+        ctx.response.content_type = "multipart/byteranges; boundary=" + boundary
+        ctx.response.set_body(byteranges_body(body, it, type, boundary))
+      end
+      return
+    in Nil
+    end
+
+    if encoding = coding
+      body = encode_body(body, encoding)
+      headers["Content-Encoding"] = encoding
+    end
+    send_body(ctx, body)
+  end
+
+  # `If-None-Match` wins when present (weak comparison, `*` matches any);
+  # otherwise `If-Modified-Since`, to the second.
+  private def not_modified?(ctx : Context, tag : String, modified : Int64) : Bool
+    if candidates = ctx.request.headers["If-None-Match"]?
+      candidates.split(',').each do |candidate|
+        wanted = candidate.strip
+        return true if wanted == "*" || opaque_tag(wanted) == opaque_tag(tag)
+      end
+      return false
+    end
+    if since = ctx.request.headers["If-Modified-Since"]?
+      if at = parse_http_date(since)
+        return modified <= at.to_unix
+      end
+    end
+    false
+  end
+
+  private def list_directory(ctx : Context, dir : String, relative : String) : Nil
+    items = [] of String
+    Dir.children(dir).sorted.each do |name|
+      nested = File.directory?(join_paths(dir, name))
+      shown = nested ? name + "/" : name
+      href = relative + URI.encode_path_segment(name) + (nested ? "/" : "")
+      items << "<li><a href=\"" + HTML.escape(href) + "\">" + HTML.escape(shown) + "</a></li>"
+    end
+    title = "Directory listing for " + HTML.escape(relative)
+    ctx.response.content_type = "text/html; charset=utf-8"
+    send_body(ctx, "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>" + title + "</title></head><body><h2>" + title + "</h2><ul>" + items.join + "</ul></body></html>\n")
+  end
+
+  private def send_body(ctx : Context, body : String) : Nil
     if ctx.request.method == "HEAD"
       ctx.response.headers["Content-Length"] = body.bytesize.to_s
       ctx.response.set_body("")
@@ -47,4 +204,8 @@ end
 
 private def contains_dotdot?(path : String) : Bool
   path.split('/').any? { |part| part == ".." }
+end
+
+private def opaque_tag(tag : String) : String
+  tag.starts_with?("W/") ? tag[2, tag.bytesize - 2] : tag
 end

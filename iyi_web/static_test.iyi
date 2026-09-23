@@ -1,14 +1,21 @@
 # Static files from a real folder: MIME, index.html, HEAD, a missing file
-# falling through, and a `..` path that must not walk out of the folder.
+# falling through, a `..` path that must not walk out of the folder, and
+# the caching, compression and range behaviour a production server needs.
 module iyi_web/static_test
 
+import std/file
+import std/compress
 import iyi_web/static
 import iyi_web/handler
+import iyi_web/context
 import iyi_web/harness
 import iyi_web/spec
 
+using std/file::{File}
+using std/compress::{Gzip}
 using iyi_web/static::{StaticHandler}
 using iyi_web/handler::{chain}
+using iyi_web/context::{Context}
 using iyi_web/harness
 using iyi_web/spec
 
@@ -79,5 +86,105 @@ describe "StaticHandler" do
       end
     }])
     assert dispatch(listing, "GET", "/").response.status_code == 404
+  end
+
+  it "redirects a directory without a trailing slash, then serves its index" do
+    moved = dispatch(static_app, "GET", "/docs")
+    assert moved.response.status_code == 302
+    assert moved.response.headers["location"] == "/docs/"
+    assert dispatch(static_app, "GET", "/docs/").response.body == File.read(ROOT + "/docs/index.html")
+  end
+
+  it "lists a directory when dir_listing is on" do
+    app = chain([StaticHandler.new(ROOT, dir_index: false, dir_listing: true), routes { |r|
+      r.get "/fallback" do |env|
+        "from-route"
+      end
+    }])
+    listing = dispatch(app, "GET", "/")
+    assert listing.response.status_code == 200
+    assert listing.response.body.includes?("<a href=\"/hello.txt\">hello.txt</a>")
+    assert listing.response.body.includes?("<a href=\"/docs/\">docs/</a>")
+  end
+
+  it "sends ETag and Last-Modified and answers a matching request with 304" do
+    first = dispatch(static_app, "GET", "/hello.txt")
+    tag = first.response.headers["etag"]
+    modified = first.response.headers["last-modified"]
+    assert tag.starts_with?("W/\"")
+    assert first.response.headers["x-content-type-options"] == "nosniff"
+    assert first.response.headers["accept-ranges"] == "bytes"
+
+    again = http_request("GET", "/hello.txt")
+    again.headers["If-None-Match"] = "\"other\", " + tag
+    cached = dispatch(static_app, again)
+    assert cached.response.status_code == 304
+    assert cached.response.body == ""
+
+    dated = http_request("GET", "/hello.txt")
+    dated.headers["If-Modified-Since"] = modified
+    assert dispatch(static_app, dated).response.status_code == 304
+
+    stale = http_request("GET", "/hello.txt")
+    stale.headers["If-Modified-Since"] = "Sun, 06 Nov 1994 08:49:37 GMT"
+    assert dispatch(static_app, stale).response.status_code == 200
+
+    other = http_request("GET", "/hello.txt")
+    other.headers["If-None-Match"] = "\"nope\""
+    other.headers["If-Modified-Since"] = modified
+    assert dispatch(static_app, other).response.status_code == 200
+  end
+
+  it "answers a byte range with 206 and an unsatisfiable one with 416" do
+    ranged = http_request("GET", "/hello.txt")
+    ranged.headers["Range"] = "bytes=0-4"
+    part = dispatch(static_app, ranged)
+    assert part.response.status_code == 206
+    assert part.response.body == "hello"
+    assert part.response.headers["content-range"] == "bytes 0-4/12"
+
+    beyond = http_request("GET", "/hello.txt")
+    beyond.headers["Range"] = "bytes=50-60"
+    missed = dispatch(static_app, beyond)
+    assert missed.response.status_code == 416
+    assert missed.response.headers["content-range"] == "bytes */12"
+
+    two = http_request("GET", "/hello.txt")
+    two.headers["Range"] = "bytes=0-0,-1"
+    multi = dispatch(static_app, two)
+    assert multi.response.status_code == 206
+    assert multi.response.content_type.starts_with?("multipart/byteranges; boundary=")
+  end
+
+  it "compresses a large textual file for a client that accepts gzip" do
+    request = http_request("GET", "/large.txt")
+    request.headers["Accept-Encoding"] = "gzip, deflate"
+    packed = dispatch(static_app, request)
+    assert packed.response.headers["content-encoding"] == "gzip"
+    assert packed.response.headers["vary"] == "Accept-Encoding"
+    assert packed.response.headers["etag"].ends_with?("-gzip\"")
+    assert Gzip.decompress(packed.response.body) == File.read(ROOT + "/large.txt")
+
+    plain = dispatch(static_app, "GET", "/large.txt")
+    assert plain.response.headers["content-encoding"]?.nil?
+    assert plain.response.headers["vary"] == "Accept-Encoding"
+    assert plain.response.body == File.read(ROOT + "/large.txt")
+  end
+
+  it "calls the headers hook with the served file" do
+    seen = [] of String
+    hook = ->(env : Context, path : String, info : File::Info) do
+      seen << path
+      env.response.headers["Cache-Control"] = "max-age=" + info.size.to_s
+      nil
+    end
+    app = chain([StaticHandler.new(ROOT, headers_hook: hook), routes { |r|
+      r.get "/fallback" do |env|
+        "from-route"
+      end
+    }])
+    ctx = dispatch(app, "GET", "/hello.txt")
+    assert seen == [ROOT + "/hello.txt"]
+    assert ctx.response.headers["cache-control"] == "max-age=12"
   end
 end

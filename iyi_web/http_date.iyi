@@ -1,5 +1,6 @@
 # RFC 9110 HTTP-date (`IMF-fixdate`). The prelude has UTC civil time and
-# no strftime, so the weekday and month tables live here.
+# no strftime, so the weekday and month tables live here. Parsing reads
+# `IMF-fixdate` only, the one form a sender is allowed to generate.
 module iyi_web/http_date
 
 import std/time
@@ -8,6 +9,41 @@ using std/time::{Time, DayOfWeek}
 
 pub def http_date(time : Time) : String
   weekday_name(time.day_of_week) + ", " + pad2(time.day) + " " + month_name(time.month) + " " + time.year.to_s + " " + pad2(time.hour) + ":" + pad2(time.minute) + ":" + pad2(time.second) + " GMT"
+end
+
+# `Sun, 06 Nov 1994 08:49:37 GMT` as a Time, or nil for anything else.
+pub def parse_http_date(text : String) : Time?
+  parts = text.strip.split(' ')
+  return nil unless parts.size == 6 && parts[5] == "GMT" && parts[0].ends_with?(",")
+  day = parts[1].to_i?
+  month = month_number(parts[2])
+  year = parts[3].to_i?
+  clock = parts[4].split(':')
+  return nil unless day && month && year && clock.size == 3
+  hour = clock[0].to_i?
+  minute = clock[1].to_i?
+  second = clock[2].to_i?
+  return nil unless hour && minute && second
+  return nil unless day >= 1 && day <= 31 && hour <= 23 && minute <= 59 && second <= 60
+  Time.utc(year, month, day, hour, minute, second)
+end
+
+private def month_number(name : String) : Int32?
+  case name
+  when "Jan" then 1
+  when "Feb" then 2
+  when "Mar" then 3
+  when "Apr" then 4
+  when "May" then 5
+  when "Jun" then 6
+  when "Jul" then 7
+  when "Aug" then 8
+  when "Sep" then 9
+  when "Oct" then 10
+  when "Nov" then 11
+  when "Dec" then 12
+  else            nil
+  end
 end
 
 private def pad2(n : Int32) : String
