@@ -1,196 +1,200 @@
-# iyi-web ve Kemal karşılaştırması
+# iyi-web compared with Kemal
 
-Karşılaştırılan sürümler: iyi-web `main` (iyi 0.14.0 ile) ve Kemal 1.14.0.
-Kemal kaynakları: `src/kemal/*.cr`. iyi hakkındaki bilgiler kurulu araç
-zincirinden (`iyi` 0.14.0, `~/.local/share/iyi`) okundu.
+Versions compared: iyi-web `main` (on iyi 0.14.0) and Kemal 1.14.0.
+Kemal sources: `src/kemal/*.cr`. Facts about iyi were read from the installed
+toolchain (`iyi` 0.14.0, `~/.local/share/iyi`).
 
-## Özet
+## Summary
 
-Routing, DSL ve middleware omurgası büyük ölçüde aynı. Eksikler iki grupta:
+The routing, DSL and middleware core is largely the same. The gaps fall into
+two groups:
 
-1. iyi-web'de Kemal'den farklı ve hatalı davranan altı durum. Hepsi
-   çalıştırılıp doğrulandı.
-2. Eksik özellikler. Bir kısmı önce iyi'nin kendisinde değişiklik gerektiriyor.
+1. Six cases where iyi-web behaved differently from Kemal, and wrongly. Each
+   was reproduced.
+2. Missing features. Some of them first need changes in iyi itself.
 
-Bölüm 1–4 başlangıçtaki durumu anlatıyor; yapılanlar ve kalanlar bölüm 5'te.
+Sections 1–4 describe the state at the start; section 5 records what has been
+done and what remains.
 
-## 1. Doğrulanmış hatalı davranışlar
+## 1. Verified defects
 
-| Durum | iyi-web | Kemal |
+| Case | iyi-web | Kemal |
 |---|---|---|
-| Handler'da panic | Bağlantı yanıtsız kapanıyor; o anda açık **diğer tüm bağlantılar da** kapanıyor | 500 dönüyor, diğer isteklere dokunmuyor (`exception_handler.cr`) |
-| İstemci yanıt yazılırken bağlantıyı kesiyor | `panic: cannot write to socket`; diğer bağlantılar da kapanıyor | Yalnızca o istek etkileniyor |
-| Header'da CR/LF (`env.redirect(query)` ile `%0d%0a`) | Yanıta sahte `Set-Cookie: injected=1` başlığı ekleniyor: header enjeksiyonu | `HTTP::Headers` geçersiz karakteri reddediyor |
-| `/users/:id` ile `/users/:user_id/posts` birlikte | İkinci route parametreyi `id` adıyla alıyor, `user_id` boş | Kayıtta `Radix::Tree::SharedKeyError` |
-| Aynı route iki kez | İkincisi sessizce birincinin yerine geçiyor | Kayıtta `Radix::Tree::DuplicateError` |
-| `/about/` isteği | 404 | `/about` ile eşleşiyor (radix sondaki `/`'ı tolere ediyor) |
+| Panic in a handler | The connection closes without a response, and **every other connection** open at that moment closes too | Answers 500 and leaves other requests alone (`exception_handler.cr`) |
+| Client disconnects while the response is being written | `panic: cannot write to socket`; other connections close too | Only that request is affected |
+| CR/LF in a header (`%0d%0a` through `env.redirect(query)`) | A forged `Set-Cookie: injected=1` header is added to the response: header injection | `HTTP::Headers` rejects the invalid character |
+| `/users/:id` together with `/users/:user_id/posts` | The second route gets the parameter as `id`; `user_id` is empty | `Radix::Tree::SharedKeyError` at registration |
+| The same route twice | The second silently replaces the first | `Radix::Tree::DuplicateError` at registration |
+| A request for `/about/` | 404 | Matches `/about` (the radix tree tolerates a trailing `/`) |
 
-**Nedenler:**
-- **Panic ve kopan istemci:** Her bağlantı aynı `group` içinde çalışıyor ve
-  iyi'nin grup kuralı ilk hatada tüm kardeş görevleri iptal ediyor
-  (`concurrency.iyi`, `child_finished`). Panic'lenen görev grup listesinde
-  kalıyor ve sunucu durdurulurken `a task panicked` olarak yeniden fırlatılıyor.
-- **İptal sırasında görülen ikinci panic:** iyi çalışma zamanı ayrıca
-  `panic: two fibers waiting on one fd` verdi.
-- **Header enjeksiyonu:** iyi-web'in `Headers` tipi değerleri denetlemeden
-  yazıyor.
-- **Parametre adı:** Parametre adı route yerine ağaç düğümünde tutuluyor, bu
-  yüzden ilk tanımlanan ad kazanıyor.
-- **Sondaki `/`:** Yol parçalara bölünürken sondaki boş parça bir segment
-  sayılıyor.
+**Causes:**
+- **Panic and disconnecting client:** Every connection runs in the same
+  `group`, and iyi's group rule cancels all sibling tasks on the first failure
+  (`concurrency.iyi`, `child_finished`). The panicked task stays in the group's
+  list and is raised again as `a task panicked` when the server stops.
+- **A second panic during cancellation:** The iyi runtime also reported
+  `panic: two fibers waiting on one fd`.
+- **Header injection:** iyi-web's `Headers` type wrote values without checking
+  them.
+- **Parameter name:** The parameter name was stored on the tree node rather
+  than on the route, so the first name defined won.
+- **Trailing `/`:** When the path was split into segments, the empty piece
+  after the trailing slash counted as a segment.
 
-## 2. Eksik özellikler
+## 2. Missing features
 
-Boyut: S küçük, M orta, L büyük iş.
+Size: S small, M medium, L large.
 
-| Alan | Kemal'de olan | Boyut | iyi tarafında önce gereken |
+| Area | Kemal has | Size | Needed on the iyi side first |
 |---|---|---|---|
-| Hata sayfaları | `error 500`; geliştirme ortamında ayrıntılı hata sayfası, production'da sade sayfa (`show_exceptions`); `error 404 do \|env, ex\|`; `error HTTP::Status`; `error MyException`; çok büyük gövdeye 413 | M | Panic mesajı `Panicked#text` içinden okunabiliyor; exception sınıfına göre `error` yazmanın iyi'de doğrudan karşılığı yok |
-| JSON parametreleri | `env.params.json`: `application/json` ve `application/*+json`; dizi `_json` anahtarında; bozuk JSON'a 400 | S | Yok; `JSON.parse?` hazır |
-| Dosya yükleme | `params.files`, `all_files` (`ad[]`), `FileUpload` (path, filename, headers, size); geçici dosyaya yazma ve istek sonunda silme; `max_file_uploads` (128), `max_multipart_form_field_size` (8 MiB), 413 | M | Multipart ayrıştırıcı std'de yok; `File.tempfile` var |
-| Parametre detayları | Aynı anahtarın birden çok değeri (`fetch_all`), `raw_body`, ihtiyaç anında ayrıştırma | S | `std/uri` Params hatalı `%` görünce panic veriyor, doğrudan kullanılamaz |
-| Parça parça yanıt | `response.flush`, `headers_sent?`, `discard_unsent_body` | M | Yok. iyi-web tüm yanıtı tek String olarak yazıyor |
-| SSE | `sse "/x" do \|stream, env\|`; `send(data, event:, id:, retry:)`, `comment`, `flush`, `close`; HEAD kısa devresi; `event`/`id` içinde CR/LF reddi | S (akış varsa) | Parça parça yanıt |
-| WebSocket | `ws` DSL ve `Router#ws`; el sıkışma (101/400/426); yalnız GET (405); Origin denetimi (`websocket_allowed_origins`, 403); `on_message`, `on_binary`, `on_ping`, `on_pong`, `on_close`, `send`, `ping`, `close` | L | **Aynı socket'te aynı anda iki fiber bekleyemiyor** (`two fibers waiting on one fd`): bir fiber okumada beklerken başka bir fiber'ın yazması (broadcast) panic veriyor. Runtime'da okuma ve yazma beklemelerinin ayrılması gerekiyor. SHA-1 ve base64 hazır |
-| Statik dosyalar | gzip (`Accept-Encoding` uzlaşması, `Vary`), önceden sıkıştırılmış `.gz`, ETag/Last-Modified ile 304, Range (206/416/multipart), `dir_listing`, `dir_index`, dizin için sonda `/` yönlendirmesi, `static_headers` kancası, `nosniff` ve `Accept-Ranges`, sistem MIME tablosu | M | gzip tek seferde sıkıştırıyor, akış yok; dosyada konuma atlama (`seek`) yok |
-| `send_file` | Range, gzip, `disposition:`, RFC 6266/8187 dosya adı kodlaması, `Slice` verisi, dosyayı okumadan HEAD | S–M | iyi-web dosya adını kaçışsız yazıyor: header enjeksiyonu riski |
-| Şablonlar | `render "v"`, `render "v", "layout"` ve `content`, `content_for`/`yield_content` | S–M | `Eiy.render` iç içe çağrılarda sabit `__buf__` adıyla çakışıyor |
-| Context | Tipli veri saklama `env.set/get/get?` (Nil, String, Int32, Int64, Float64, Bool), `add_context_storage_type`, `env.route`, `route_found?` | S | Yok |
-| Yardımcılar | `redirect(url, status, body:, close:)`, `status(HTTP::Status)`, her türü alan `json(data)`, `content_type:` parametresi, `halt env, status_code:, response:`, `headers(env, hash)`, `gzip true` | S | Yok |
-| Middleware | `only`/`exclude` ile `only_match?`/`exclude_match?`, `use(handler, position)`, `use(path, [handlers])` | S | Yok |
-| Filtreler | 404/405'te de `before_all` çalışıyor; yolda `:id` ve `*` desenleri; bir filtreye birden çok yol; before filtrelerinden sonra hata sayfası | S | Yok |
-| Cookie | `HTTP::Cookie`: `Domain`, `Expires`, geçmiş tarihle silme | S | Yok |
-| Loglama | Crystal `Log` ile `200 GET / 1.2ms`, değiştirilebilir logger | S | `std/log` hazır |
-| Kapanış | SIGINT/SIGTERM yakalama, kapanış mesajı, yarıdaki istekleri `shutdown_timeout` (30 sn) boyunca bitirme | M | **std'de sinyal yakalama yok**. iyi-web'de `shutdown_message` ayarı var ama kullanılmıyor; `in_flight` sayacı panic olunca azalmıyor |
-| Komut satırı | `-b`, `-p`, `-s`, `--ssl-key-file`, `--ssl-cert-file`, `-h`, `extra_options` | S | `std/option_parser` var ama hatada panic veriyor |
-| TLS | `config.ssl`, `bind_tls` | L | iyi'nin kendi kütüphanesinde TLS yok; `--crystal` moduyla karıştırılamıyor. OpenSSL bağlaması ya da reverse proxy gerekiyor |
-| Dinleme ayarları | `Kemal.run do \|config\|` ile `reuse_port` ve unix socket | M | std/socket'te SO_REUSEPORT, unix socket ve IPv6 yok |
+| Error pages | `error 500`; a detailed error page in development and a plain one in production (`show_exceptions`); `error 404 do \|env, ex\|`; `error HTTP::Status`; `error MyException`; 413 for an oversized body | M | The panic message can be read through `Panicked#text`; `error` per exception class has no direct equivalent in iyi |
+| JSON parameters | `env.params.json`: `application/json` and `application/*+json`; an array under the `_json` key; 400 for malformed JSON | S | None; `JSON.parse?` is available |
+| File uploads | `params.files`, `all_files` (`name[]`), `FileUpload` (path, filename, headers, size); writing to a temporary file and deleting it when the request ends; `max_file_uploads` (128), `max_multipart_form_field_size` (8 MiB), 413 | M | std has no multipart parser; `File.tempfile` exists |
+| Parameter details | Several values for one key (`fetch_all`), `raw_body`, parsing on demand | S | `std/uri` Params panics on a malformed `%`, so it cannot be used directly |
+| Incremental responses | `response.flush`, `headers_sent?`, `discard_unsent_body` | M | None. iyi-web writes the whole response as one String |
+| SSE | `sse "/x" do \|stream, env\|`; `send(data, event:, id:, retry:)`, `comment`, `flush`, `close`; a HEAD short-circuit; CR/LF rejected in `event`/`id` | S (once responses stream) | Incremental responses |
+| WebSocket | `ws` DSL and `Router#ws`; handshake (101/400/426); GET only (405); Origin check (`websocket_allowed_origins`, 403); `on_message`, `on_binary`, `on_ping`, `on_pong`, `on_close`, `send`, `ping`, `close` | L | **Two fibers cannot wait on the same socket at once** (`two fibers waiting on one fd`): a fiber writing to a socket (a broadcast) while another waits to read from it panics. The runtime needs separate read and write waits. SHA-1 and base64 are available |
+| Static files | gzip (`Accept-Encoding` negotiation, `Vary`), precompressed `.gz`, 304 via ETag/Last-Modified, Range (206/416/multipart), `dir_listing`, `dir_index`, a trailing-`/` redirect for directories, a `static_headers` hook, `nosniff` and `Accept-Ranges`, the system MIME table | M | gzip compresses in one pass and cannot stream; files have no `seek` |
+| `send_file` | Range, gzip, `disposition:`, RFC 6266/8187 filename encoding, `Slice` data, HEAD without reading the file | S–M | iyi-web writes the filename unescaped: a header injection risk |
+| Templates | `render "v"`, `render "v", "layout"` and `content`, `content_for`/`yield_content` | S–M | Nested `Eiy.render` calls collide on the fixed name `__buf__` |
+| Context | Typed storage with `env.set/get/get?` (Nil, String, Int32, Int64, Float64, Bool), `add_context_storage_type`, `env.route`, `route_found?` | S | None |
+| Helpers | `redirect(url, status, body:, close:)`, `status(HTTP::Status)`, `json(data)` for any type, a `content_type:` parameter, `halt env, status_code:, response:`, `headers(env, hash)`, `gzip true` | S | None |
+| Middleware | `only`/`exclude` with `only_match?`/`exclude_match?`, `use(handler, position)`, `use(path, [handlers])` | S | None |
+| Filters | `before_all` also runs on 404/405; `:id` and `*` patterns in paths; several paths for one filter; error pages after before filters | S | None |
+| Cookies | `HTTP::Cookie`: `Domain`, `Expires`, deletion with a past date | S | None |
+| Logging | `200 GET / 1.2ms` through Crystal's `Log`; a swappable logger | S | `std/log` is available |
+| Shutdown | Trapping SIGINT/SIGTERM, a shutdown message, finishing in-flight requests for up to `shutdown_timeout` (30 s) | M | **std has no signal trapping**. iyi-web has a `shutdown_message` setting that nothing uses; the `in_flight` counter is not decremented after a panic |
+| Command line | `-b`, `-p`, `-s`, `--ssl-key-file`, `--ssl-cert-file`, `-h`, `extra_options` | S | `std/option_parser` exists but panics on errors |
+| TLS | `config.ssl`, `bind_tls` | L | iyi's own library has no TLS, and it cannot be combined with `--crystal` mode. It needs an OpenSSL binding or a reverse proxy |
+| Listening options | `reuse_port` and unix sockets through `Kemal.run do \|config\|` | M | std/socket has no SO_REUSEPORT, unix sockets or IPv6 |
 
-Kemal çekirdeğinde olmayan ama örneklerinde görülenler:
-- **JSON modelleri:** Kullanıcı tiplerini JSON'dan okuma (`JSON::Serializable`
-  benzeri) `std/json`'da yok; iyi'deki `derive` ile yazılabilir.
-- **Örnekler:** Kemal 16 örnekle geliyor, iyi-web'de yalnızca `hello` var.
-- **Oturum ve basic auth:** Kemal'de de ayrı kütüphaneler (kemal-session,
+Not in Kemal's core, but seen in its examples:
+- **JSON models:** Reading user types from JSON (like `JSON::Serializable`) is
+  not in `std/json`; it could be written with iyi's `derive`.
+- **Examples:** Kemal ships with 16 examples; iyi-web has only `hello`.
+- **Sessions and basic auth:** Separate libraries in Kemal too (kemal-session,
   kemal-basic-auth).
-- **Route önbelleği:** Kemal'in LRU route önbelleği bir performans özelliği;
-  iyi-web'in route arama yapısı zaten ucuz olduğu için gerekmiyor.
+- **Route cache:** Kemal's LRU route cache is a performance feature; iyi-web
+  does not need one because its route lookup is already cheap.
 
-## 3. iyi-web'de olup Kemal'de olmayanlar
+## 3. In iyi-web but not in Kemal
 
-- `head` route tanımı.
-- Hazır `CORSHandler`.
-- Tüm kaynaklarda sırayla arayan `env.params["x"]`.
-- `PORT` ortam değişkeni ve keep-alive ayarları (`keepalive`,
+- `head` route definitions.
+- A built-in `CORSHandler`.
+- `env.params["x"]`, which searches every source in turn.
+- The `PORT` environment variable and keep-alive settings (`keepalive`,
   `max_keepalive_requests`).
-- Route dönüş tipinin derleme sırasında denetlenmesi (`IntoBody`). Kemal String
-  dışındaki dönüşleri sessizce `""` yapıyor.
-- İsteği socket olmadan test etmek için `iyi_web/harness`.
+- Route return types checked at compile time (`IntoBody`). Kemal silently
+  turns any return value other than a String into `""`.
+- `iyi_web/harness` for testing requests without a socket.
 
-## 4. Yol haritası
+## 4. Roadmap
 
-1. **Güvenlik ve sağlamlık:** header'larda CR/LF engelleme; her bağlantıyı
-   ayrı çalıştırıp panic'e 500 dönme; tekrarlanan route'ta hata; aynı konumda
-   farklı parametre adları; sondaki `/` desteği.
-2. **Kolay eşitlemeler:** `params.json`, 413, yardımcı metot imzaları, tipli
-   veri saklama, `only`/`exclude`, `use` sıra ve liste biçimleri, gzip
-   middleware'i, filtre davranışı, cookie alanları, statik dosyalarda ETag ve
-   304, layout'lu `render`.
-3. **Yapısal:** parça parça yanıt gönderme; SSE; dosya yükleme; Range.
-4. **Önce iyi'de yapılması gerekenler:**
-   - socket başına ayrı okuma ve yazma beklemesi (WebSocket bunu bekliyor)
-   - socket hatalarının panic yerine değer olarak dönmesi
-   - sinyal yakalama
+1. **Security and robustness:** blocking CR/LF in headers; running each
+   connection separately and answering a panic with 500; an error for a
+   repeated route; different parameter names at the same position; trailing
+   `/` support.
+2. **Easy parity:** `params.json`, 413, helper method signatures, typed
+   storage, `only`/`exclude`, the position and list forms of `use`, gzip
+   middleware, filter behaviour, cookie attributes, ETag and 304 for static
+   files, `render` with layouts.
+3. **Structural:** incremental responses; SSE; file uploads; Range.
+4. **Needed in iyi first:**
+   - separate read and write waits per socket (WebSocket depends on this)
+   - socket errors returned as values instead of panics
+   - signal trapping
    - TLS
-   - SO_REUSEPORT, unix socket, IPv6
+   - SO_REUSEPORT, unix sockets, IPv6
 
-   Bunlardan sonra: WebSocket, düzgün kapanış, `-s` bayrağı.
+   Then: WebSocket, graceful shutdown, the `-s` flag.
 
-## 5. Durum
+## 5. Status
 
-iyi-web `main`, iyi 0.14.0. `iyi test iyi_web` 27 test dosyasının hepsinde
-geçiyor. README'deki örnekler tek bir programda derlenip çalıştırıldı ve
-curl ile denendi.
+iyi-web `main`, iyi 0.14.0. `iyi test iyi_web` passes in all 27 test files.
+The README examples were built into a single program, run, and exercised with
+curl.
 
-### Düzelen hatalar
+### Fixed defects
 
-Bölüm 1'deki altı durumun hepsi:
+All six cases from section 1:
 
-- **Handler'da panic:** Her bağlantı kendi `group`'unda çalışıyor. Panic
-  eden isteğe `error 500` sayfası, yoksa yerleşik sayfa dönüyor; panic
-  mesajı yalnız development'ta görünüyor (`show_exceptions`). Yalnız o
-  bağlantı kapanıyor, diğerleri etkilenmiyor.
-- **Kopan istemci:** Yalnız o istek bitiyor. iyi'nin socket katmanı yine de
-  stderr'e bir panic satırı yazıyor (bkz. ön koşullar).
-- **Header enjeksiyonu:** Header adında ve değerinde kontrol karakteri panic
-  ile reddediliyor. `send_file` dosya adını RFC 6266/8187'ye göre kodluyor.
-- **Parametre adları:** Her route kendi adlarını okuyor. `/users/:id` ile
-  `/users/:user_id/posts` birlikte çalışıyor; Kemal burada hata veriyor.
-- **Aynı route iki kez:** Program başlarken hata vererek duruyor.
-- **Sondaki `/`:** `/about/` isteği `/about` route'una gidiyor.
+- **Panic in a handler:** Each connection runs in its own `group`. A request
+  that panics gets the `error 500` page, or the built-in page when there is
+  none; the panic message is shown only in development (`show_exceptions`).
+  Only that connection closes; the others are not affected.
+- **Disconnecting client:** Only that request ends. iyi's socket layer still
+  writes a panic line to stderr (see Remaining).
+- **Header injection:** A control character in a header name or value is
+  refused with a panic. `send_file` encodes the filename per RFC 6266/8187.
+- **Parameter names:** Each route reads its own names. `/users/:id` and
+  `/users/:user_id/posts` work together; Kemal raises an error here.
+- **The same route twice:** The program stops with an error at startup.
+- **Trailing `/`:** A request for `/about/` goes to the `/about` route.
 
-### Kapanan eksikler
+### Closed gaps
 
-| Alan | Yapılan |
+| Area | Done |
 |---|---|
-| Hata sayfaları | `error 500`, `show_exceptions`, 413. Before filtresinin koyduğu hata durumuna da hata sayfası uygulanıyor |
-| JSON parametreleri | `env.params.json`, `_json`, bozuk JSON'a 400 |
-| Dosya yükleme | `params.files`, `all_files`, `FileUpload`, iki sınır ve 413. Her dosya tahmin edilemeyen adlı, 0700 izinli kendi dizinine yazılıyor ve yanıttan sonra siliniyor |
-| Parametre detayları | `raw_body`. JSON ve multipart gövde ilk kullanıldığında ayrıştırılıyor |
-| Parça parça yanıt | `flush`, `headers_sent?`, HTTP/1.1'de chunked gövde. Panic'te gönderilmemiş gövde atılıyor |
-| SSE | `sse`, `Router#sse`, `EventStream` (`send`, `comment`, `close`); HEAD kısa devresi; `event`/`id` içinde satır sonu reddi |
-| Statik dosyalar | gzip ve deflate (`Vary`), ETag/Last-Modified ile 304, Range (206, 416, `multipart/byteranges`), `dir_index`, `dir_listing`, dizin için sonda `/` yönlendirmesi, `static_headers`, `nosniff`, `Accept-Ranges` |
-| `send_file` | Range, `disposition:`, dosya adı kodlaması |
-| Şablonlar | `render` (layout ile), `content_for`, `yield_content`; iç içe `render` çalışıyor |
+| Error pages | `error 500`, `show_exceptions`, 413. An error status set by a before filter also gets its error page |
+| JSON parameters | `env.params.json`, `_json`, 400 for malformed JSON |
+| File uploads | `params.files`, `all_files`, `FileUpload`, both limits and 413. Each file is written into a directory of its own, with an unguessable name and mode 0700, and deleted after the response |
+| Parameter details | `raw_body`. JSON and multipart bodies are parsed on first use |
+| Incremental responses | `flush`, `headers_sent?`, a chunked body on HTTP/1.1. A panic discards the unsent body |
+| SSE | `sse`, `Router#sse`, `EventStream` (`send`, `comment`, `close`); a HEAD short-circuit; line breaks rejected in `event`/`id` |
+| Static files | gzip and deflate (`Vary`), 304 via ETag/Last-Modified, Range (206, 416, `multipart/byteranges`), `dir_index`, `dir_listing`, a trailing-`/` redirect for directories, `static_headers`, `nosniff`, `Accept-Ranges` |
+| `send_file` | Range, `disposition:`, filename encoding |
+| Templates | `render` (with a layout), `content_for`, `yield_content`; nested `render` works |
 | Context | `set`/`get`/`get?`, `route_pattern`, `route_found?` |
-| Yardımcılar | Satırdaki hepsi; `status` kodu `HTTP::Status` yerine `Int32` olarak alıyor |
+| Helpers | Everything in the row; `status` takes the code as an `Int32` rather than an `HTTP::Status` |
 | Middleware | `only`/`exclude`, `use(handler, position)`, `use(path, [handlers])`, `CompressHandler` |
-| Filtreler | Satırdaki hepsi |
-| Cookie | `domain`, `expires`, `delete_cookie`; değerler kodlanıp çözülüyor |
-| Komut satırı | `-b`, `-p`, `-h`, `extra_options`. `-s` ve `--ssl-*` TLS olmadığını söyleyip programı durduruyor |
+| Filters | Everything in the row |
+| Cookies | `domain`, `expires`, `delete_cookie`; values are encoded and decoded |
+| Command line | `-b`, `-p`, `-h`, `extra_options`. `-s` and `--ssl-*` stop the program with a message that TLS is not supported |
 
-### Kalanlar
+### Remaining
 
-iyi-web içinde yapılabilecekler:
+Possible within iyi-web:
 
-- `error 404 do |env, ex|` biçimi ve exception sınıfına göre `error`. Panic
-  metni `Panicked#text` ile okunabiliyor; exception sınıflarının iyi'de
-  doğrudan karşılığı yok.
-- Aynı anahtarın birden çok değeri (`fetch_all`). Sorgu ve form tabloları son
-  değeri tutuyor.
-- Değiştirilebilir logger. `LogHandler` sabit biçimde stdout'a yazıyor.
-- `send_file`: gzip, bellekteki veriyi gönderme, HEAD'de dosyayı okumama.
-- Statik dosyalar: önceden sıkıştırılmış `.gz` dosyaları, sistem MIME
-  tablosu.
-- `add_context_storage_type`. Saklanabilen tipler sabit (`StoreValue`).
-- Örnekler: yalnız `examples/hello.iyi` var.
+- The `error 404 do |env, ex|` form and `error` per exception class. The panic
+  text can be read with `Panicked#text`; exception classes have no direct
+  equivalent in iyi.
+- Several values for one key (`fetch_all`). The query and form tables keep the
+  last value.
+- A swappable logger. `LogHandler` writes to stdout in a fixed format.
+- `send_file`: gzip, sending data held in memory, answering HEAD without
+  reading the file.
+- Static files: precompressed `.gz` files, the system MIME table.
+- `add_context_storage_type`. The types that can be stored are fixed
+  (`StoreValue`).
+- Examples: there is only `examples/hello.iyi`.
 
-Önce iyi'de değişiklik gerektirenler:
+Needing changes in iyi first:
 
-| iyi'de eksik | Beklediği iyi-web özelliği |
+| Missing in iyi | iyi-web feature waiting on it |
 |---|---|
-| Aynı fd'de okuma ve yazma için ayrı bekleme (`two fibers waiting on one fd`) | WebSocket (`ws`) |
-| Socket hatalarının panic yerine değer dönmesi (`panic: cannot write to socket`) | Kopan istemcinin stderr'e panic yazmaması; akışta istemcinin gittiğini anlama; WebSocket kapanışı |
-| Sinyal yakalama (SIGINT, SIGTERM) | Düzgün kapanış, `shutdown_message`, yarıdaki istekleri bitirme |
+| Separate read and write waits on the same fd (`two fibers waiting on one fd`) | WebSocket (`ws`) |
+| Socket errors returned as values instead of panics (`panic: cannot write to socket`) | No panic on stderr when a client disconnects; noticing during a stream that the client has gone; closing WebSockets |
+| Signal trapping (SIGINT, SIGTERM) | Graceful shutdown, `shutdown_message`, finishing in-flight requests |
 | TLS | `-s`, `--ssl-key-file`, `--ssl-cert-file`, `bind_tls` |
-| std/socket'te SO_REUSEPORT, unix socket, IPv6, okuma ve yazma zaman aşımı | `reuse_port`, unix socket'te dinleme, yavaş istemcilere zaman aşımı |
-| std/file'da konuma atlama (`seek`) | Büyük dosyaları ve Range'i belleğe okumadan gönderme |
-| `require` ile eklenen paketin `std/...` import'larının paketin içinde değil std'de aranması (`has no module 'std/file'`) | `require` ile kurulum. Şimdilik `iyi_web/` projenin `lib/` dizinine kopyalanıyor |
+| SO_REUSEPORT, unix sockets, IPv6, and read and write timeouts in std/socket | `reuse_port`, listening on a unix socket, timeouts for slow clients |
+| `seek` in std/file | Sending large files and ranges without reading them into memory |
+| Resolving the `std/...` imports of a package added with `require` in std rather than inside the package (`has no module 'std/file'`) | Installing with `require`. Until then, `iyi_web/` is copied into the project's `lib/` directory |
 
-iyi'de bulunan, iyi-web içinde aşılan sorunlar:
+Problems found in iyi and worked around in iyi-web:
 
-- `File.tempfile` pid ve sayaçtan tahmin edilebilir ad üretiyor, sonra
-  var-mı-diye-bakıp-yazıyor. Paylaşılan geçici dizinde önceden konan bir
-  symlink, yüklenen dosyayı saldırganın seçtiği yere yazdırıyordu
-  (çalıştırılarak doğrulandı). iyi-web artık her yükleme için `mkdir` ile
-  0700 izinli, rastgele adlı bir dizin açıyor.
-- `std/uri` `Params.parse` hatalı `%`'de panic veriyor. iyi-web kendi
-  çözücüsünü kullanıyor (`codec.iyi`).
-- `std/option_parser` hatalı girdide panic veriyor. iyi-web kendi
-  `CLIParser`'ını kullanıyor.
-- `std/file` import eden bir programda tohumsuz `Random.new` derlenmiyor
-  (`undefined method 'open' for Std::File:Module`). iyi-web tohumu kendisi
-  veriyor (`token.iyi`).
-- Derleyici: bir blok, dosyada kendisinden sonra tanımlanan üst düzey bir
-  sabite eriştiğinde `BUG: __iyi_once is not defined` veriyor (örneğin
-  `extra_options` bloğu altta tanımlı bir diziyi kullanınca). Sabiti bloğun
-  üstüne almak yetiyor.
+- `File.tempfile` derives a predictable name from the pid and a counter, then
+  checks whether the path exists before writing to it. A symlink planted there
+  beforehand in a shared temporary directory had an upload written wherever
+  the attacker chose (reproduced). iyi-web now creates a randomly named
+  directory with mode 0700 through `mkdir` for each upload.
+- `std/uri` `Params.parse` panics on a malformed `%`. iyi-web uses its own
+  decoder (`codec.iyi`).
+- `std/option_parser` panics on invalid input. iyi-web uses its own
+  `CLIParser`.
+- In a program that imports `std/file`, an unseeded `Random.new` does not
+  compile (`undefined method 'open' for Std::File:Module`). iyi-web supplies
+  the seed itself (`token.iyi`).
+- Compiler: a block that refers to a top-level constant defined further down
+  the file fails with `BUG: __iyi_once is not defined` (for example, an
+  `extra_options` block that uses an array defined below it). Moving the
+  constant above the block is enough.
