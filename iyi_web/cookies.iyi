@@ -50,3 +50,33 @@ pub class CookieJar
     @table.empty?
   end
 end
+
+# RFC 6265 cookie-octets pass through. Everything else, and `%` and `+`
+# (which `CookieJar.parse` decodes), is percent-encoded, so a value holding
+# a space, a semicolon or a line break round-trips instead of breaking the
+# header.
+pub def encode_cookie_value(value : String) : String
+  hex = "0123456789ABCDEF"
+  encoded = ""
+  bytes = value.to_unsafe
+  index = 0
+  while index < value.bytesize
+    byte = bytes[index]
+    if cookie_octet?(byte)
+      encoded = encoded + byte.unsafe_chr.to_s
+    else
+      encoded = encoded + "%" + hex[byte.to_i32 >> 4, 1] + hex[byte.to_i32 % 16, 1]
+    end
+    index = index + 1
+  end
+  encoded
+end
+
+private def cookie_octet?(byte : UInt8) : Bool
+  return false if byte == 37_u8 || byte == 43_u8
+  return true if byte == 33_u8
+  return true if byte >= 35_u8 && byte <= 43_u8
+  return true if byte >= 45_u8 && byte <= 58_u8
+  return true if byte >= 60_u8 && byte <= 91_u8
+  byte >= 93_u8 && byte <= 126_u8
+end

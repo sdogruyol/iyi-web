@@ -8,18 +8,24 @@ module iyi_web/context
 
 import std/file
 import std/json
+import std/time
 import iyi_web/request
 import iyi_web/response
 import iyi_web/params
 import iyi_web/cookies
+import iyi_web/headers
+import iyi_web/http_date
 import iyi_web/mime
 
 using std/file::{File}
 using std/json::{JSON}
+using std/time::{Time}
 using iyi_web/request::{Request}
 using iyi_web/response::{Response}
 using iyi_web/params::{Params}
-using iyi_web/cookies::{CookieJar}
+using iyi_web/cookies::{CookieJar, encode_cookie_value}
+using iyi_web/headers::{Headers}
+using iyi_web/http_date
 using iyi_web/mime
 
 # What `set` stores for later filters, middleware and the route.
@@ -90,13 +96,30 @@ pub class Context
     jar
   end
 
-  pub def set_cookie(name : String, value : String, path : String = "/", http_only : Bool = false, secure : Bool = false, max_age : Int32 = 0, same_site : String = "") : Nil
-    cookie = name + "=" + value + "; Path=" + path
+  # The value is percent-encoded where RFC 6265 does not allow it, and
+  # `cookies` decodes it, so any string round-trips. `max_age` 0 and no
+  # `expires` make a session cookie.
+  pub def set_cookie(name : String, value : String, path : String = "/", http_only : Bool = false, secure : Bool = false, max_age : Int32 = 0, same_site : String = "", domain : String = "", expires : Time? = nil) : Nil
+    raise "invalid cookie name #{name.inspect}" unless Headers.valid_name?(name)
+    cookie = name + "=" + encode_cookie_value(value) + "; Path=" + path
+    cookie = cookie + "; Domain=" + domain unless domain.empty?
+    if at = expires
+      cookie = cookie + "; Expires=" + http_date(at)
+    end
+    cookie = cookie + "; Max-Age=" + max_age.to_s if max_age > 0
     cookie = cookie + "; HttpOnly" if http_only
     cookie = cookie + "; Secure" if secure
-    cookie = cookie + "; Max-Age=" + max_age.to_s if max_age > 0
     cookie = cookie + "; SameSite=" + same_site unless same_site.empty?
     @response.headers.add("Set-Cookie", cookie)
+  end
+
+  # Tells the client to drop a cookie. *path* and *domain* must match the
+  # ones it was set with.
+  pub def delete_cookie(name : String, path : String = "/", domain : String = "") : Nil
+    raise "invalid cookie name #{name.inspect}" unless Headers.valid_name?(name)
+    cookie = name + "=; Path=" + path
+    cookie = cookie + "; Domain=" + domain unless domain.empty?
+    @response.headers.add("Set-Cookie", cookie + "; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT")
   end
 
   pub def status(code : Int32) : Context

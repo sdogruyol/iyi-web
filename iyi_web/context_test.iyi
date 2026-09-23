@@ -2,10 +2,12 @@
 # is a string bag a middleware can write for a later handler.
 module iyi_web/context_test
 
+import std/time
 import iyi_web/context
 import iyi_web/harness
 import iyi_web/spec
 
+using std/time::{Time}
 using iyi_web/context::{Context}
 using iyi_web/harness
 using iyi_web/spec
@@ -125,6 +127,26 @@ describe "Context cookies" do
     assert secure.response.headers.to_s.includes?("Secure")
     assert secure.response.headers.to_s.includes?("Max-Age=60")
     assert secure.response.headers.to_s.includes?("SameSite=Lax")
+  end
+
+  it "encodes a value outside cookie-octets and reads it back" do
+    ctx = env
+    ctx.set_cookie("flash", "Merhaba dünya; 100% + ok")
+    header = ctx.response.headers["set-cookie"]
+    assert !header.includes?(" dünya")
+    headed = http_request("GET", "/")
+    headed.headers["Cookie"] = header.split(';')[0]
+    assert Context.for(headed).cookies["flash"] == "Merhaba dünya; 100% + ok"
+  end
+
+  it "writes Domain and Expires, and deletes a cookie" do
+    ctx = env
+    ctx.set_cookie("sid", "1", domain: "example.com", expires: Time.utc(2030, 1, 2, 3, 4, 5))
+    assert ctx.response.headers["set-cookie"] == "sid=1; Path=/; Domain=example.com; Expires=Wed, 02 Jan 2030 03:04:05 GMT"
+    gone = env
+    gone.delete_cookie("sid")
+    assert gone.response.headers["set-cookie"] == "sid=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+    assert panics? { env.set_cookie("bad name", "x") }
   end
 end
 
