@@ -1,1 +1,1 @@
-module iyi-web
+module github.com/sdogruyol/iyi-web
