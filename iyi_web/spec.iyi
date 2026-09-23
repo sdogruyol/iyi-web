@@ -43,3 +43,17 @@ end
 pub def it(name : String, & : -> Nil) : Nil
   around(name) { yield }
 end
+
+# True when *block* panics. A panic can only be caught at a task boundary,
+# so the block runs as its own task and reading the task's value is the
+# catch. The runtime still prints the panic line to standard error.
+pub def panics?(&block : -> Nil) : Bool
+  outcome = group do |g|
+    task = g.spawn do
+      block.call
+      0
+    end
+    task.value
+  end
+  outcome.is_a?(Panicked)
+end

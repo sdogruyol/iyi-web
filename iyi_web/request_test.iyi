@@ -103,4 +103,8 @@ describe "parse_head" do
     assert_error("GET / HTTP/1.1\r\nNotAHeader")
     assert_error("GET / HTTP/1.1\r\n: no-name")
   end
+
+  it "rejects a header value carrying a control character" do
+    assert_error("GET / HTTP/1.1\r\nHost: localhost\r\nX-A: a\u0001b")
+  end
 end

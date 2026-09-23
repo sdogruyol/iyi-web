@@ -142,6 +142,11 @@ end
 pub def parse_incoming(text : String) : Incoming
   parsed = Server.parse_request(text)
   if req = parsed.request
+    # The server's own header table refuses a control character; one that
+    # arrived on the wire is the client's error, answered as a 400.
+    unless wire_headers_valid?(req.headers)
+      return Incoming.new(nil, "invalid header field", true, parsed.consumed)
+    end
     Incoming.new(Request.from_http(req.method, req.path, req.query, req.headers, req.body, wire_version(text)), nil, parsed.close, parsed.consumed)
   else
     Incoming.new(nil, parsed.error, parsed.close, parsed.consumed)
@@ -150,6 +155,13 @@ end
 
 pub def with_body(request : Request, body : String) : Request
   Request.new(request.method, request.path, request.query_string, request.version, request.headers, body)
+end
+
+private def wire_headers_valid?(headers : Hash(String, String)) : Bool
+  headers.each do |name, value|
+    return false unless Headers.valid_name?(name) && Headers.valid_value?(value)
+  end
+  true
 end
 
 private def wire_version(text : String) : String

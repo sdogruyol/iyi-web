@@ -65,4 +65,25 @@ describe "Headers" do
     assert !headers.has_key?("x-a")
     assert headers.to_s == "content-type: text/html\r\n"
   end
+
+  it "refuses a name that is not a token" do
+    assert panics? { Headers.new["Bad Name"] = "x" }
+    assert panics? { Headers.new.add("", "x") }
+    assert panics? { Headers.new["X-A:"] = "x" }
+  end
+
+  it "refuses CR, LF and other control characters in a value" do
+    assert panics? { Headers.new["Location"] = "/next\r\nSet-Cookie: injected=1" }
+    assert panics? { Headers.new.add("X-A", "a\nb") }
+    assert panics? { Headers.new["X-A"] = "a\u0000b" }
+    assert panics? { Headers.new["X-A"] = "a\u007fb" }
+  end
+
+  it "accepts tab, space and bytes above ASCII in a value" do
+    headers = Headers.new
+    headers["X-A"] = "a\tb c"
+    headers["X-B"] = "çay"
+    assert headers["x-a"] == "a\tb c"
+    assert headers["x-b"] == "çay"
+  end
 end

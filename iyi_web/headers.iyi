@@ -4,6 +4,10 @@
 # R-3 forbids that, so this is a type this module owns. A consumer that wants
 # a header writes `ctx.request.headers["content-type"]` and the case of the
 # name they used does not matter.
+#
+# A name must be an RFC 9110 token and a value must not carry control
+# characters. Writing either is a panic: a CR or LF in a value is how a
+# `Location` built from a query string becomes a second, forged header.
 module iyi_web/headers
 
 pub class Headers
@@ -27,6 +31,7 @@ pub class Headers
   end
 
   pub def []=(name : String, value : String) : String
+    check(name, value)
     key = name.downcase
     index = 0
     while index < @pairs.size
@@ -41,6 +46,7 @@ pub class Headers
   end
 
   pub def add(name : String, value : String) : Nil
+    check(name, value)
     @pairs << {name, value}
   end
 
@@ -69,5 +75,47 @@ pub class Headers
       kept << pair unless pair[0].downcase == key
     end
     @pairs = kept
+  end
+
+  # RFC 9110 field-name: one or more token characters.
+  def self.valid_name?(name : String) : Bool
+    return false if name.bytesize == 0
+    bytes = name.to_unsafe
+    index = 0
+    while index < name.bytesize
+      return false unless token_byte?(bytes[index])
+      index = index + 1
+    end
+    true
+  end
+
+  # RFC 9110 field-value: visible ASCII, obs-text, space and tab. CR, LF,
+  # NUL and the other controls are refused.
+  def self.valid_value?(value : String) : Bool
+    bytes = value.to_unsafe
+    index = 0
+    while index < value.bytesize
+      byte = bytes[index]
+      return false if (byte < 32_u8 && byte != 9_u8) || byte == 127_u8
+      index = index + 1
+    end
+    true
+  end
+
+  private def check(name : String, value : String) : Nil
+    raise "invalid header name #{name.inspect}" unless Headers.valid_name?(name)
+    raise "invalid value for header #{name}: control characters such as CR and LF are not allowed" unless Headers.valid_value?(value)
+  end
+end
+
+private def token_byte?(byte : UInt8) : Bool
+  return true if byte >= 48_u8 && byte <= 57_u8
+  return true if byte >= 65_u8 && byte <= 90_u8
+  return true if byte >= 97_u8 && byte <= 122_u8
+  case byte
+  when 33_u8, 35_u8, 36_u8, 37_u8, 38_u8, 39_u8, 42_u8, 43_u8, 45_u8, 46_u8, 94_u8, 95_u8, 96_u8, 124_u8, 126_u8
+    true
+  else
+    false
   end
 end
