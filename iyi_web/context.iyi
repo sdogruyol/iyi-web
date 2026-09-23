@@ -16,6 +16,7 @@ import iyi_web/cookies
 import iyi_web/headers
 import iyi_web/http_date
 import iyi_web/mime
+import iyi_web/range
 
 using std/file::{File}
 using std/json::{JSON}
@@ -27,6 +28,7 @@ using iyi_web/cookies::{CookieJar, encode_cookie_value}
 using iyi_web/headers::{Headers}
 using iyi_web/http_date
 using iyi_web/mime
+using iyi_web/range::{respond_ranged}
 
 # What `set` stores for later filters, middleware and the route.
 pub alias StoreValue = Nil | String | Int32 | Int64 | Float64 | Bool
@@ -40,6 +42,7 @@ pub class Context
   @cookies : CookieJar?
   @route_method : String?
   @route_pattern : String?
+  @max_ranges : Int32
 
   def initialize(@request : Request, @response : Response, @params : Params)
     @halted = false
@@ -47,6 +50,7 @@ pub class Context
     @cookies = nil
     @route_method = nil
     @route_pattern = nil
+    @max_ranges = 16
   end
 
   def self.for(request : Request) : Context
@@ -181,7 +185,8 @@ pub class Context
   # Whole-file send. Missing paths and directories 404 rather than panicking
   # inside File.read; MIME follows the extension unless the caller names one.
   # A *filename* makes the response a download (`disposition` defaults to
-  # "attachment"); the name is encoded per RFC 6266 and RFC 8187.
+  # "attachment"); the name is encoded per RFC 6266 and RFC 8187. A GET
+  # with `Range` gets 206 or 416.
   pub def send_file(path : String, mime_type : String = "", filename : String = "", disposition : String = "") : Nil
     if !File.exists?(path) || File.directory?(path)
       halt(404, "404 Not Found")
@@ -191,10 +196,19 @@ pub class Context
     type = mime_type.empty? ? mime_type_of(path) : mime_type
     @response.content_type = type
     @response.headers["X-Content-Type-Options"] = "nosniff"
+    @response.headers["Accept-Ranges"] = @max_ranges > 0 ? "bytes" : "none"
     unless filename.empty?
       @response.headers["Content-Disposition"] = content_disposition(disposition.empty? ? "attachment" : disposition, filename)
     end
-    @response.set_body(File.read(path))
+    body = File.read(path)
+    range = @request.method == "GET" && @max_ranges > 0 ? @request.headers["Range"]? : nil
+    @response.set_body(body) unless respond_ranged(@response, range, body, type, @max_ranges)
+  end
+
+  # Most ranges one `Range` header may ask `send_file` for; 0 turns range
+  # requests off. The server sets it from the configuration.
+  pub def max_ranges=(value : Int32) : Int32
+    @max_ranges = value
   end
 
   pub def set(name : String, value : StoreValue) : Nil

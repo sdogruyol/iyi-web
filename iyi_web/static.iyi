@@ -131,28 +131,7 @@ pub class StaticHandler < Handler
 
     body = File.read(path)
     ctx.response.content_type = type
-
-    case ranged
-    in Unsatisfiable
-      headers["Content-Range"] = unsatisfied_range(body.bytesize)
-      ctx.response.status_code = 416
-      ctx.response.set_body("")
-      return
-    in Array(Tuple(Int32, Int32))
-      ctx.response.status_code = 206
-      if it.size == 1
-        first = it[0][0]
-        last = it[0][1]
-        headers["Content-Range"] = content_range(first, last, body.bytesize)
-        ctx.response.set_body(body[first, last - first + 1])
-      else
-        boundary = byteranges_boundary
-        ctx.response.content_type = "multipart/byteranges; boundary=" + boundary
-        ctx.response.set_body(byteranges_body(body, it, type, boundary))
-      end
-      return
-    in Nil
-    end
+    return if respond_ranged(ctx.response, range_header, body, type, @max_ranges)
 
     if encoding = coding
       body = encode_body(body, encoding)

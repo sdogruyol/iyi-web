@@ -18,9 +18,11 @@ module iyi_web/range
 
 import std/random
 import std/time
+import iyi_web/response
 
 using std/random::{Random}
 using std/time::{Time}
+using iyi_web/response::{Response}
 
 # The range set is valid, but no range in it selects a byte of the body.
 pub struct Unsatisfiable
@@ -107,6 +109,38 @@ end
 # otherwise.
 pub def byteranges_boundary : String
   "iyi-web-" + hex(random_bytes(16))
+end
+
+# Answers *range_header* for a whole *body* on *response*: 206 with the
+# requested bytes (one range, or several as `multipart/byteranges`), or 416
+# with `Content-Range: bytes */size`. False, with nothing written, when
+# there is no usable header and the full body should be sent instead.
+pub def respond_ranged(response : Response, range_header : String?, body : String, content_type : String, max_ranges : Int32) : Bool
+  header = range_header
+  return false unless header
+  case parse_ranges(header, body.bytesize, max_ranges)
+  in Unsatisfiable
+    response.status_code = 416
+    response.headers["Content-Range"] = unsatisfied_range(body.bytesize)
+    response.set_body("")
+    true
+  in Array(Tuple(Int32, Int32))
+    response.status_code = 206
+    if it.size == 1
+      first = it[0][0]
+      last = it[0][1]
+      response.content_type = content_type
+      response.headers["Content-Range"] = content_range(first, last, body.bytesize)
+      response.set_body(body[first, last - first + 1])
+    else
+      boundary = byteranges_boundary
+      response.content_type = "multipart/byteranges; boundary=" + boundary
+      response.set_body(byteranges_body(body, it, content_type, boundary))
+    end
+    true
+  in Nil
+    false
+  end
 end
 
 # One range-spec into clamped `{first, last}`, or nil when it is malformed

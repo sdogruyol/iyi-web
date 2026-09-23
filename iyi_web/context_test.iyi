@@ -199,4 +199,23 @@ describe "Context helpers" do
     ctx.send_file(__DIR__ + "/fixtures/hello.txt", filename: "rapor \"ç\".txt", disposition: "inline")
     assert ctx.response.headers["content-disposition"] == "inline; filename=\"rapor \\\"_\\\".txt\"; filename*=UTF-8''rapor%20%22%C3%A7%22.txt"
   end
+
+  it "send_file answers a byte range" do
+    ranged = http_request("GET", "/")
+    ranged.headers["Range"] = "bytes=6-"
+    part = Context.for(ranged)
+    part.send_file(__DIR__ + "/fixtures/hello.txt")
+    assert part.response.status_code == 206
+    assert part.response.body == "static"
+    assert part.response.headers["content-range"] == "bytes 6-11/12"
+    assert part.response.headers["accept-ranges"] == "bytes"
+
+    off = http_request("GET", "/")
+    off.headers["Range"] = "bytes=0-1"
+    whole = Context.for(off)
+    whole.max_ranges = 0
+    whole.send_file(__DIR__ + "/fixtures/hello.txt")
+    assert whole.response.status_code == 200
+    assert whole.response.headers["accept-ranges"] == "none"
+  end
 end
