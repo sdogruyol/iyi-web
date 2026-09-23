@@ -1,0 +1,335 @@
+# `multipart/form-data` bodies (RFC 7578): the text fields in the order
+# they were sent, and every file part spooled to its own temporary file.
+#
+# A request body arrives here as one String, which holds bytes rather than
+# text, so a file's contents come out exactly as the client sent them: NUL,
+# CR and LF included. A part is a file when its Content-Disposition carries
+# a `filename` parameter, even an empty one.
+#
+# Field names and filenames are used as sent. Nothing is sanitised: a
+# filename can be `../../etc/passwd` or contain any byte a header value may
+# hold, so never join it to a directory without cleaning it first.
+#
+# Parsing is all or nothing. A malformed body is a 400 and a breached limit
+# a 413, and either way every temporary file already written is deleted
+# before the error is returned. On success the caller owns the files and
+# calls `delete` when the request is over.
+module iyi_web/multipart
+
+import std/file
+import std/text
+import iyi_web/headers
+
+using std/file::{File}
+using iyi_web/headers::{Headers}
+
+TEMPFILE_PREFIX = "iyi-web-upload"
+
+# One file part, spooled to disk under `path`.
+pub class FileUpload
+  @name : String
+  @filename : String
+  @path : String
+  @headers : Headers
+  @size : Int32
+
+  def initialize(@name : String, @filename : String, @path : String, @headers : Headers, @size : Int32)
+  end
+
+  # The form field name, e.g. `avatar` or `photos[]`.
+  pub def name : String
+    @name
+  end
+
+  # The client's filename, unsanitised; may be empty.
+  pub def filename : String
+    @filename
+  end
+
+  # The temporary file holding the upload.
+  pub def path : String
+    @path
+  end
+
+  # The part's own headers (Content-Disposition, Content-Type, ...).
+  pub def headers : Headers
+    @headers
+  end
+
+  # The part's Content-Type as sent, or "" when it carried none.
+  pub def content_type : String
+    @headers["Content-Type"]? || ""
+  end
+
+  # Bytes written to the temporary file.
+  pub def size : Int32
+    @size
+  end
+
+  # The whole upload. Reads the file each time it is called.
+  pub def read : String
+    File.read(@path)
+  end
+
+  # Removes the temporary file. Safe to call more than once.
+  pub def delete : Nil
+    File.delete(@path) if File.exists?(@path)
+  end
+end
+
+# A parsed body: text fields in order, repeated names kept, and file parts.
+pub class Multipart
+  @fields : Array(Tuple(String, String))
+  @files : Array(FileUpload)
+
+  def initialize(@fields : Array(Tuple(String, String)), @files : Array(FileUpload))
+  end
+
+  pub def fields : Array(Tuple(String, String))
+    @fields
+  end
+
+  pub def files : Array(FileUpload)
+    @files
+  end
+
+  # Deletes every file part's temporary file.
+  pub def delete : Nil
+    @files.each { |upload| upload.delete }
+  end
+end
+
+# Why a body was refused: 400 when it is malformed, 413 when it breaches a
+# limit.
+pub class MultipartError
+  @status : Int32
+  @message : String
+
+  def initialize(@status : Int32, @message : String)
+  end
+
+  pub def status : Int32
+    @status
+  end
+
+  pub def message : String
+    @message
+  end
+end
+
+impl Error for MultipartError
+  def message : String
+    @message
+  end
+end
+
+# The `boundary` parameter of a `multipart/*` Content-Type, quoted or not.
+# Nil when the media type is not multipart or the parameter is missing or
+# empty.
+pub def multipart_boundary(content_type : String) : String?
+  parsed = parse_header_params(content_type)
+  return nil unless parsed[0].downcase.starts_with?("multipart/")
+  boundary = nil
+  parsed[1].each do |param|
+    boundary = param[1] if param[0] == "boundary"
+  end
+  return nil unless boundary
+  return nil if boundary.empty?
+  boundary
+end
+
+# Parses a whole `multipart/form-data` body. At most *max_files* file parts
+# are accepted and a text field may hold at most *max_field_size* bytes;
+# past either limit the answer is a 413. A body with no parts at all
+# (`--boundary--`) is an empty form, not an error.
+pub def parse_multipart(body : String, boundary : String, max_files : Int32, max_field_size : Int32) : Multipart | MultipartError
+  return MultipartError.new(400, "multipart boundary is empty") if boundary.empty?
+  dash = "--" + boundary
+  delimiter = "\r\n" + dash
+  fields = [] of Tuple(String, String)
+  files = [] of FileUpload
+
+  # The first boundary opens the body or starts a line; anything before it
+  # is preamble and ignored.
+  cursor = 0
+  if body.starts_with?(dash)
+    cursor = dash.bytesize
+  else
+    found = body.index(delimiter)
+    return MultipartError.new(400, "multipart body has no boundary") unless found
+    cursor = found + delimiter.bytesize
+  end
+
+  while true
+    start = after_delimiter(body, cursor)
+    unless start
+      discard(files)
+      return MultipartError.new(400, "malformed multipart boundary line")
+    end
+    break if start == CLOSED
+
+    finish = body.index(delimiter, start)
+    unless finish
+      discard(files)
+      return MultipartError.new(400, "multipart body has no closing boundary")
+    end
+
+    problem = add_part(body, start, finish, fields, files, max_files, max_field_size)
+    if problem
+      discard(files)
+      return problem
+    end
+    cursor = finish + delimiter.bytesize
+  end
+
+  Multipart.new(fields, files)
+end
+
+CLOSED = -1
+
+# Reads what follows a boundary at *cursor*: `--` closes the body (what
+# comes after is epilogue), otherwise optional spaces or tabs and CRLF open
+# the next part, whose first byte is returned. Nil for anything else.
+private def after_delimiter(body : String, cursor : Int32) : Int32?
+  rest = body.bytesize - cursor
+  return CLOSED if rest >= 2 && body[cursor, 2] == "--"
+  line_end = body.index("\r\n", cursor)
+  return nil unless line_end
+  bytes = body.to_unsafe
+  index = cursor
+  while index < line_end
+    byte = bytes[index]
+    return nil unless byte == 32_u8 || byte == 9_u8
+    index = index + 1
+  end
+  line_end + 2
+end
+
+# One part, from its first header byte to the CRLF before the next
+# boundary.
+private def add_part(body : String, start : Int32, finish : Int32, fields : Array(Tuple(String, String)), files : Array(FileUpload), max_files : Int32, max_field_size : Int32) : MultipartError?
+  content_start = 0
+  header_block = ""
+  if finish - start >= 2 && body[start, 2] == "\r\n"
+    content_start = start + 2
+  else
+    separator = body.index("\r\n\r\n", start)
+    return MultipartError.new(400, "multipart part headers are not terminated") unless separator
+    return MultipartError.new(400, "multipart part headers are not terminated") if separator + 4 > finish
+    header_block = body[start, separator - start]
+    content_start = separator + 4
+  end
+
+  headers = part_headers(header_block)
+  return MultipartError.new(400, "malformed multipart part header") unless headers
+  disposition = headers["Content-Disposition"]?
+  return MultipartError.new(400, "multipart part has no Content-Disposition") unless disposition
+
+  parsed = parse_header_params(disposition)
+  return MultipartError.new(400, "multipart part is not form-data") unless parsed[0].downcase == "form-data"
+  name = nil
+  filename = nil
+  parsed[1].each do |param|
+    name = param[1] if param[0] == "name"
+    filename = param[1] if param[0] == "filename"
+  end
+  return MultipartError.new(400, "multipart part has no name") unless name
+
+  content = body[content_start, finish - content_start]
+  if filename
+    # Counted before the part is spooled, so a refused body costs no
+    # temporary file beyond the ones already accepted.
+    return MultipartError.new(413, "Too many file parts (max #{max_files})") if files.size >= max_files
+    path = File.tempfile(TEMPFILE_PREFIX)
+    # `File.tempfile` creates the file world-readable; an upload is the
+    # client's data, so it is narrowed to the owner before a byte lands.
+    File.chmod(path, 0o600)
+    File.write(path, content)
+    files << FileUpload.new(name, filename, path, headers, content.bytesize)
+  else
+    return MultipartError.new(413, "Payload Too Large") if content.bytesize > max_field_size
+    fields << {name, content}
+  end
+  nil
+end
+
+# `Name: value` lines separated by CRLF. Nil when a line is not a header,
+# so a malformed part is a 400 rather than a panic in `Headers`.
+private def part_headers(block : String) : Headers?
+  headers = Headers.new
+  return headers if block.empty?
+  block.split("\r\n").each do |line|
+    colon = line.index(':')
+    return nil unless colon
+    name = line[0, colon]
+    value = line[colon + 1, line.bytesize - colon - 1].strip
+    return nil unless Headers.valid_name?(name) && Headers.valid_value?(value)
+    headers.add(name, value)
+  end
+  headers
+end
+
+private def discard(files : Array(FileUpload)) : Nil
+  files.each { |upload| upload.delete }
+end
+
+# Splits `kind; key=value; key="quoted value"` into the leading token and
+# its parameters, in order. Keys are lowercased; a `;` inside a quoted
+# string belongs to the value, and `\"` and `\\` inside one are unescaped.
+# Any other backslash is kept, so a Windows path sent as a filename
+# survives.
+private def parse_header_params(text : String) : Tuple(String, Array(Tuple(String, String)))
+  bytes = text.to_unsafe
+  size = text.bytesize
+  index = 0
+  while index < size && bytes[index] != 59_u8
+    index = index + 1
+  end
+  kind = text[0, index].strip
+  params = [] of Tuple(String, String)
+
+  while index < size
+    index = index + 1
+    key_start = index
+    while index < size && bytes[index] != 61_u8 && bytes[index] != 59_u8
+      index = index + 1
+    end
+    key = text[key_start, index - key_start].strip.downcase
+    value = ""
+    if index < size && bytes[index] == 61_u8
+      index = index + 1
+      while index < size && (bytes[index] == 32_u8 || bytes[index] == 9_u8)
+        index = index + 1
+      end
+      if index < size && bytes[index] == 34_u8
+        index = index + 1
+        buffer = Pointer(UInt8).malloc((size - index + 1).to_u64)
+        written = 0
+        while index < size && bytes[index] != 34_u8
+          byte = bytes[index]
+          if byte == 92_u8 && index + 1 < size && (bytes[index + 1] == 34_u8 || bytes[index + 1] == 92_u8)
+            index = index + 1
+            byte = bytes[index]
+          end
+          buffer[written] = byte
+          written = written + 1
+          index = index + 1
+        end
+        value = String.new(written) do |target|
+          target.copy_from(buffer, written)
+        end
+        while index < size && bytes[index] != 59_u8
+          index = index + 1
+        end
+      else
+        value_start = index
+        while index < size && bytes[index] != 59_u8
+          index = index + 1
+        end
+        value = text[value_start, index - value_start].strip
+      end
+    end
+    params << {key, value} unless key.empty?
+  end
+  {kind, params}
+end
