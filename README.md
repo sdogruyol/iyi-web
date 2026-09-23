@@ -23,16 +23,19 @@ a route returns is checked when the program compiles.
 
 - Routes for `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `HEAD` and
   `QUERY`, with named and wildcard path segments
-- URL, query-string and form parameters
-- Before and after filters for every route, a path prefix or a single method
-- Custom error pages per status code, automatic `404` and `405` responses, and
-  `HEAD` for every `GET` route
+- URL, query-string, form, JSON and `multipart/form-data` parameters, with
+  file uploads
+- Before and after filters for every route, a path pattern or a single method
+- Error pages per status code, automatic `404` and `405` responses, and a
+  `500` page for a route that panics
 - Composable routers with `mount` and `namespace`
 - Middleware for every request or for a path prefix
-- Static files, file downloads, cookies, redirects and early responses with
-  `halt`
-- CORS and HTML form method override
-- Server-side templates compiled into the program with `std/eiy`
+- Streaming responses and server-sent events
+- Static files with `ETag`, `304 Not Modified`, gzip and byte ranges
+- File downloads, cookies, redirects and early responses with `halt`
+- Response compression, CORS and HTML form method override
+- Templates with layouts, compiled into the program
+- Command-line flags for host and port
 - Persistent connections, each served by its own fiber
 
 ## Requirements
@@ -63,7 +66,8 @@ Save the program at the top of this page as `app.iyi` and run it:
 iyi run app.iyi
 ```
 
-The server listens on http://localhost:3000. Set `PORT` to use another port.
+The server listens on http://localhost:3000. Pass `-p 8080` or set `PORT` to
+use another port.
 
 The examples below extend this program. Each goes between the `using` line and
 `run`, and any `import` or `using` lines it shows go at the top of the file.
@@ -100,6 +104,10 @@ with `/`.
 - `:name` matches one path segment: `/articles/42` sets `id` to `42`.
 - `*name` matches the rest of the path: `/assets/css/site.css` sets `path` to
   `css/site.css`.
+- A trailing slash does not matter: `/articles/` is `/articles`.
+- Two routes may name the same segment differently: `/users/:id` and
+  `/users/:user_id/posts` each read their own name.
+- Defining the same method and path twice stops the program at startup.
 
 A request that matches no route gets `404 Not Found`. A path that exists only
 for other methods gets `405 Method Not Allowed` with an `Allow` header. Every
@@ -154,12 +162,42 @@ end
 |---|---|
 | Route segments (`:id`, `*path`) | `env.params.url` |
 | Query string | `env.params.query` |
-| `application/x-www-form-urlencoded` body | `env.params.body` |
+| `application/x-www-form-urlencoded` or `multipart/form-data` fields | `env.params.body` |
+| `application/json` and `application/*+json` bodies | `env.params.json` |
+| Uploaded files | `env.params.files`, `env.params.all_files` |
 
-Each is a `Hash(String, String)` of percent-decoded values.
-`env.params["name"]?` searches all three, in the order above. Indexing without
-`?` panics when the key is missing, so use `[]?` for optional values. Other
-request bodies, such as JSON, are available unparsed as `env.request.body`.
+`url`, `query` and `body` are `Hash(String, String)` tables of percent-decoded
+values; `env.params["name"]?` searches them in that order. Indexing without
+`?` panics when the key is missing, so use `[]?` for optional values.
+`env.params.raw_body` is the body as it arrived.
+
+A JSON object's members are in `env.params.json`, a `Hash(String, JSON::Any)`;
+a top-level array is under the key `"_json"`. A request that declares JSON
+and sends something that does not parse gets `400 Bad Request` before the
+route runs.
+
+### File uploads
+
+```iyi
+post "/avatar" do |env|
+  if upload = env.params.files["avatar"]?
+    env.text("Received " + upload.filename + ", " + upload.size.to_s + " bytes")
+  else
+    env.halt(422, "No file")
+  end
+end
+```
+
+Each uploaded file is written to its own temporary file: `upload.path`,
+`upload.filename`, `upload.content_type`, `upload.size`, `upload.headers` and
+`upload.read` describe it, and the file is deleted once the response has been
+sent. Files sent under a name ending in `[]` are all kept, in
+`env.params.all_files["photos[]"]`. The filename is the client's, unchanged:
+never join it to a directory path without cleaning it first.
+
+A malformed `multipart/form-data` body gets `400`. More file parts than
+`max_file_uploads`, or a text field larger than
+`max_multipart_form_field_size`, gets `413 Content Too Large`.
 
 ## Requests
 
@@ -187,9 +225,13 @@ end
 
 Responses default to `200` and `text/html; charset=utf-8`. The server sets
 `Content-Length`, `Date` and `Connection`. `env.response.headers.add` appends
-a header instead of replacing it.
+a header instead of replacing it, and `headers env, {"X-A" => "1"}` sets
+several at once. A header name or value containing a line break or another
+control character is refused with a panic, so a value built from user input
+cannot forge a second header.
 
-These helpers set the content type and the body in one call:
+These helpers set the content type and the body in one call; each also takes
+a `content_type:` argument:
 
 | Helper | Content-Type |
 |---|---|
@@ -198,11 +240,13 @@ These helpers set the content type and the body in one call:
 | `env.json(body)` | `application/json; charset=utf-8` |
 | `env.xml(body)` | `application/xml; charset=utf-8` |
 
-`env.status(code)` sets the status and returns `env`, so the two combine:
+`env.json` sends a `String` as it is and serialises anything else, such as a
+`Hash`, an `Array` or a type that implements `ToJSON`. `env.status(code)` sets
+the status and returns `env`, so the two combine:
 
 ```iyi
 post "/api/items" do |env|
-  env.status(201).json(%({"created":true}))
+  env.status(201).json({"created" => true})
 end
 ```
 
@@ -226,12 +270,7 @@ get "/api/items/:id" do |env|
 end
 
 post "/api/echo" do |env|
-  payload = JSON.parse?(env.request.body)
-  if payload
-    env.json(JSON.to_json(payload))
-  else
-    env.halt(400, "Invalid JSON")
-  end
+  env.json(env.params.json)
 end
 ```
 
@@ -247,14 +286,16 @@ get "/legacy" do |env|
 end
 
 get "/private" do |env|
-  env.halt(403, "Forbidden")
+  halt env, status_code: 403, response: "Forbidden"
 end
 ```
 
-`redirect` responds with `302` unless given a status. After `redirect` or
-`halt`, the rest of the chain is skipped: remaining filters and the route do
-not run, the route's return value is discarded, and error pages are not
-applied.
+`redirect` responds with `302` unless given a status; `body:` adds a body and
+`close: false` keeps the chain running. `env.halt(403, "Forbidden")` and
+`halt env, status_code: 403, response: "Forbidden"` are the same. After a
+redirect or a halt, the rest of the chain is skipped: remaining filters and
+the route do not run, the route's return value is discarded, and error pages
+are not applied.
 
 ### Cookies
 
@@ -268,11 +309,18 @@ get "/account" do |env|
   session = env.cookies["session"]?
   session ? "Signed in" : "Signed out"
 end
+
+post "/sign-out" do |env|
+  env.delete_cookie("session")
+  env.redirect("/")
+end
 ```
 
-`set_cookie` also takes `path`, which defaults to `/`. A `max_age` of `0`, the
-default, makes a session cookie. Cookie values are read back percent-decoded,
-so percent-encode values that may contain `%`, `+`, `;`, `,` or spaces.
+`set_cookie` also takes `path` (default `/`), `domain` and `expires` (a
+`Time`); with neither `max_age` nor `expires` it makes a session cookie.
+Values are percent-encoded where cookies do not allow a character and
+decoded when read, so any string round-trips. `delete_cookie` needs the same
+`path` and `domain` the cookie was set with.
 
 ### Files
 
@@ -282,9 +330,45 @@ get "/download/report" do |env|
 end
 ```
 
-The content type follows the file extension unless `mime_type:` is given, and
-`filename:` marks the response as a download. A missing file responds with
-`404`. The file is read into memory in full.
+The content type follows the file extension unless `mime_type:` is given.
+`filename:` marks the response as a download; `disposition: "inline"` shows
+it instead. Non-ASCII names are encoded for every browser. A `Range` request
+gets `206 Partial Content` or `416`. A missing file responds with `404`. The
+file is read into memory in full.
+
+### Streaming
+
+`env.response.flush` sends what the route has written so far and keeps the
+response open; on HTTP/1.1 the body is sent chunked.
+
+```iyi
+get "/export.csv" do |env|
+  env.response.content_type = "text/csv; charset=utf-8"
+  env.response.print("id,total\n")
+  env.response.flush
+  (1..3).each { |id| env.response.print(id.to_s + "," + (id * 10).to_s + "\n") }
+  nil
+end
+```
+
+Headers changed after the first `flush` are not sent.
+
+### Server-sent events
+
+```iyi
+sse "/clock" do |stream, env|
+  3.times do |tick|
+    stream.send("tick " + tick.to_s, event: "tick", id: tick)
+    sleep(1000)
+  end
+end
+```
+
+`sse` registers a `GET` route answering `text/event-stream`. `send` takes
+`event:`, `id:` and `retry:` (a `Span`), splits multi-line data into `data:`
+lines and flushes; `comment` sends a keep-alive line clients ignore. An event
+name or id containing a line break panics. The stream ends when the block
+returns. A browser reads it with `new EventSource("/clock")`.
 
 ## Filters
 
@@ -293,11 +377,11 @@ before_all do |env|
   env.response.headers["X-Content-Type-Options"] = "nosniff"
 end
 
-before_all "/admin" do |env|
+before_all "/admin/*" do |env|
   env.halt(401, "Unauthorized") unless env.cookies.has_key?("session")
 end
 
-after_get "/api/*" do |env|
+after_get ["/api/*", "/reports/*"] do |env|
   env.response.headers["Cache-Control"] = "no-store"
 end
 ```
@@ -305,24 +389,29 @@ end
 - `before_all` and `after_all` run for every method. `before_get`,
   `after_post` and their siblings run for one method: `get`, `post`, `put`,
   `patch`, `delete`, `options` or `query`.
-- The path defaults to `*`, every route. `/admin` and `/admin/*` both match
-  `/admin` and every path under it.
-- Filters run in declaration order, and only for requests that match a route.
+- The path defaults to `*`, every path. `/admin/*` matches `/admin` and every
+  path under it; `/users/:id` matches one segment in place of `:id`; any other
+  path matches exactly. A list registers the same block for each path.
+- Filters run in declaration order. `before_all` filters also run for a
+  request no route matched, before its `404` or `405`; the others run only
+  for a matched route.
 - A before filter that calls `halt` or `redirect` stops the request before the
-  route runs.
+  route runs. One that sets an error status with an error page gets that page
+  instead of the route.
 - A filter's return value is discarded, but like a route's it must implement
   `IntoBody`.
 
-Filters, middleware and routes can pass strings along a request with
-`env["key"] = value` and read them with `env["key"]?`:
+Filters, middleware and routes pass values along a request with `env.set`,
+`env.get` and `env.get?`, which hold a `String`, `Int32`, `Int64`, `Float64`,
+`Bool` or `nil`. `env["key"]` reads and writes strings only:
 
 ```iyi
-before_all do |env|
-  env["locale"] = env.request.headers["Accept-Language"]? || "en"
+before_all "/account/*" do |env|
+  env.set("user_id", 42)
 end
 
-get "/locale" do |env|
-  "Locale: " + env["locale"]
+get "/account/orders" do |env|
+  "Orders for user " + env.get("user_id").to_s
 end
 ```
 
@@ -337,6 +426,10 @@ error 422 do |env|
   "<h1>Please check the form and try again</h1>"
 end
 
+error 500 do |env|
+  "<h1>Something went wrong</h1>"
+end
+
 post "/signup" do |env|
   email = env.params.body["email"]? || ""
   env.response.status_code = 422 if email.empty?
@@ -348,11 +441,11 @@ An error page replaces the body of `404` and `405` responses from the router,
 and of any response a route finishes with a status of `400` or above. The
 status code is kept. Responses ended with `halt` are sent unchanged.
 
-A panic in a handler closes its connection without a response, and also
-closes every other connection open at that moment; the server keeps accepting
-new connections and the panic is logged. A client that disconnects while its
-response is being written has the same effect. Report failures by setting a
-status, not by panicking.
+A route that panics gets `500 Internal Server Error` and its connection is
+closed; other connections are not affected, and the panic is logged. The
+`error 500` page is used when there is one. Otherwise the built-in page shows
+the panic message in development and hides it in every other environment;
+`config.show_exceptions = true` or `false` overrides that.
 
 ## Routers
 
@@ -375,10 +468,10 @@ end
 mount "/admin", admin
 ```
 
-This serves `/admin` and `/admin/reports/daily`. A `Router` has the same route,
-filter (`before`, `after`, `before_get`, …) and `error` methods as the
-program. `mount` without a path mounts a router at the root, and `namespace`
-passes the nested router to its block.
+This serves `/admin` and `/admin/reports/daily`. A `Router` has the same
+route, `sse`, filter (`before`, `after`, `before_get`, …) and `error`
+methods as the program. `mount` without a path mounts a router at the root,
+and `namespace` passes the nested router to its block.
 
 Larger applications keep routers in their own modules. A module does not need
 the DSL to define one:
@@ -417,15 +510,19 @@ import iyi_web/override
 using iyi_web/cors::{CORSHandler}
 using iyi_web/override::{OverrideMethodHandler}
 
+gzip true
 use OverrideMethodHandler.new
 use "/api", CORSHandler.new(origin: "https://app.example.com")
 ```
 
-`use handler` runs a handler for every request; `use "/api", handler` runs it
-for `/api` and every path under it.
+`use handler` runs a handler for every request; `use "/api", handler` or
+`use "/api", [first, second]` runs it for `/api` and every path under it.
+`use handler, 0` places a handler at an index of the finished chain, 0 being
+before request logging.
 
 | Handler | Module | Purpose |
 |---|---|---|
+| `CompressHandler` | `iyi_web/compress` | Compresses textual responses of 860 bytes or more with gzip or deflate when `Accept-Encoding` allows it. `gzip true` adds it. |
 | `CORSHandler` | `iyi_web/cors` | Sets `Access-Control-Allow-Origin` and answers preflight requests with `204`. Takes `origin` (default `*`), `methods`, `headers` (default `*`) and `max_age` (seconds as a string, default `"86400"`). |
 | `OverrideMethodHandler` | `iyi_web/override` | Treats a form `POST` with `_method` set to `PUT`, `PATCH` or `DELETE` as that method. |
 | `LogHandler` | `iyi_web/log` | Prints one line per request. Added by default; `logging false` removes it. |
@@ -433,6 +530,9 @@ for `/api` and every path under it.
 
 To write your own, subclass `Handler`, override `call`, and pass the request
 on with `call_next`. A handler that does not call `call_next` ends the chain.
+`only` and `exclude` record which paths and methods a handler is for, using
+the filter path syntax; `only_match?` and `exclude_match?` answer for the
+current request:
 
 ```iyi
 import iyi_web/handler
@@ -445,9 +545,13 @@ class RequireToken < Handler
 
   def initialize(@token : String)
     super()
+    only ["/api/*"], "*"
+    exclude ["/api/health"], "*"
   end
 
   pub def call(ctx : Context) : Nil
+    return call_next(ctx) unless only_match?(ctx)
+    return call_next(ctx) if exclude_match?(ctx)
     if ctx.request.headers["Authorization"]? == "Bearer " + @token
       call_next(ctx)
     else
@@ -457,54 +561,76 @@ class RequireToken < Handler
 end
 
 token = Program.env("API_TOKEN") || raise "API_TOKEN is not set"
-use "/api", RequireToken.new(token)
+use RequireToken.new(token)
 ```
 
 ## Static files
 
 Files under `./public` are served for `GET` and `HEAD` requests before
-routing, so a file takes precedence over a route with the same path. The
-content type follows the extension, a directory serves its `index.html`, and
-paths containing `..` are never served. `public_folder "/srv/app/public"`
-changes the folder, resolving relative paths against the working directory, and
-`serve_static false` turns static files off.
+routing, so a file takes precedence over a route with the same path:
+
+- The content type follows the extension. `ETag` and `Last-Modified` are
+  sent, and a matching `If-None-Match` or `If-Modified-Since` gets
+  `304 Not Modified`.
+- A textual file of 860 bytes or more is sent gzip- or deflate-compressed to
+  a client that accepts it, and a `Range` request gets `206` or `416`.
+- A directory serves its `index.html`, after redirecting to the path with a
+  trailing slash. Paths containing `..` are never served.
+
+`public_folder "/srv/app/public"` changes the folder, resolving relative
+paths against the working directory, and `serve_static false` turns static
+files off. `serve_static({"gzip" => true, "dir_listing" => true})` sets the
+options; a key left out counts as false, and `dir_index` controls the
+`index.html` lookup. `static_headers` runs for every served file:
+
+```iyi
+static_headers do |env, path, info|
+  env.response.headers["Cache-Control"] = "public, max-age=3600"
+end
+```
 
 ## Templates
 
 ```iyi
-import std/eiy
 import std/html
-using std/eiy::{Eiy}
 using std/html::{HTML}
 
-class ProfilePage
-  getter name : String
-
-  def initialize(@name : String)
-  end
-
-  def h(text : String) : String
-    HTML.escape(text)
-  end
-
-  Eiy.def_to_s("views/profile.eiy")
-end
-
 get "/profile/:name" do |env|
-  ProfilePage.new(env.params.url["name"]).to_s
+  name = HTML.escape(env.params.url["name"])
+  render "views/profile.eiy", "views/layout.eiy"
 end
 ```
 
 `views/profile.eiy`:
 
 ```erb
-<h1>Hello, <%= h(name) %></h1>
+<% content_for "title" do %>Profile of <%= name %><% end -%>
+<h1>Hello, <%= name %></h1>
 ```
 
-`std/eiy` compiles templates into the program: `<%= expr %>` prints a value
-and `<% code %>` runs iyi code. A template path is relative to the file that
-names it. Output is not escaped automatically; escape untrusted text with
-`HTML.escape`.
+`views/layout.eiy`:
+
+```erb
+<!DOCTYPE html>
+<html>
+<head><title><%= yield_content "title" %></title></head>
+<body><%= content %></body>
+</html>
+```
+
+Templates use iyi's `.eiy` format: `<%= expr %>` prints a value and
+`<% code %>` runs iyi code. They are compiled into the program, and see the
+local variables where `render` is written.
+
+- `render "view.eiy"` returns the rendered text. `render "view.eiy",
+  "layout.eiy"` renders the view, then the layout with the view as `content`.
+- `content_for "key" do ... end` captures markup in the view, and
+  `yield_content "key"` prints it in the layout; a key never captured prints
+  nothing.
+- A template path is relative to the file that calls `render`, or, for a
+  template rendered inside another template, to that template.
+- Output is not escaped automatically; escape untrusted text with
+  `HTML.escape`.
 
 ## Configuration
 
@@ -518,31 +644,59 @@ config.max_request_body_size = 1024 * 1024
 
 | Setting | Default | Shorthand |
 |---|---|---|
-| `host` | `"0.0.0.0"` | `host "127.0.0.1"` |
-| `port` | `PORT`, else `3000` | `run 8080` |
+| `host` | `"0.0.0.0"` | `host "127.0.0.1"`, `-b 127.0.0.1` |
+| `port` | `PORT`, else `3000` | `run 8080`, `-p 8080` |
 | `env` | `IYI_WEB_ENV`, else `"development"` | |
 | `public_folder` | `"./public"` | `public_folder "assets"` |
 | `serve_static` | `true` | `serve_static false` |
 | `logging` | `true` | `logging false` |
 | `powered_by_header` | `false` | `powered_by true` |
+| `show_exceptions?` | `true` in development | `config.show_exceptions = false` |
 | `keepalive` | `true` | |
 | `max_keepalive_requests` | `100` | |
 | `max_request_body_size` | `8 * 1024 * 1024` | |
+| `max_file_uploads` | `128` | |
+| `max_multipart_form_field_size` | `8 * 1024 * 1024` | |
+| `max_ranges` | `16` | |
 | `app_name` | `"iyi-web"` | |
 
 - `max_keepalive_requests` caps the requests served on one connection before
   it is closed.
-- A request whose body is larger than `max_request_body_size` bytes is answered
-  with `400 Bad Request`, and its connection is closed.
+- A request whose body is larger than `max_request_body_size` bytes gets
+  `413 Content Too Large`, as soon as its `Content-Length` is read, and its
+  connection is closed.
+- `max_ranges` is the most ranges one `Range` header may ask for; `0` turns
+  range requests off.
 - `app_name` and `env` appear in the line printed at startup. With `env` set
   to `test`, `run` binds the port without serving requests.
 - `powered_by true` adds `X-Powered-By: iyi-web` to every response.
+
+### Command line
+
+`run` reads the program's arguments:
+
+```sh
+./app -b 127.0.0.1 -p 8080
+./app --help
+```
+
+`-b HOST` (`--bind`) and `-p PORT` (`--port`) set the host and port;
+`run 8080` still wins over `-p`. An unknown flag or an invalid port stops the
+program with the reason and the list of flags. `extra_options` adds your own:
+
+```iyi
+extra_options do |parser|
+  parser.on("--public DIR", "Folder to serve static files from") { |dir| public_folder(dir) }
+end
+```
+
+`run(args: nil)` ignores the command line.
 
 ## Deployment
 
 ```sh
 iyi build --release app.iyi -o app
-IYI_WEB_ENV=production PORT=8080 ./app
+IYI_WEB_ENV=production ./app -p 8080
 ```
 
 - iyi-web speaks plain HTTP/1.1. Terminate TLS at a reverse proxy such as
@@ -550,6 +704,9 @@ IYI_WEB_ENV=production PORT=8080 ./app
   server does not time out idle or slow clients.
 - Static files and `send_file` read whole files into memory. Serve large files
   from the proxy or a CDN.
+- A client that disconnects while its response is being written ends that
+  request only; iyi's socket layer reports it as a panic line on standard
+  error.
 
 ## Testing
 
@@ -581,22 +738,31 @@ iyi test test
 A test is a `*_test.iyi` program that exits non-zero on failure, and
 `iyi test test` runs every one under `test/`. `http_request` and
 `form_request` build requests with a query string, a body or a content type.
+`handler_chain` from `iyi_web/dsl` is the whole application as `run` serves
+it (logging, static files, middleware and routes), for tests that need more
+than one router.
 
 ## Modules
 
 | Module | Provides |
 |---|---|
-| `iyi_web/dsl` | Routes, filters, `error`, `mount`, `use`, `run` and the setting shorthands |
+| `iyi_web/dsl` | Routes, filters, `error`, `mount`, `use`, `sse`, `render`, `run` and the setting shorthands |
 | `iyi_web/router` | `Router`, `RouteHandler` |
 | `iyi_web/context` | `Context` |
 | `iyi_web/request` | `Request` |
 | `iyi_web/response` | `Response` |
 | `iyi_web/params` | `Params` |
+| `iyi_web/multipart` | `FileUpload` and the `multipart/form-data` parser |
 | `iyi_web/cookies` | `CookieJar` |
 | `iyi_web/headers` | `Headers` |
 | `iyi_web/body` | `IntoBody` |
 | `iyi_web/handler` | `Handler`, `chain` |
 | `iyi_web/config` | `Config`, `config` |
+| `iyi_web/cli` | `CLIParser` |
+| `iyi_web/event_stream` | `EventStream` |
+| `iyi_web/templates` | `render`, `content_for`, `yield_content` |
+| `iyi_web/compress` | `CompressHandler` and the `Accept-Encoding` helpers |
+| `iyi_web/range` | `Range` header parsing and `206` responses |
 | `iyi_web/cors` | `CORSHandler` |
 | `iyi_web/override` | `OverrideMethodHandler` |
 | `iyi_web/static` | `StaticHandler` |
