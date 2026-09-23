@@ -1,0 +1,1 @@
+<%= yield_content "meta" %>|<%= render "page.eiy", "layout.eiy" %>|<%= content %>|<%= yield_content "meta" %>

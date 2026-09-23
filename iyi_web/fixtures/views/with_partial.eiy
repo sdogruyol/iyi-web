@@ -1,0 +1,1 @@
+<main><%= render "partial.eiy" %></main>

@@ -1,0 +1,4 @@
+<p><%= name %></p>
+<% content_for "meta" do -%>
+<meta name="author" content="<%= name %>">
+<% end -%>

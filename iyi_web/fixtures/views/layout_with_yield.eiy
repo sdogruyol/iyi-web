@@ -1,0 +1,3 @@
+<head><%= yield_content "meta" %></head>
+<body><%= content %></body>
+<aside>[<%= yield_content "missing" %>]</aside>

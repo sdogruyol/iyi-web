@@ -1,0 +1,108 @@
+# Server-side templates: `render` an `.eiy` file to a String, optionally
+# inside a layout, and let a view hand markup to that layout with
+# `content_for` / `yield_content`.
+#
+# Built on std/eiy, which turns a template into iyi source at compile time.
+# A rendered page is compiled code, and a missing template or an unclosed
+# tag stops the build instead of a request. The template's code is spliced
+# where `render` is written, so it reads that scope's locals: a route's
+# `name` is `<%= name %>` in the view. `<%= %>` prints `to_s` as is; escape
+# untrusted text yourself.
+#
+# Paths are resolved at compile time. A relative path is read beside the
+# file the `render` is written in: the route's source file, or, for a partial
+# rendered inside a template, that template. An absolute path, including
+# `"#{__DIR__}/..."`, is read as itself. The working directory never counts.
+#
+# Macros paste text, so every name a render introduces is a block parameter:
+# `content` (the layout's view), `__iyi_web_io__` (the buffer the template
+# prints to) and `__iyi_web_blocks__` (its captured blocks) exist only inside
+# the render that made them. A render nested in a view or a layout shadows
+# them, and the outer render's are intact when it returns; a caller's own
+# `content` local is not overwritten.
+module iyi_web/templates
+
+import std/eiy
+
+using std/eiy::{Eiy}
+
+# The `content_for` blocks of one `render(view, layout)`, by key. Each render
+# makes its own, so two renders never see each other's blocks.
+pub class ContentBlocks
+  @blocks : Hash(String, String)
+
+  def initialize
+    @blocks = {} of String => String
+  end
+
+  # Runs the block against a fresh buffer and keeps what it printed under
+  # *key*. A later capture of the same key replaces the earlier one.
+  pub def capture(key : String, & : Eiy::Buffer -> Nil) : Nil
+    buffer = Eiy::Buffer.new
+    yield buffer
+    @blocks[key] = buffer.to_s
+  end
+
+  # What was captured under *key*, or "" when nothing was.
+  pub def [](key : String) : String
+    @blocks[key]? || ""
+  end
+end
+
+# The scopes the macros render in. Each yields fresh values as block
+# parameters, which is what keeps a nested render from reaching the outer
+# render's buffer, blocks or `content`.
+pub struct Templates
+  # A buffer for one template, and the text it collected.
+  pub def self.partial(& : Eiy::Buffer -> Nil) : String
+    buffer = Eiy::Buffer.new
+    yield buffer
+    buffer.to_s
+  end
+
+  # The view's buffer and the render's blocks; the block answers the page.
+  pub def self.page(& : Eiy::Buffer, ContentBlocks -> String) : String
+    yield Eiy::Buffer.new, ContentBlocks.new
+  end
+
+  # The rendered view as `content`, and a buffer for the layout.
+  pub def self.layout(content : String, & : String, Eiy::Buffer -> Nil) : String
+    buffer = Eiy::Buffer.new
+    yield content, buffer
+    buffer.to_s
+  end
+end
+
+# The template at *filename*, rendered to a String with the caller's locals
+# in scope.
+pub macro render(filename)
+  ::IyiWeb::Templates::Templates.partial do |__iyi_web_io__|
+    ::Std::Eiy::Eiy.embed({{ filename }}, __iyi_web_io__)
+  end
+end
+
+# The view at *filename* rendered first, then the layout at *layout* with
+# the view's text as `content`; answers the layout's text. The layout sees
+# the caller's locals and the ones the view assigned.
+pub macro render(filename, layout)
+  ::IyiWeb::Templates::Templates.page do |__iyi_web_io__, __iyi_web_blocks__|
+    ::Std::Eiy::Eiy.embed({{ filename }}, __iyi_web_io__)
+    ::IyiWeb::Templates::Templates.layout(__iyi_web_io__.to_s) do |content, __iyi_web_io__|
+      ::Std::Eiy::Eiy.embed({{ layout }}, __iyi_web_io__)
+    end
+  end
+end
+
+# Captures what the block prints under *key* instead of printing it. Only
+# inside `render(view, layout)`: in the view, the layout, or a partial one
+# of them renders. The block runs here, once.
+pub macro content_for(key)
+  __iyi_web_blocks__.capture({{ key }}) do |__iyi_web_io__|
+    {{ yield }}
+  end
+end
+
+# The text captured under *key* by `content_for` in this render, or "".
+pub macro yield_content(key)
+  __iyi_web_blocks__[{{ key }}]
+end

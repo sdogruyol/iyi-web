@@ -1,0 +1,4 @@
+Hello <%= name %>
+<% content_for "meta" do -%>
+<title>Page of <%= name %></title>
+<% end -%>

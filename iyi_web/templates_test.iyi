@@ -1,0 +1,108 @@
+# Templates: render with the caller's locals, layouts, content_for, and the
+# path rule. Every relative path here is beside this file or, inside a
+# template, beside that template; iyi_web/templates.iyi has no views of its
+# own, so a path read beside the macro's file would not be found.
+module iyi_web/templates_test
+
+import iyi_web/templates
+import iyi_web/harness
+import iyi_web/spec
+
+using iyi_web/templates::{render, content_for, yield_content}
+using iyi_web/harness
+using iyi_web/spec
+
+WITH_META = "<head><title>Page of world</title>\n</head>\n<body>Hello world\n</body>\n<aside>[]</aside>\n"
+
+describe "render" do
+  it "renders a view with the caller's locals" do
+    name = "world"
+    assert render("fixtures/views/page.eiy") == "Hello world\n"
+  end
+
+  it "renders inside a route with the route's locals" do
+    handler = routes do |r|
+      r.get "/view/:name" do |env|
+        name = env.params.url["name"]
+        render "fixtures/views/page.eiy"
+      end
+    end
+    assert dispatch(handler, "GET", "/view/world").response.body == "Hello world\n"
+  end
+
+  it "reads a path inside a template beside that template" do
+    name = "world"
+    assert render("fixtures/views/with_partial.eiy", "fixtures/views/layout.eiy") == "<html><main><p>world</p>\n</main>\n</html>\n"
+  end
+
+  it "reads an absolute path as itself" do
+    name = "world"
+    assert render("#{__DIR__}/fixtures/views/page.eiy") == "Hello world\n"
+  end
+end
+
+describe "render with a layout" do
+  it "prints the view where the layout prints content" do
+    name = "world"
+    assert render("fixtures/views/page.eiy", "fixtures/views/layout.eiy") == "<html>Hello world\n</html>\n"
+  end
+
+  it "shows the layout the caller's locals and the ones the view assigned" do
+    name = "world"
+    var1 = "first"
+    var2 = "second"
+    page = render "fixtures/views/with_heading.eiy", "fixtures/views/layout_with_vars.eiy"
+    assert page == "<h1>Welcome, world</h1><p>world</p>\n<footer>first second</footer>\n"
+  end
+
+  it "leaves the caller's own content local alone" do
+    name = "world"
+    content = "mine"
+    assert render("fixtures/views/page.eiy", "fixtures/views/layout.eiy") == "<html>Hello world\n</html>\n"
+    assert content == "mine"
+  end
+end
+
+describe "content_for and yield_content" do
+  it "hands a block captured in the view to the layout" do
+    name = "world"
+    assert render("fixtures/views/with_content_for.eiy", "fixtures/views/layout_with_yield.eiy") == WITH_META
+  end
+
+  it "yields nothing for a key that was never captured" do
+    name = "world"
+    page = render "fixtures/views/page.eiy", "fixtures/views/layout_with_yield.eiy"
+    assert page == "<head></head>\n<body>Hello world\n</body>\n<aside>[]</aside>\n"
+  end
+
+  it "does not print a captured block the layout never yields" do
+    name = "world"
+    assert render("fixtures/views/with_content_for.eiy", "fixtures/views/layout.eiy") == "<html>Hello world\n</html>\n"
+  end
+
+  it "captures a block from a partial the view renders" do
+    name = "world"
+    page = render "fixtures/views/with_partial.eiy", "fixtures/views/layout_with_yield.eiy"
+    assert page == "<head><meta name=\"author\" content=\"world\">\n</head>\n<body><main><p>world</p>\n</main>\n</body>\n<aside>[]</aside>\n"
+  end
+
+  it "keeps two renders in one route apart" do
+    handler = routes do |r|
+      r.get "/two/:name" do |env|
+        name = env.params.url["name"]
+        first = render "fixtures/views/with_content_for.eiy", "fixtures/views/layout_with_yield.eiy"
+        second = render "fixtures/views/page.eiy", "fixtures/views/layout_with_yield.eiy"
+        first + "|" + second
+      end
+    end
+    body = dispatch(handler, "GET", "/two/world").response.body
+    assert body == WITH_META + "|" + "<head></head>\n<body>Hello world\n</body>\n<aside>[]</aside>\n"
+  end
+
+  it "keeps a render nested in a view or a layout apart from the outer one" do
+    name = "world"
+    page = render "fixtures/views/nested.eiy", "fixtures/views/nested_layout.eiy"
+    view = "[" + WITH_META + "]\n"
+    assert page == "outer|<html>Hello world\n</html>\n|" + view + "|outer\n"
+  end
+end

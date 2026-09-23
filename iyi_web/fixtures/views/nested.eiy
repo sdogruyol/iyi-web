@@ -1,0 +1,2 @@
+<% content_for "meta" do %>outer<% end -%>
+[<%= render "with_content_for.eiy", "layout_with_yield.eiy" %>]
