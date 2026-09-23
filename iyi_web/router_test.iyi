@@ -515,6 +515,37 @@ describe "Router" do
     end
   end
 
+  describe "uploads" do
+    it "answers a malformed multipart body with 400 and a breached limit with 413" do
+      handler = routes do |r|
+        r.before "/limited" do |env|
+          env.params.limit_uploads(0, 1024)
+        end
+        r.post "/upload" do |env|
+          env["route"] = "ran"
+          env.params.files.size.to_s
+        end
+        r.post "/limited" do |env|
+          env["route"] = "ran"
+          "limited"
+        end
+      end
+      broken = dispatch(handler, http_request("POST", "/upload", "", "--XyZ\r\nno headers", "multipart/form-data; boundary=XyZ"))
+      assert broken.response.status_code == 400
+      assert broken["route"]?.nil?
+
+      one = "--XyZ\r\nContent-Disposition: form-data; name=\"f\"; filename=\"x\"\r\n\r\nx\r\n--XyZ--\r\n"
+      ok = dispatch(handler, http_request("POST", "/upload", "", one, "multipart/form-data; boundary=XyZ"))
+      assert ok.response.body == "1"
+      ok.params.cleanup
+
+      refused = dispatch(handler, http_request("POST", "/limited", "", one, "multipart/form-data; boundary=XyZ"))
+      assert refused.response.status_code == 413
+      assert refused.response.body == "413 Content Too Large"
+      assert refused["route"]?.nil?
+    end
+  end
+
   describe "halt and redirect" do
     it "redirects without writing the handler's return value" do
       handler = routes do |r|

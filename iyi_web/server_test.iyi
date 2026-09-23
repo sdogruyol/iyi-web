@@ -91,6 +91,10 @@ router.get "/boom-twice" do |env|
   raise "handler failed" if env.request.path == "/boom-twice"
   "unreachable"
 end
+router.post "/upload" do |env|
+  upload = env.params.files["file"]?
+  upload ? upload.path + "|" + upload.read : "none"
+end
 router.error 500 do |env|
   raise "page failed" if env.request.path == "/boom-twice"
   "sorry: " + env.request.path
@@ -214,6 +218,16 @@ group do |g|
         alive.close
         assert http_body(second) == "{}"
         assert http_header(second, "Connection") == "close"
+      end
+
+      it "receives a multipart upload and deletes its file after responding" do
+        body = "--XyZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.bin\"\r\n\r\nbytes\u0000\r\nhere\r\n--XyZ--\r\n"
+        sent = exchange(port, close_request("POST", "/upload", "Content-Type: multipart/form-data; boundary=XyZ\r\nContent-Length: #{body.bytesize}\r\n") + body)
+        assert status_line(sent) == "HTTP/1.1 200 OK"
+        parts = http_body(sent).split('|')
+        assert parts.size == 2
+        assert parts[1] == "bytes\u0000\r\nhere"
+        assert !File.exists?(parts[0])
       end
 
       it "answers a panicking route with the error 500 page and closes" do

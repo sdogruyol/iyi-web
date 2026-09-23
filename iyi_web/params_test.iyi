@@ -104,6 +104,39 @@ describe "Params" do
     assert broken.json.empty?
     assert Params.from(typed("application/json", ""), {} of String => String).json_valid?
   end
+
+  it "reads multipart fields and files, and deletes the files on cleanup" do
+    params = Params.from(typed("multipart/form-data; boundary=XyZ", upload_body), {} of String => String)
+    assert params.body_error.nil?
+    assert params.body["title"] == "Holiday"
+    assert params["title"] == "Holiday"
+    photo = params.files["photo"]
+    assert photo.filename == "a.jpg"
+    assert photo.content_type == "image/jpeg"
+    assert photo.read == "JPG"
+    assert params.all_files["extra[]"].size == 2
+    path = photo.path
+    assert File.exists?(path)
+    params.cleanup
+    assert !File.exists?(path)
+  end
+
+  it "reports a multipart body it cannot read" do
+    missing = Params.from(typed("multipart/form-data", upload_body), {} of String => String)
+    assert missing.body_error == 400
+    limited = Params.from(typed("multipart/form-data; boundary=XyZ", upload_body), {} of String => String)
+    limited.limit_uploads(1, 1024)
+    assert limited.body_error == 413
+    assert limited.files.empty?
+  end
+end
+
+def upload_body : String
+  "--XyZ\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nHoliday\r\n" +
+    "--XyZ\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"a.jpg\"\r\nContent-Type: image/jpeg\r\n\r\nJPG\r\n" +
+    "--XyZ\r\nContent-Disposition: form-data; name=\"extra[]\"; filename=\"1.txt\"\r\n\r\none\r\n" +
+    "--XyZ\r\nContent-Disposition: form-data; name=\"extra[]\"; filename=\"2.txt\"\r\n\r\ntwo\r\n" +
+    "--XyZ--\r\n"
 end
 
 def typed(content_type : String, body : String) : Request

@@ -2,19 +2,24 @@
 # lookup that prefers the most specific: url, then query, then body.
 # `env.params.url["id"]` without Crystal's `HTTP::Params`.
 #
-# A JSON body (`application/json`, or any `application/*+json`) is parsed
-# once, on first use. The router asks `json_valid?` before the route runs,
-# so a request that declares JSON and sends something else gets a 400
-# rather than a route reading an empty table.
+# A JSON body (`application/json`, or any `application/*+json`) and a
+# `multipart/form-data` body are parsed once, on first use. The router
+# asks `json_valid?` and `body_error` before the route runs, so a request
+# whose body cannot be read gets a 400 (or a 413 for a breached upload
+# limit) rather than a route reading empty tables. Uploaded files live in
+# temporary files until `cleanup`, which the server calls once the
+# response is written.
 module iyi_web/params
 
 import std/json
 import iyi_web/codec
 import iyi_web/request
+import iyi_web/multipart
 
 using std/json::{JSON, Any}
 using iyi_web/codec
 using iyi_web/request::{Request}
+using iyi_web/multipart::{FileUpload, Multipart, MultipartError, multipart_boundary, parse_multipart}
 
 pub class Params
   @url : Hash(String, String)
@@ -22,12 +27,25 @@ pub class Params
   @body : Hash(String, String)
   @raw_body : String
   @media_type : String
+  @content_type : String
   @json : Hash(String, Any)
   @json_state : Int32
+  @files : Hash(String, FileUpload)
+  @all_files : Hash(String, Array(FileUpload))
+  @uploads : Array(FileUpload)
+  @body_state : Int32
+  @max_files : Int32
+  @max_field_size : Int32
 
-  def initialize(@url : Hash(String, String), @query : Hash(String, String), @body : Hash(String, String), @raw_body : String = "", @media_type : String = "")
+  def initialize(@url : Hash(String, String), @query : Hash(String, String), @body : Hash(String, String), @raw_body : String = "", @media_type : String = "", @content_type : String = "")
     @json = {} of String => Any
     @json_state = 0
+    @files = {} of String => FileUpload
+    @all_files = {} of String => Array(FileUpload)
+    @uploads = [] of FileUpload
+    @body_state = 0
+    @max_files = 128
+    @max_field_size = 8 * 1024 * 1024
   end
 
   def self.empty : Params
@@ -37,7 +55,7 @@ pub class Params
   def self.from(request : Request, url : Hash(String, String)) : Params
     query = parse_query(request.query_string)
     body = parse_body(request)
-    Params.new(url, query, body, request.body, request.content_type.downcase)
+    Params.new(url, query, body, request.body, request.content_type.downcase, request.headers["content-type"]? || "")
   end
 
   pub def url : Hash(String, String)
@@ -48,7 +66,10 @@ pub class Params
     @query
   end
 
+  # Form fields: an `application/x-www-form-urlencoded` body, or the text
+  # parts of a `multipart/form-data` one.
   pub def body : Hash(String, String)
+    parse_multipart_body
     @body
   end
 
@@ -70,8 +91,40 @@ pub class Params
     @json_state != 2
   end
 
+  # Uploaded files by field name. A later file under the same name
+  # replaces an earlier one; names ending in `[]` are in `all_files`.
+  pub def files : Hash(String, FileUpload)
+    parse_multipart_body
+    @files
+  end
+
+  # Every file sent under a name ending in `[]`, keyed with the brackets.
+  pub def all_files : Hash(String, Array(FileUpload))
+    parse_multipart_body
+    @all_files
+  end
+
+  # The status a multipart body that could not be read earns: 400 when it
+  # is malformed, 413 when it breaks an upload limit. Nil otherwise.
+  pub def body_error : Int32?
+    parse_multipart_body
+    @body_state > 1 ? @body_state : nil
+  end
+
+  # Most file parts, and largest text field in bytes, a multipart body may
+  # carry. The server sets them from the configuration.
+  pub def limit_uploads(max_files : Int32, max_field_size : Int32) : Nil
+    @max_files = max_files
+    @max_field_size = max_field_size
+  end
+
+  # Deletes every uploaded file's temporary copy.
+  pub def cleanup : Nil
+    @uploads.each(&.delete)
+  end
+
   pub def []?(key : String) : String?
-    @url[key]? || @query[key]? || @body[key]?
+    @url[key]? || @query[key]? || body[key]?
   end
 
   pub def [](key : String) : String
@@ -102,6 +155,38 @@ pub class Params
       table = {} of String => Any
       table["_json"] = parsed
       @json = table
+    end
+  end
+
+  private def parse_multipart_body : Nil
+    return unless @body_state == 0
+    @body_state = 1
+    return unless @media_type == "multipart/form-data"
+    boundary = multipart_boundary(@content_type)
+    unless boundary
+      @body_state = 400
+      return
+    end
+    case result = parse_multipart(@raw_body, boundary, @max_files, @max_field_size)
+    in MultipartError
+      @body_state = result.status
+    in Multipart
+      result.fields.each { |field| @body[field[0]] = field[1] }
+      result.files.each { |upload| keep(upload) }
+    end
+  end
+
+  private def keep(upload : FileUpload) : Nil
+    @uploads << upload
+    if upload.name.ends_with?("[]")
+      list = @all_files[upload.name]? || [] of FileUpload
+      list << upload
+      @all_files[upload.name] = list
+    else
+      if previous = @files[upload.name]?
+        previous.delete
+      end
+      @files[upload.name] = upload
     end
   end
 end

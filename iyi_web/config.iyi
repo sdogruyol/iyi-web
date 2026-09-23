@@ -34,6 +34,8 @@ pub class Config
   @positioned_handlers : Array(Tuple(Int32, Handler))
   @shutdown_message : Bool
   @show_exceptions : Bool?
+  @max_file_uploads : Int32
+  @max_multipart_form_field_size : Int32
   @max_ranges : Int32
   @static_dir_index : Bool
   @static_dir_listing : Bool
@@ -61,6 +63,8 @@ pub class Config
     @positioned_handlers = [] of Tuple(Int32, Handler)
     @shutdown_message = true
     @show_exceptions = nil
+    @max_file_uploads = 128
+    @max_multipart_form_field_size = 8 * 1024 * 1024
     @max_ranges = 16
     @static_dir_index = true
     @static_dir_listing = false
@@ -184,6 +188,22 @@ pub class Config
 
   pub def positioned_handlers : Array(Tuple(Int32, Handler))
     @positioned_handlers
+  end
+
+  pub def max_file_uploads : Int32
+    @max_file_uploads
+  end
+
+  pub def max_file_uploads=(value : Int32) : Int32
+    @max_file_uploads = value
+  end
+
+  pub def max_multipart_form_field_size : Int32
+    @max_multipart_form_field_size
+  end
+
+  pub def max_multipart_form_field_size=(value : Int32) : Int32
+    @max_multipart_form_field_size = value
   end
 
   # 0 turns `Range` support off.

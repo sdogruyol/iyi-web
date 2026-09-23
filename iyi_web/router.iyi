@@ -11,12 +11,14 @@ import iyi_web/codec
 import iyi_web/context
 import iyi_web/radix
 import iyi_web/handler
+import iyi_web/status
 
 using iyi_web/body::{IntoBody}
 using iyi_web/codec
 using iyi_web/context::{Context}
 using iyi_web/radix::{Tree, Match}
 using iyi_web/handler::{Handler}
+using iyi_web/status
 
 alias HandlerProc = Context -> String
 
@@ -290,6 +292,12 @@ pub class RouteHandler < Handler
       return
     end
 
+    if unreadable = ctx.params.body_error
+      render_error(ctx, unreadable)
+      drop_head_body(ctx)
+      return
+    end
+
     body = route.handler.call(ctx)
     unless ctx.halted?
       # A helper like `env.text` already wrote the body and returned nil.
@@ -365,15 +373,7 @@ pub class RouteHandler < Handler
       ctx.response.set_body(handler.call(ctx))
     else
       ctx.response.content_type = "text/html; charset=utf-8"
-      if status == 404
-        ctx.response.set_body("404 Not Found")
-      elsif status == 405
-        ctx.response.set_body("405 Method Not Allowed")
-      elsif status == 400
-        ctx.response.set_body("400 Bad Request")
-      else
-        ctx.response.set_body(status.to_s)
-      end
+      ctx.response.set_body(status.to_s + " " + phrase(status))
     end
   end
 end
