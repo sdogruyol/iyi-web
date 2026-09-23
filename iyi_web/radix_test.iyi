@@ -90,4 +90,13 @@ describe "Tree" do
       assert false, "expected a match"
     end
   end
+
+  it "matches a path with or without a trailing slash" do
+    tree = sample_tree
+    assert payload(tree, "/GET/a/b/") == "ab"
+    assert payload(tree, "/GET/users/7/") == "user"
+    slashed = Tree(String).new
+    slashed.add("/GET/about/", "about")
+    assert payload(slashed, "/GET/about") == "about"
+  end
 end
