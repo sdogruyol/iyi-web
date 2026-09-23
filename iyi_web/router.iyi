@@ -12,6 +12,7 @@ import iyi_web/context
 import iyi_web/radix
 import iyi_web/handler
 import iyi_web/status
+import iyi_web/event_stream
 
 using iyi_web/body::{IntoBody}
 using iyi_web/codec
@@ -19,6 +20,7 @@ using iyi_web/context::{Context}
 using iyi_web/radix::{Tree, Match}
 using iyi_web/handler::{Handler}
 using iyi_web/status
+using iyi_web/event_stream::{EventStream}
 
 alias HandlerProc = Context -> String
 
@@ -79,6 +81,15 @@ pub class Router
       add_route({{ method.upcase }}, path, &block)
     end
   {% end %}
+
+  # A GET route that answers with a server-sent event stream. The block
+  # gets the stream and the context; the stream ends when it returns.
+  pub def sse(path : String, &block : EventStream, Context -> Nil) : Nil
+    get(path) do |env|
+      EventStream.serve(env) { |stream| block.call(stream, env) }
+      nil
+    end
+  end
 
   pub def before(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
     add_filter(:before, "ALL", path, &block)

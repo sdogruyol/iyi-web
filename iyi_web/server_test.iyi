@@ -91,6 +91,10 @@ router.get "/boom-twice" do |env|
   raise "handler failed" if env.request.path == "/boom-twice"
   "unreachable"
 end
+router.sse "/events" do |stream, env|
+  stream.send("one", event: "tick")
+  stream.send("two", event: "tick")
+end
 router.get "/stream" do |env|
   env.response.print("one")
   env.response.flush
@@ -224,6 +228,14 @@ group do |g|
         alive.close
         assert http_body(second) == "{}"
         assert http_header(second, "Connection") == "close"
+      end
+
+      it "sends server-sent events as they are written" do
+        events = exchange(port, close_request("GET", "/events"))
+        assert status_line(events) == "HTTP/1.1 200 OK"
+        assert http_header(events, "Content-Type") == "text/event-stream; charset=utf-8"
+        assert http_header(events, "Transfer-Encoding") == "chunked"
+        assert http_body(events) == "17\r\nevent: tick\ndata: one\n\n\r\n17\r\nevent: tick\ndata: two\n\n\r\n0\r\n\r\n"
       end
 
       it "streams a flushed response in chunks and keeps the connection" do

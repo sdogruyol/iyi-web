@@ -18,6 +18,7 @@ import iyi_web/server
 import iyi_web/static
 import iyi_web/path
 import iyi_web/compress
+import iyi_web/event_stream
 
 using std/file::{File}
 using iyi_web/body::{IntoBody}
@@ -30,6 +31,7 @@ using iyi_web/server::{Server}
 using iyi_web/static::{StaticHandler}
 using iyi_web/path::{PathHandler}
 using iyi_web/compress::{CompressHandler}
+using iyi_web/event_stream::{EventStream}
 
 HTTP_METHODS   = %w(get post put patch delete options head query)
 FILTER_METHODS = %w(get post put patch delete options query)
@@ -75,6 +77,11 @@ end
     APP.after_{{ method.id }}(paths, &block)
   end
 {% end %}
+
+# A GET route answering with server-sent events; see `EventStream`.
+pub def sse(path : String, &block : EventStream, Context -> Nil) : Nil
+  APP.sse(path, &block)
+end
 
 pub def error(status_code : Int32, &block : Context -> B) : Nil forall B : IntoBody
   APP.error(status_code, &block)

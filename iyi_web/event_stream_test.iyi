@@ -1,0 +1,60 @@
+# Server-sent events: the wire format, the headers, HEAD, and refusing a
+# field that would split an event.
+module iyi_web/event_stream_test
+
+import std/time
+import iyi_web/event_stream
+import iyi_web/context
+import iyi_web/harness
+import iyi_web/spec
+
+using std/time::{Span}
+using iyi_web/event_stream::{EventStream}
+using iyi_web/context::{Context}
+using iyi_web/harness
+using iyi_web/spec
+
+def events
+  routes do |r|
+    r.sse "/events" do |stream, env|
+      stream.send("hello", event: "greet", id: 1)
+      stream.send("a\nb\r\nc", retry: Span.milliseconds(1500))
+      stream.comment("ping")
+    end
+    r.sse "/rooms/:room" do |stream, env|
+      stream.send("room " + env.params.url["room"])
+    end
+    r.sse "/closed" do |stream, env|
+      stream.close
+      stream.send("late")
+    end
+  end
+end
+
+describe "EventStream" do
+  it "writes fields, data lines and comments in the event-stream format" do
+    ctx = dispatch(events, "GET", "/events")
+    assert ctx.response.status_code == 200
+    assert ctx.response.body == "event: greet\nid: 1\ndata: hello\n\nretry: 1500\ndata: a\ndata: b\ndata: c\n\n: ping\n\n"
+    assert ctx.response.headers["content-type"] == "text/event-stream; charset=utf-8"
+    assert ctx.response.headers["cache-control"] == "no-cache"
+    assert ctx.response.headers["x-accel-buffering"] == "no"
+  end
+
+  it "passes the context, url params included" do
+    assert dispatch(events, "GET", "/rooms/lobby").response.body == "data: room lobby\n\n"
+  end
+
+  it "answers HEAD with the headers and no events" do
+    ctx = dispatch(events, "HEAD", "/events")
+    assert ctx.response.status_code == 200
+    assert ctx.response.body == ""
+    assert ctx.response.headers["content-type"] == "text/event-stream; charset=utf-8"
+  end
+
+  it "refuses an event name or id with a line break, and writing after close" do
+    assert panics? { EventStream.new(Context.for(http_request("GET", "/"))).send("x", event: "a\nb") }
+    assert panics? { EventStream.new(Context.for(http_request("GET", "/"))).send("x", id: "1\r2") }
+    assert panics? { dispatch(events, "GET", "/closed") }
+  end
+end

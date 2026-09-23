@@ -1,0 +1,96 @@
+# Server-sent events: the `text/event-stream` format browsers read with
+# `EventSource`. A stream is an ordinary GET response that is flushed
+# after every event and stays open until the route's block returns.
+#
+# Each `send` writes the optional `event`, `id` and `retry` fields, then one
+# `data:` line per line of the data, then a blank line, and flushes. An
+# event name or id holding CR or LF would split the event, so writing one
+# panics. `comment` writes lines a client ignores, which is how a stream is
+# kept alive through proxies that close quiet connections.
+#
+# When the client goes away, the next write fails and ends the
+# connection's task: the route's block stops there.
+module iyi_web/event_stream
+
+import std/text
+import std/time
+import iyi_web/context
+
+using std/time::{Span}
+using iyi_web/context::{Context}
+
+pub class EventStream
+  @ctx : Context
+  @closed : Bool
+
+  def initialize(@ctx : Context)
+    @closed = false
+  end
+
+  # Sets the event-stream headers, sends them, then yields the stream. A
+  # HEAD gets the headers and nothing else: the block does not run.
+  def self.serve(ctx : Context, &block : EventStream -> Nil) : Nil
+    ctx.response.status_code = 200
+    ctx.response.content_type = "text/event-stream; charset=utf-8"
+    ctx.response.headers["Cache-Control"] = "no-cache"
+    ctx.response.headers["X-Accel-Buffering"] = "no"
+    return if ctx.request.method == "HEAD"
+    stream = EventStream.new(ctx)
+    stream.flush
+    block.call(stream)
+  end
+
+  # *retry* tells the client how long to wait before reconnecting.
+  pub def send(data : String, event : String? = nil, id : String | Int32 | Int64 | Nil = nil, retry : Span? = nil) : EventStream
+    frame = ""
+    if name = event
+      frame = frame + "event: " + single_line(name, "event") + "\n"
+    end
+    unless id.nil?
+      frame = frame + "id: " + single_line(id.to_s, "id") + "\n"
+    end
+    if wait = retry
+      milliseconds = wait.total_milliseconds.to_i64
+      frame = frame + "retry: " + milliseconds.to_s + "\n" if milliseconds >= 0
+    end
+    lines(data).each { |line| frame = frame + "data: " + line + "\n" }
+    emit(frame + "\n")
+  end
+
+  pub def comment(text : String) : EventStream
+    frame = ""
+    lines(text).each { |line| frame = frame + ": " + line + "\n" }
+    emit(frame + "\n")
+  end
+
+  pub def flush : Nil
+    @ctx.response.flush
+  end
+
+  # Ends the stream; the connection stays usable once the route returns.
+  # Writing after `close` panics.
+  pub def close : Nil
+    flush
+    @closed = true
+  end
+
+  pub def closed? : Bool
+    @closed
+  end
+
+  private def emit(text : String) : EventStream
+    raise "event stream is closed" if @closed
+    @ctx.response.print(text)
+    flush
+    self
+  end
+
+  private def single_line(value : String, field : String) : String
+    raise "SSE #{field} must not contain CR or LF" if value.includes?("\r") || value.includes?("\n")
+    value
+  end
+
+  private def lines(text : String) : Array(String)
+    text.gsub("\r\n", "\n").gsub("\r", "\n").split('\n')
+  end
+end
