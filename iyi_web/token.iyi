@@ -1,0 +1,58 @@
+# Names nobody can guess: multipart boundaries, and the directories
+# uploads are spooled into.
+module iyi_web/token
+
+import std/random
+import std/time
+
+using std/random::{Random}
+using std/time::{Time}
+
+# *count* random bytes as `2 * count` lower-case hex digits.
+pub def random_hex(count : Int32) : String
+  hex(random_bytes(count))
+end
+
+# `File.exists?` is an open for reading, so it answers whether the device
+# can be read. wasm32 has no such path to ask about.
+#
+# The fallback seeds `std/random` itself: its unseeded `Random.new` opens
+# `/dev/urandom` through a `File` that `std/file` shadows, so it does not
+# build in a program that also imports `std/file`, as this framework does.
+# The clocks and a fresh heap address are the seed, the same material
+# `std/random` falls back to where there is no device.
+private def random_bytes(count : Int32) : String
+  {% if !flag?(:wasm32) %}
+    if File.exists?("/dev/urandom")
+      bytes = ""
+      File.open("/dev/urandom", "r", count) do |io|
+        bytes = io.read_bytes(count)
+      end
+      return bytes if bytes.bytesize == count
+    end
+  {% end %}
+
+  seed = Time.utc.to_unix.to_u64 ^ Time.monotonic.total_nanoseconds.to_u64 ^ Pointer(UInt8).malloc(1_u64).address
+  rng = Random.new(seed)
+  String.new(count) do |target|
+    index = 0
+    while index < count
+      target[index] = (rng.next_u32 & 255_u32).to_u8
+      index = index + 1
+    end
+  end
+end
+
+private def hex(bytes : String) : String
+  digits = "0123456789abcdef"
+  source = bytes.to_unsafe
+  String.new(bytes.bytesize * 2) do |target|
+    index = 0
+    while index < bytes.bytesize
+      byte = source[index]
+      target[index * 2] = digits.to_unsafe[(byte >> 4).to_i32]
+      target[index * 2 + 1] = digits.to_unsafe[(byte & 15_u8).to_i32]
+      index = index + 1
+    end
+  end
+end

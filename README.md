@@ -188,9 +188,10 @@ post "/avatar" do |env|
 end
 ```
 
-Each uploaded file is written to its own temporary file: `upload.path`,
-`upload.filename`, `upload.content_type`, `upload.size`, `upload.headers` and
-`upload.read` describe it, and the file is deleted once the response has been
+Each uploaded file is written to a temporary file, in a new directory only
+the server's account can open: `upload.path`, `upload.filename`,
+`upload.content_type`, `upload.size`, `upload.headers` and `upload.read`
+describe it, and the file is deleted once the response has been
 sent. Files sent under a name ending in `[]` are all kept, in
 `env.params.all_files["photos[]"]`. The filename is the client's, unchanged:
 never join it to a directory path without cleaning it first.

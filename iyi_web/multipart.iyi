@@ -1,5 +1,6 @@
 # `multipart/form-data` bodies (RFC 7578): the text fields in the order
-# they were sent, and every file part spooled to its own temporary file.
+# they were sent, and every file part spooled to a temporary file in a
+# directory of its own.
 #
 # A request body arrives here as one String, which holds bytes rather than
 # text, so a file's contents come out exactly as the client sent them: NUL,
@@ -17,11 +18,15 @@
 module iyi_web/multipart
 
 import std/file
+import std/dir
 import std/text
 import iyi_web/headers
+import iyi_web/token
 
 using std/file::{File}
+using std/dir::{Dir}
 using iyi_web/headers::{Headers}
+using iyi_web/token::{random_hex}
 
 TEMPFILE_PREFIX = "iyi-web-upload"
 
@@ -32,8 +37,9 @@ pub class FileUpload
   @path : String
   @headers : Headers
   @size : Int32
+  @spool_dir : String?
 
-  def initialize(@name : String, @filename : String, @path : String, @headers : Headers, @size : Int32)
+  def initialize(@name : String, @filename : String, @path : String, @headers : Headers, @size : Int32, @spool_dir : String? = nil)
   end
 
   # The form field name, e.g. `avatar` or `photos[]`.
@@ -71,9 +77,13 @@ pub class FileUpload
     File.read(@path)
   end
 
-  # Removes the temporary file. Safe to call more than once.
+  # Removes the temporary file, and the directory it was spooled into once
+  # that is empty. Safe to call more than once.
   pub def delete : Nil
     File.delete(@path) if File.exists?(@path)
+    if dir = @spool_dir
+      Dir.delete?(dir)
+    end
   end
 end
 
@@ -240,17 +250,27 @@ private def add_part(body : String, start : Int32, finish : Int32, fields : Arra
     # Counted before the part is spooled, so a refused body costs no
     # temporary file beyond the ones already accepted.
     return MultipartError.new(413, "Too many file parts (max #{max_files})") if files.size >= max_files
-    path = File.tempfile(TEMPFILE_PREFIX)
-    # `File.tempfile` creates the file world-readable; an upload is the
-    # client's data, so it is narrowed to the owner before a byte lands.
-    File.chmod(path, 0o600)
+    dir = spool_dir
+    path = File.join(dir, "upload")
     File.write(path, content)
-    files << FileUpload.new(name, filename, path, headers, content.bytesize)
+    files << FileUpload.new(name, filename, path, headers, content.bytesize, dir)
   else
     return MultipartError.new(413, "Payload Too Large") if content.bytesize > max_field_size
     fields << {name, content}
   end
   nil
+end
+
+# A new directory for one upload, mode 0700, under a name nobody can guess.
+# `File.tempfile` names its files after the pid and a counter and writes
+# through whatever already sits at the path, so another account sharing
+# the temporary directory could plant a symlink there and have the upload
+# written wherever it points. `mkdir` refuses any existing entry, a symlink
+# included, and nobody else can create one inside the new directory.
+private def spool_dir : String
+  dir = File.join(Dir.tempdir, TEMPFILE_PREFIX + "-" + random_hex(16))
+  Dir.mkdir(dir, 0o700)
+  dir
 end
 
 # `Name: value` lines separated by CRLF. Nil when a line is not a header,

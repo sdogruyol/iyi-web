@@ -179,12 +179,15 @@ describe "parse_multipart" do
 end
 
 describe "FileUpload#delete" do
-  it "removes the temporary file and can be called again" do
+  it "removes the temporary file and its private directory, and can be called again" do
     form = parsed(file_part("f", "1.txt", "text/plain", "1") + closing)
     upload = form.files[0]
+    dir = File.dirname(upload.path)
     assert File.exists?(upload.path)
+    assert (File.info(dir).permissions.to_i & 0o777) == 0o700
     upload.delete
     assert !File.exists?(upload.path)
+    assert !Dir.exists?(dir)
     upload.delete
     assert !File.exists?(upload.path)
   end

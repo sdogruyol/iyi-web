@@ -16,13 +16,11 @@
 # response.
 module iyi_web/range
 
-import std/random
-import std/time
 import iyi_web/response
+import iyi_web/token
 
-using std/random::{Random}
-using std/time::{Time}
 using iyi_web/response::{Response}
+using iyi_web/token::{random_hex}
 
 # The range set is valid, but no range in it selects a byte of the body.
 pub struct Unsatisfiable
@@ -104,11 +102,10 @@ pub def byteranges_body(body : String, ranges : Array(Tuple(Int32, Int32)), cont
   parts.join
 end
 
-# A boundary no part body is likely to contain: `iyi-web-` and 32 hex
-# digits, from `/dev/urandom` where it can be read and `std/random`
-# otherwise.
+# A boundary no part body is likely to contain: `iyi-web-` and 32 random
+# hex digits.
 pub def byteranges_boundary : String
-  "iyi-web-" + hex(random_bytes(16))
+  "iyi-web-" + random_hex(16)
 end
 
 # Answers *range_header* for a whole *body* on *response*: 206 with the
@@ -189,48 +186,4 @@ private def parse_position(text : String) : Int32?
   end
   return 2147483647 if value > 2147483647_i64
   value.to_i32
-end
-
-# `File.exists?` is an open for reading, so it answers whether the device
-# can be read. wasm32 has no such path to ask about.
-#
-# The fallback seeds `std/random` itself: its unseeded `Random.new` opens
-# `/dev/urandom` through a `File` that `std/file` shadows, so it does not
-# build in a program that also imports `std/file`, as this framework does.
-# The clocks and a fresh heap address are the seed, the same material
-# `std/random` falls back to where there is no device.
-private def random_bytes(count : Int32) : String
-  {% if !flag?(:wasm32) %}
-    if File.exists?("/dev/urandom")
-      bytes = ""
-      File.open("/dev/urandom", "r", count) do |io|
-        bytes = io.read_bytes(count)
-      end
-      return bytes if bytes.bytesize == count
-    end
-  {% end %}
-
-  seed = Time.utc.to_unix.to_u64 ^ Time.monotonic.total_nanoseconds.to_u64 ^ Pointer(UInt8).malloc(1_u64).address
-  rng = Random.new(seed)
-  String.new(count) do |target|
-    index = 0
-    while index < count
-      target[index] = (rng.next_u32 & 255_u32).to_u8
-      index = index + 1
-    end
-  end
-end
-
-private def hex(bytes : String) : String
-  digits = "0123456789abcdef"
-  source = bytes.to_unsafe
-  String.new(bytes.bytesize * 2) do |target|
-    index = 0
-    while index < bytes.bytesize
-      byte = source[index]
-      target[index * 2] = digits.to_unsafe[(byte >> 4).to_i32]
-      target[index * 2 + 1] = digits.to_unsafe[(byte & 15_u8).to_i32]
-      index = index + 1
-    end
-  end
 end
