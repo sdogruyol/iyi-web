@@ -357,6 +357,22 @@ describe "Router" do
       assert ctx["c"]?.nil?
       assert ctx.response.body == "no"
     end
+
+    it "answers 400 before the route when a declared JSON body does not parse" do
+      handler = routes do |r|
+        r.post "/items" do |env|
+          env["route"] = "ran"
+          name = env.params.json["name"]?
+          name ? (name.as_s? || "") : ""
+        end
+      end
+      broken = dispatch(handler, http_request("POST", "/items", "", "{\"name\":", "application/json"))
+      assert broken.response.status_code == 400
+      assert broken["route"]?.nil?
+      ok = dispatch(handler, http_request("POST", "/items", "", %({"name":"ada"}), "application/json"))
+      assert ok.response.status_code == 200
+      assert ok.response.body == "ada"
+    end
   end
 
   describe "halt and redirect" do

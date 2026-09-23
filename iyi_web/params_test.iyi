@@ -73,4 +73,41 @@ describe "Params" do
     params.update_url({"id" => "next"})
     assert params.url["id"] == "next"
   end
+
+  it "parses a JSON object body into json and keeps raw_body" do
+    params = Params.from(typed("application/json; charset=utf-8", %({"name":"ada","tags":["x"],"n":2})), {} of String => String)
+    assert params.json_valid?
+    assert params.json["name"].as_s == "ada"
+    assert params.json["tags"].as_a.size == 1
+    assert params.raw_body == %({"name":"ada","tags":["x"],"n":2})
+    assert params.body.empty?
+  end
+
+  it "keeps a top-level array under _json and ignores a scalar" do
+    list = Params.from(typed("application/json", "[1,2,3]"), {} of String => String)
+    assert list.json["_json"].as_a.size == 3
+    scalar = Params.from(typed("application/json", "42"), {} of String => String)
+    assert scalar.json.empty?
+    assert scalar.json_valid?
+  end
+
+  it "treats application/*+json as JSON and other types as not" do
+    vendor = Params.from(typed("Application/Vnd.Api+JSON", %({"a":"b"})), {} of String => String)
+    assert vendor.json["a"].as_s == "b"
+    padded = Params.from(typed("application/jsonp", %({"a":"b"})), {} of String => String)
+    assert padded.json.empty?
+  end
+
+  it "reports a JSON body that does not parse" do
+    broken = Params.from(typed("application/json", "{\"a\":"), {} of String => String)
+    assert !broken.json_valid?
+    assert broken.json.empty?
+    assert Params.from(typed("application/json", ""), {} of String => String).json_valid?
+  end
+end
+
+def typed(content_type : String, body : String) : Request
+  headers = Headers.new
+  headers["Content-Type"] = content_type
+  Request.new("POST", "/", "", "HTTP/1.1", headers, body)
 end

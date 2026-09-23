@@ -1,11 +1,18 @@
-# URL, query and form params, each their own table, and a combined lookup
-# that prefers the most specific: url, then query, then body. Kemal's
-# `env.params.url["id"]` shape, without Crystal's `HTTP::Params`.
+# URL, query, form and JSON params, each their own table, and a combined
+# lookup that prefers the most specific: url, then query, then body.
+# `env.params.url["id"]` without Crystal's `HTTP::Params`.
+#
+# A JSON body (`application/json`, or any `application/*+json`) is parsed
+# once, on first use. The router asks `json_valid?` before the route runs,
+# so a request that declares JSON and sends something else gets a 400
+# rather than a route reading an empty table.
 module iyi_web/params
 
+import std/json
 import iyi_web/codec
 import iyi_web/request
 
+using std/json::{JSON, Any}
 using iyi_web/codec
 using iyi_web/request::{Request}
 
@@ -13,8 +20,14 @@ pub class Params
   @url : Hash(String, String)
   @query : Hash(String, String)
   @body : Hash(String, String)
+  @raw_body : String
+  @media_type : String
+  @json : Hash(String, Any)
+  @json_state : Int32
 
-  def initialize(@url : Hash(String, String), @query : Hash(String, String), @body : Hash(String, String))
+  def initialize(@url : Hash(String, String), @query : Hash(String, String), @body : Hash(String, String), @raw_body : String = "", @media_type : String = "")
+    @json = {} of String => Any
+    @json_state = 0
   end
 
   def self.empty : Params
@@ -24,7 +37,7 @@ pub class Params
   def self.from(request : Request, url : Hash(String, String)) : Params
     query = parse_query(request.query_string)
     body = parse_body(request)
-    Params.new(url, query, body)
+    Params.new(url, query, body, request.body, request.content_type.downcase)
   end
 
   pub def url : Hash(String, String)
@@ -37,6 +50,24 @@ pub class Params
 
   pub def body : Hash(String, String)
     @body
+  end
+
+  # The request body as it arrived, whatever its type.
+  pub def raw_body : String
+    @raw_body
+  end
+
+  # A JSON object body's members. A top-level array is under `"_json"`; a
+  # scalar, an empty body or a body of another type gives an empty table.
+  pub def json : Hash(String, Any)
+    parse_json
+    @json
+  end
+
+  # False only when the request declares a JSON body that does not parse.
+  pub def json_valid? : Bool
+    parse_json
+    @json_state != 2
   end
 
   pub def []?(key : String) : String?
@@ -54,6 +85,30 @@ pub class Params
   pub def update_url(url : Hash(String, String)) : Nil
     @url = url
   end
+
+  private def parse_json : Nil
+    return unless @json_state == 0
+    @json_state = 1
+    return unless json_media_type?(@media_type)
+    return if @raw_body.empty?
+    parsed = JSON.parse?(@raw_body)
+    unless parsed
+      @json_state = 2
+      return
+    end
+    if members = parsed.as_h?
+      @json = members
+    elsif parsed.as_a?
+      table = {} of String => Any
+      table["_json"] = parsed
+      @json = table
+    end
+  end
+end
+
+private def json_media_type?(type : String) : Bool
+  return true if type == "application/json"
+  type.starts_with?("application/") && type.ends_with?("+json")
 end
 
 private def parse_body(request : Request) : Hash(String, String)

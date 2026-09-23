@@ -247,6 +247,12 @@ pub class RouteHandler < Handler
       return
     end
 
+    unless ctx.params.json_valid?
+      render_error(ctx, 400)
+      drop_head_body(ctx)
+      return
+    end
+
     body = route.handler.call(ctx)
     unless ctx.halted?
       # A helper like `env.text` already wrote the body and returned nil.
