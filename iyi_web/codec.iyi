@@ -25,6 +25,37 @@ pub def matches_path_prefix?(prefix : String, path : String) : Bool
   path.starts_with?(trimmed + "/")
 end
 
+# Filter and handler paths. `*` and `/*` match every path; a pattern ending
+# in `/*` matches its prefix and every path under it; any other pattern
+# matches one path, segment by segment, where `:name` stands for any one
+# segment and `*name` for the rest. A trailing slash counts on neither side.
+pub def pattern_matches?(pattern : String, path : String) : Bool
+  return true if pattern == "*" || pattern == "/*"
+  if pattern.ends_with?("/*")
+    return matches_path_prefix?(pattern[0, pattern.bytesize - 2], path)
+  end
+  want = path_segments(pattern)
+  have = path_segments(path)
+  index = 0
+  while index < want.size
+    segment = want[index]
+    return true if segment.starts_with?('*')
+    return false if index >= have.size
+    unless segment.starts_with?(':')
+      return false unless segment == have[index]
+    end
+    index = index + 1
+  end
+  index == have.size
+end
+
+private def path_segments(path : String) : Array(String)
+  trimmed = path.starts_with?('/') ? path.lchop('/') : path
+  trimmed = trimmed.chomp('/')
+  return [] of String if trimmed.empty?
+  trimmed.split('/')
+end
+
 # RFC 3986 percent-decoding, and `+` as space for form bodies. Invalid
 # `%` sequences are left as written rather than rejected: a path is not
 # a place to 400 over a client that sent `%GG`.

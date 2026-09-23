@@ -358,6 +358,146 @@ describe "Router" do
       assert ctx.response.body == "no"
     end
 
+    it "matches a plain filter path exactly and a /* path by prefix" do
+      handler = routes do |r|
+        r.before "/admin" do |env|
+          env["exact"] = "1"
+          nil
+        end
+        r.before "/admin/*" do |env|
+          env["tree"] = "1"
+          nil
+        end
+        r.get "/admin" do |env|
+          "root"
+        end
+        r.get "/admin/users" do |env|
+          "users"
+        end
+      end
+      root = dispatch(handler, "GET", "/admin")
+      assert root["exact"]? == "1"
+      assert root["tree"]? == "1"
+      below = dispatch(handler, "GET", "/admin/users")
+      assert below["exact"]?.nil?
+      assert below["tree"]? == "1"
+    end
+
+    it "matches :param and *glob segments in a filter path" do
+      handler = routes do |r|
+        r.before "/users/:id/edit" do |env|
+          env["edit"] = "1"
+          nil
+        end
+        r.before "/files/*rest" do |env|
+          env["files"] = "1"
+          nil
+        end
+        r.get "/users/:id/edit" do |env|
+          "edit"
+        end
+        r.get "/users/:id" do |env|
+          "show"
+        end
+        r.get "/files/*path" do |env|
+          "file"
+        end
+      end
+      assert dispatch(handler, "GET", "/users/9/edit")["edit"]? == "1"
+      assert dispatch(handler, "GET", "/users/9")["edit"]?.nil?
+      assert dispatch(handler, "GET", "/files/a/b")["files"]? == "1"
+    end
+
+    it "registers one block for a list of paths" do
+      handler = routes do |r|
+        r.before_get ["/a", "/b"] do |env|
+          env["listed"] = "1"
+          nil
+        end
+        r.get "/a" do |env|
+          "a"
+        end
+        r.get "/b" do |env|
+          "b"
+        end
+        r.get "/c" do |env|
+          "c"
+        end
+      end
+      assert dispatch(handler, "GET", "/a")["listed"]? == "1"
+      assert dispatch(handler, "GET", "/b")["listed"]? == "1"
+      assert dispatch(handler, "GET", "/c")["listed"]?.nil?
+    end
+
+    it "runs before_all, and only before_all, for a request no route matched" do
+      handler = routes do |r|
+        r.before "*" do |env|
+          env.response.headers["X-Seen"] = "1"
+        end
+        r.before_get "*" do |env|
+          env.response.headers["X-Get"] = "1"
+        end
+        r.after "*" do |env|
+          env.response.headers["X-After"] = "1"
+        end
+        r.get "/here" do |env|
+          "here"
+        end
+      end
+      missing = dispatch(handler, "GET", "/nowhere")
+      assert missing.response.status_code == 404
+      assert missing.response.headers["x-seen"]? == "1"
+      assert missing.response.headers["x-get"]?.nil?
+      assert missing.response.headers["x-after"]?.nil?
+      assert !missing.route_found?
+
+      wrong = dispatch(handler, "POST", "/here")
+      assert wrong.response.status_code == 405
+      assert wrong.response.headers["x-seen"]? == "1"
+    end
+
+    it "lets before_all turn a 404 away first" do
+      handler = routes do |r|
+        r.before "*" do |env|
+          env.halt(401, "sign in")
+        end
+      end
+      ctx = dispatch(handler, "GET", "/nowhere")
+      assert ctx.response.status_code == 401
+      assert ctx.response.body == "sign in"
+    end
+
+    it "renders the error page for a status a before filter leaves" do
+      handler = routes do |r|
+        r.before "/locked" do |env|
+          env.response.status_code = 423
+        end
+        r.get "/locked" do |env|
+          env["route"] = "ran"
+          "open"
+        end
+        r.error 423 do |env|
+          "locked"
+        end
+      end
+      ctx = dispatch(handler, "GET", "/locked")
+      assert ctx.response.status_code == 423
+      assert ctx.response.body == "locked"
+      assert ctx["route"]?.nil?
+    end
+
+    it "records the matched route" do
+      handler = routes do |r|
+        r.get "/users/:id" do |env|
+          env.route_pattern || ""
+        end
+      end
+      ctx = dispatch(handler, "GET", "/users/3")
+      assert ctx.route_found?
+      assert ctx.route_method == "GET"
+      assert ctx.response.body == "/users/:id"
+    end
+
     it "answers 400 before the route when a declared JSON body does not parse" do
       handler = routes do |r|
         r.post "/items" do |env|

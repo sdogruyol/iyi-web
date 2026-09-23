@@ -38,11 +38,15 @@ pub class Context
   @halted : Bool
   @store : Hash(String, StoreValue)
   @cookies : CookieJar?
+  @route_method : String?
+  @route_pattern : String?
 
   def initialize(@request : Request, @response : Response, @params : Params)
     @halted = false
     @store = {} of String => StoreValue
     @cookies = nil
+    @route_method = nil
+    @route_pattern = nil
   end
 
   def self.for(request : Request) : Context
@@ -85,6 +89,25 @@ pub class Context
       @response.close
       @halted = true
     end
+  end
+
+  # The route the router matched, as it was declared (`/users/:id`), and its
+  # method. Nil until routing has run, and for a request no route matched.
+  pub def route_pattern : String?
+    @route_pattern
+  end
+
+  pub def route_method : String?
+    @route_method
+  end
+
+  pub def route_found? : Bool
+    !@route_pattern.nil?
+  end
+
+  pub def matched(method : String, pattern : String) : Nil
+    @route_method = method
+    @route_pattern = pattern
   end
 
   pub def cookies : CookieJar

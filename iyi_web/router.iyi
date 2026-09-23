@@ -86,6 +86,15 @@ pub class Router
     add_filter(:after, "ALL", path, &block)
   end
 
+  # One block for several paths: registered once per path.
+  pub def before(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
+    paths.each { |path| add_filter(:before, "ALL", path, &block) }
+  end
+
+  pub def after(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
+    paths.each { |path| add_filter(:after, "ALL", path, &block) }
+  end
+
   {% for method in FILTER_METHODS %}
     pub def before_{{ method.id }}(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
       add_filter(:before, {{ method.upcase }}, path, &block)
@@ -93,6 +102,14 @@ pub class Router
 
     pub def after_{{ method.id }}(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
       add_filter(:after, {{ method.upcase }}, path, &block)
+    end
+
+    pub def before_{{ method.id }}(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
+      paths.each { |path| add_filter(:before, {{ method.upcase }}, path, &block) }
+    end
+
+    pub def after_{{ method.id }}(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
+      paths.each { |path| add_filter(:after, {{ method.upcase }}, path, &block) }
     end
   {% end %}
 
@@ -182,6 +199,10 @@ end
 # The last handler in the chain: look the route up, run before-filters,
 # call the block, run after-filters, and render 404/405 when nothing
 # matched. HEAD falls back to GET the way RFC 9110 §9.3.1 asks.
+#
+# `before_all` filters also run for a request no route matched, before
+# its 404 or 405, so an authentication or logging filter sees it too.
+# Per-method before filters and every after filter run only for a match.
 pub class RouteHandler < Handler
   @tree : Tree(Route)
   @filters : Array(Tuple(Symbol, String, String, HandlerProc))
@@ -226,6 +247,11 @@ pub class RouteHandler < Handler
     match = lookup(method, path)
 
     unless match
+      run_filters(ctx, :before, "ALL", path, true)
+      if ctx.halted?
+        drop_head_body(ctx)
+        return
+      end
       allowed = allowed_methods(path)
       if !allowed.empty? && !allowed.includes?(method)
         ctx.response.headers["Allow"] = allowed.join(", ")
@@ -240,11 +266,22 @@ pub class RouteHandler < Handler
 
     route = match.payload
     ctx.params.update_url(match.params)
+    ctx.matched(route.method, route.path)
 
     run_filters(ctx, :before, route.method, path)
     if ctx.halted?
       drop_head_body(ctx)
       return
+    end
+
+    # A before filter that left an error status with a page of its own
+    # gets that page, and the route does not run.
+    if ctx.response.status_code >= 400
+      if custom = @error_handlers[ctx.response.status_code]?
+        ctx.response.set_body(custom.call(ctx))
+        drop_head_body(ctx)
+        return
+      end
     end
 
     unless ctx.params.json_valid?
@@ -306,20 +343,20 @@ pub class RouteHandler < Handler
     allowed
   end
 
-  private def run_filters(ctx : Context, kind : Symbol, method : String, path : String) : Nil
+  # *only_all* limits the run to filters registered for every method: what
+  # an unmatched request gets.
+  private def run_filters(ctx : Context, kind : Symbol, method : String, path : String, only_all : Bool = false) : Nil
     @filters.each do |filter|
       next unless filter[0] == kind
-      next unless filter[1].in?("ALL", method)
-      next unless filter_matches?(filter[2], path)
+      if only_all
+        next unless filter[1] == "ALL"
+      else
+        next unless filter[1].in?("ALL", method)
+      end
+      next unless pattern_matches?(filter[2], path)
       filter[3].call(ctx)
       return if ctx.halted?
     end
-  end
-
-  private def filter_matches?(pattern : String, path : String) : Bool
-    return true if pattern == "*" || pattern == "/*"
-    trimmed = pattern.ends_with?("/*") ? pattern[0, pattern.bytesize - 2] : pattern
-    matches_path_prefix?(trimmed, path) || path == trimmed
   end
 
   private def render_error(ctx : Context, status : Int32) : Nil
