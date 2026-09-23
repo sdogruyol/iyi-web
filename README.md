@@ -348,9 +348,11 @@ An error page replaces the body of `404` and `405` responses from the router,
 and of any response a route finishes with a status of `400` or above. The
 status code is kept. Responses ended with `halt` are sent unchanged.
 
-A panic in a handler is contained to its connection: the connection closes
-without a response, the panic is logged, and the server keeps serving. Report
-failures by setting a status, not by panicking.
+A panic in a handler closes its connection without a response, and also
+closes every other connection open at that moment; the server keeps accepting
+new connections and the panic is logged. A client that disconnects while its
+response is being written has the same effect. Report failures by setting a
+status, not by panicking.
 
 ## Routers
 
