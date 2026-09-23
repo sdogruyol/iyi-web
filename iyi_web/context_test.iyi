@@ -38,6 +38,21 @@ describe "Context" do
     ctx = Context.for(http_request("GET", "/"), url)
     assert ctx.params.url["id"] == "7"
   end
+
+  it "stores typed values with set, get and get?" do
+    ctx = env
+    ctx.set("count", 3)
+    ctx.set("ratio", 0.5)
+    ctx.set("admin", true)
+    ctx.set("name", "ada")
+    assert ctx.get("count") == 3
+    assert ctx.get("ratio") == 0.5
+    assert ctx.get("admin") == true
+    assert ctx.get?("missing").nil?
+    assert ctx["name"] == "ada"
+    assert ctx["count"]?.nil?
+    assert panics? { ctx.get("missing") }
+  end
 end
 
 describe "Context#halt" do

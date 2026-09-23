@@ -22,17 +22,20 @@ using iyi_web/params::{Params}
 using iyi_web/cookies::{CookieJar}
 using iyi_web/mime
 
+# What `set` stores for later filters, middleware and the route.
+pub alias StoreValue = Nil | String | Int32 | Int64 | Float64 | Bool
+
 pub class Context
   @request : Request
   @response : Response
   @params : Params
   @halted : Bool
-  @store : Hash(String, String)
+  @store : Hash(String, StoreValue)
   @cookies : CookieJar?
 
   def initialize(@request : Request, @response : Response, @params : Params)
     @halted = false
-    @store = {} of String => String
+    @store = {} of String => StoreValue
     @cookies = nil
   end
 
@@ -148,16 +151,33 @@ pub class Context
     @response.set_body(File.read(path))
   end
 
-  pub def []=(key : String, value : String) : String
-    @store[key] = value
+  pub def set(name : String, value : StoreValue) : Nil
+    @store[name] = value
   end
 
+  # Panics when nothing was stored under *name*.
+  pub def get(name : String) : StoreValue
+    raise "nothing stored under #{name.inspect}" unless @store.has_key?(name)
+    @store[name]?
+  end
+
+  pub def get?(name : String) : StoreValue
+    @store[name]?
+  end
+
+  pub def []=(key : String, value : String) : String
+    @store[key] = value
+    value
+  end
+
+  # The value under *key* when it is a String.
   pub def []?(key : String) : String?
-    @store[key]?
+    value = @store[key]?
+    value.is_a?(String) ? value : nil
   end
 
   pub def [](key : String) : String
-    @store[key]
+    self[key]? || raise "no string stored under #{key.inspect}"
   end
 end
 
