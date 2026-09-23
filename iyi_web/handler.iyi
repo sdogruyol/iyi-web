@@ -2,17 +2,26 @@
 # you `include`; iyi has no `include`, and R-3 would refuse one that reopened
 # a foreign type anyway. Subclass `Handler`, override `call`, and pass the
 # request on with `call_next`.
+#
+# `only` and `exclude` record which requests a handler is meant for;
+# `only_match?` and `exclude_match?` answer for one request, and `call`
+# decides what to do with the answer.
 module iyi_web/handler
 
+import iyi_web/codec
 import iyi_web/context
 
 using iyi_web/context::{Context}
 
 pub class Handler
   @next_handler : Handler?
+  @only : Array(Tuple(String, String))
+  @exclude : Array(Tuple(String, String))
 
   def initialize
     @next_handler = nil
+    @only = [] of Tuple(String, String)
+    @exclude = [] of Tuple(String, String)
   end
 
   pub def next_handler=(handler : Handler) : Handler
@@ -33,6 +42,35 @@ pub class Handler
     if handler = @next_handler
       handler.call(ctx)
     end
+  end
+
+  # Paths use the filter syntax: exact, `:name` segments, or a `/*` prefix.
+  # *method* "*" means every method, and a HEAD request counts as GET.
+  pub def only(paths : Array(String), method : String = "GET") : Nil
+    paths.each { |path| @only << {method, path} }
+  end
+
+  pub def exclude(paths : Array(String), method : String = "GET") : Nil
+    paths.each { |path| @exclude << {method, path} }
+  end
+
+  pub def only_match?(ctx : Context) : Bool
+    rules_match?(@only, ctx)
+  end
+
+  pub def exclude_match?(ctx : Context) : Bool
+    rules_match?(@exclude, ctx)
+  end
+
+  private def rules_match?(rules : Array(Tuple(String, String)), ctx : Context) : Bool
+    method = ctx.request.method
+    path = ctx.request.path
+    rules.each do |rule|
+      wanted = rule[0]
+      next unless wanted == "*" || wanted == method || (method == "HEAD" && wanted == "GET")
+      return true if IyiWeb::Codec.pattern_matches?(rule[1], path)
+    end
+    false
   end
 end
 

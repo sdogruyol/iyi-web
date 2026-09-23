@@ -39,6 +39,20 @@ class AppendHandler < Handler
   end
 end
 
+class AdminOnly < Handler
+  def initialize
+    super()
+    only ["/admin", "/admin/*"], "*"
+    exclude ["/admin/health"]
+  end
+
+  pub def call(ctx : Context) : Nil
+    return call_next(ctx) unless only_match?(ctx)
+    return call_next(ctx) if exclude_match?(ctx)
+    ctx.halt(401, "admin")
+  end
+end
+
 describe "Handler" do
   it "runs middleware before the route" do
     handler = chain([StampHandler.new, routes { |r|
@@ -80,5 +94,27 @@ describe "Handler" do
       end
     }
     assert dispatch(passthrough, "GET", "/").response.body == "ok"
+  end
+
+  it "limits a handler to its only paths and lets exclude through" do
+    handler = chain([AdminOnly.new, routes { |r|
+      r.get "/admin/users" do |env|
+        "users"
+      end
+      r.post "/admin" do |env|
+        "posted"
+      end
+      r.get "/admin/health" do |env|
+        "healthy"
+      end
+      r.get "/public" do |env|
+        "public"
+      end
+    }])
+    assert dispatch(handler, "GET", "/admin/users").response.status_code == 401
+    assert dispatch(handler, "POST", "/admin").response.status_code == 401
+    assert dispatch(handler, "HEAD", "/admin/users").response.status_code == 401
+    assert dispatch(handler, "GET", "/admin/health").response.body == "healthy"
+    assert dispatch(handler, "GET", "/public").response.body == "public"
   end
 end
