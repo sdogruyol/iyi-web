@@ -7,6 +7,7 @@
 module iyi_web/context
 
 import std/file
+import std/json
 import iyi_web/request
 import iyi_web/response
 import iyi_web/params
@@ -14,6 +15,7 @@ import iyi_web/cookies
 import iyi_web/mime
 
 using std/file::{File}
+using std/json::{JSON}
 using iyi_web/request::{Request}
 using iyi_web/response::{Response}
 using iyi_web/params::{Params}
@@ -65,11 +67,15 @@ pub class Context
     @halted = true
   end
 
-  pub def redirect(url : String, status_code : Int32 = 302) : Nil
+  # `close: false` sets the redirect and lets the rest of the chain run.
+  pub def redirect(url : String, status_code : Int32 = 302, body : String = "", close : Bool = true) : Nil
     @response.headers["Location"] = url
     @response.status_code = status_code
-    @response.close
-    @halted = true
+    @response.set_body(body) unless body.empty?
+    if close
+      @response.close
+      @halted = true
+    end
   end
 
   pub def cookies : CookieJar
@@ -95,29 +101,39 @@ pub class Context
     self
   end
 
-  pub def text(content : String) : Nil
-    @response.content_type = "text/plain; charset=utf-8"
+  pub def text(content : String, content_type : String = "text/plain; charset=utf-8") : Nil
+    @response.content_type = content_type
     @response.set_body(content)
   end
 
-  pub def html(content : String) : Nil
-    @response.content_type = "text/html; charset=utf-8"
+  pub def html(content : String, content_type : String = "text/html; charset=utf-8") : Nil
+    @response.content_type = content_type
     @response.set_body(content)
   end
 
-  pub def xml(content : String) : Nil
-    @response.content_type = "application/xml; charset=utf-8"
+  pub def xml(content : String, content_type : String = "application/xml; charset=utf-8") : Nil
+    @response.content_type = content_type
     @response.set_body(content)
   end
 
-  pub def json(content : String) : Nil
-    @response.content_type = "application/json; charset=utf-8"
+  # A String is sent as it is: it is taken to be JSON already.
+  pub def json(content : String, content_type : String = "application/json; charset=utf-8") : Nil
+    @response.content_type = content_type
     @response.set_body(content)
+  end
+
+  # Anything else `JSON.to_json` can write: hashes, arrays, scalars,
+  # `JSON::Any`, and types that implement `ToJSON`.
+  pub def json(data : T, content_type : String = "application/json; charset=utf-8") : Nil forall T
+    @response.content_type = content_type
+    @response.set_body(JSON.to_json(data))
   end
 
   # Whole-file send. Missing paths and directories 404 rather than panicking
   # inside File.read; MIME follows the extension unless the caller names one.
-  pub def send_file(path : String, mime_type : String = "", filename : String = "") : Nil
+  # A *filename* makes the response a download (`disposition` defaults to
+  # "attachment"); the name is encoded per RFC 6266 and RFC 8187.
+  pub def send_file(path : String, mime_type : String = "", filename : String = "", disposition : String = "") : Nil
     if !File.exists?(path) || File.directory?(path)
       halt(404, "404 Not Found")
       return
@@ -127,7 +143,7 @@ pub class Context
     @response.content_type = type
     @response.headers["X-Content-Type-Options"] = "nosniff"
     unless filename.empty?
-      @response.headers["Content-Disposition"] = "attachment; filename=\"" + filename + "\""
+      @response.headers["Content-Disposition"] = content_disposition(disposition.empty? ? "attachment" : disposition, filename)
     end
     @response.set_body(File.read(path))
   end
@@ -142,5 +158,58 @@ pub class Context
 
   pub def [](key : String) : String
     @store[key]
+  end
+end
+
+# `attachment; filename="report.pdf"`. A name that is not printable ASCII
+# gets an ASCII fallback with `_` in place of each such character, and the
+# exact name as `filename*` (RFC 8187), so neither a quote nor a line break
+# can leave the parameter.
+pub def content_disposition(disposition : String, filename : String) : String
+  slash = filename.rindex("/")
+  base = slash ? filename[slash + 1, filename.bytesize - slash - 1] : filename
+  fallback = ""
+  lossy = false
+  base.each_char do |char|
+    code = char.ord
+    if code >= 0x20 && code < 0x7f
+      fallback = fallback + "\\" if char == '"' || char == '\\'
+      fallback = fallback + char.to_s
+    else
+      fallback = fallback + "_"
+      lossy = true
+    end
+  end
+  header = disposition + "; filename=\"" + fallback + "\""
+  return header unless lossy
+  header + "; filename*=UTF-8''" + encode_rfc8187(base)
+end
+
+private def encode_rfc8187(text : String) : String
+  hex = "0123456789ABCDEF"
+  encoded = ""
+  bytes = text.to_unsafe
+  index = 0
+  while index < text.bytesize
+    byte = bytes[index]
+    if attr_char?(byte)
+      encoded = encoded + byte.unsafe_chr.to_s
+    else
+      encoded = encoded + "%" + hex[byte.to_i32 >> 4, 1] + hex[byte.to_i32 % 16, 1]
+    end
+    index = index + 1
+  end
+  encoded
+end
+
+private def attr_char?(byte : UInt8) : Bool
+  return true if byte >= 48_u8 && byte <= 57_u8
+  return true if byte >= 65_u8 && byte <= 90_u8
+  return true if byte >= 97_u8 && byte <= 122_u8
+  case byte
+  when 33_u8, 35_u8, 36_u8, 38_u8, 43_u8, 45_u8, 46_u8, 94_u8, 95_u8, 96_u8, 124_u8, 126_u8
+    true
+  else
+    false
   end
 end

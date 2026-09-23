@@ -73,6 +73,15 @@ describe "Context#redirect" do
     ctx.redirect("/new", 301)
     assert ctx.response.status_code == 301
   end
+
+  it "can write a body and leave the chain running" do
+    ctx = env
+    ctx.redirect("/later", 303, body: "see /later", close: false)
+    assert !ctx.halted?
+    assert ctx.response.status_code == 303
+    assert ctx.response.body == "see /later"
+    assert !ctx.response.closed?
+  end
 end
 
 describe "Context cookies" do
@@ -127,5 +136,30 @@ describe "Context helpers" do
     ctx.send_file(__DIR__ + "/fixtures/no-such.txt")
     assert ctx.response.status_code == 404
     assert ctx.halted?
+  end
+
+  it "json writes a String as is and serialises anything else" do
+    raw = env
+    raw.json(%({"a":1}))
+    assert raw.response.body == %({"a":1})
+    data = env
+    data.json({"name" => "ada", "lang" => "iyi"})
+    assert data.response.body == %({"name":"ada","lang":"iyi"})
+    list = env
+    list.json([1, 2, 3])
+    assert list.response.body == "[1,2,3]"
+    assert list.response.content_type == "application/json; charset=utf-8"
+  end
+
+  it "takes a content type on the body helpers" do
+    ctx = env
+    ctx.text("a,b", content_type: "text/csv; charset=utf-8")
+    assert ctx.response.headers["content-type"] == "text/csv; charset=utf-8"
+  end
+
+  it "send_file encodes a non-ASCII filename and honours disposition" do
+    ctx = env
+    ctx.send_file(__DIR__ + "/fixtures/hello.txt", filename: "rapor \"ç\".txt", disposition: "inline")
+    assert ctx.response.headers["content-disposition"] == "inline; filename=\"rapor \\\"_\\\".txt\"; filename*=UTF-8''rapor%20%22%C3%A7%22.txt"
   end
 end
