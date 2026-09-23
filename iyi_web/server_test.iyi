@@ -91,6 +91,12 @@ router.get "/boom-twice" do |env|
   raise "handler failed" if env.request.path == "/boom-twice"
   "unreachable"
 end
+router.get "/stream" do |env|
+  env.response.print("one")
+  env.response.flush
+  env.response.print("two")
+  ""
+end
 router.post "/upload" do |env|
   upload = env.params.files["file"]?
   upload ? upload.path + "|" + upload.read : "none"
@@ -218,6 +224,30 @@ group do |g|
         alive.close
         assert http_body(second) == "{}"
         assert http_header(second, "Connection") == "close"
+      end
+
+      it "streams a flushed response in chunks and keeps the connection" do
+        streamed = exchange(port, close_request("GET", "/stream"))
+        assert status_line(streamed) == "HTTP/1.1 200 OK"
+        assert http_header(streamed, "Transfer-Encoding") == "chunked"
+        assert http_body(streamed) == "3\r\none\r\n3\r\ntwo\r\n0\r\n\r\n"
+
+        alive = IyiSocket.connect("127.0.0.1", port).or_panic
+        alive.write("GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+        first = ""
+        until first.ends_with?("0\r\n\r\n")
+          first = first + alive.read(4096).or_panic
+        end
+        assert http_header(first, "Connection") == "keep-alive"
+        alive.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").or_panic
+        second = ""
+        loop do
+          chunk = alive.read(4096).or_panic
+          break if chunk.empty?
+          second = second + chunk
+        end
+        alive.close
+        assert http_body(second) == "home"
       end
 
       it "receives a multipart upload and deletes its file after responding" do

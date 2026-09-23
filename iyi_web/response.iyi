@@ -1,5 +1,12 @@
 # The writable half of a request: status, headers, body, and the `close`
 # flag `halt` sets so the rest of the chain writes nothing.
+#
+# A response is buffered and sent whole once the chain has run, unless the
+# handler calls `flush`. The first `flush` sends the status line and the
+# headers, then everything printed so far; each later one sends what was
+# printed since. On HTTP/1.1 a flushed body is sent chunked, unless the
+# handler set `Content-Length`; on HTTP/1.0 it runs until the connection
+# closes. Headers changed after the first `flush` are not sent.
 module iyi_web/response
 
 import iyi_web/headers
@@ -14,6 +21,12 @@ pub class Response
   @body : String
   @closed : Bool
   @content_type : String
+  @sink : Proc(String, Nil)?
+  @version : String
+  @keepalive : Bool
+  @head : Bool
+  @headers_sent : Bool
+  @chunked : Bool
 
   def initialize
     @status_code = 200
@@ -21,6 +34,12 @@ pub class Response
     @body = ""
     @closed = false
     @content_type = "text/html; charset=utf-8"
+    @sink = nil
+    @version = "HTTP/1.1"
+    @keepalive = true
+    @head = false
+    @headers_sent = false
+    @chunked = false
   end
 
   pub def status_code : Int32
@@ -79,6 +98,49 @@ pub class Response
     @content_type = "text/html; charset=utf-8"
   end
 
+  # True once `flush` has sent the status line and headers.
+  pub def headers_sent? : Bool
+    @headers_sent
+  end
+
+  # Where `flush` writes, how the connection was asked for, and whether the
+  # request was a HEAD. The server attaches this before the chain runs;
+  # without it `flush` keeps buffering.
+  pub def attach(sink : Proc(String, Nil), version : String, keepalive : Bool, head : Bool) : Nil
+    @sink = sink
+    @version = version
+    @keepalive = keepalive
+    @head = head
+  end
+
+  # Sends what has been printed so far and keeps the response open.
+  pub def flush : Nil
+    sink = @sink
+    return unless sink
+    unless @headers_sent
+      sink.call(stream_head)
+      @headers_sent = true
+    end
+    return if @body.empty?
+    unless @head || no_entity?
+      sink.call(@chunked ? chunk(@body) : @body)
+    end
+    @body = ""
+  end
+
+  # Ends a flushed response: the rest of the body, then the last chunk.
+  pub def finish : Nil
+    flush
+    sink = @sink
+    sink.call("0\r\n\r\n") if sink && @chunked && !@head && !no_entity?
+  end
+
+  # Whether the connection can carry another request after this flushed
+  # response: its end must be marked by the last chunk or by the length.
+  pub def reusable? : Bool
+    @chunked || @headers.has_key?("Content-Length") || @head || no_entity?
+  end
+
   # Serialise to the bytes a TCP connection is owed. `Content-Length` is
   # written for every status that can carry a body, so a keep-alive
   # connection has a frame; a handler that already set one is left alone.
@@ -86,7 +148,7 @@ pub class Response
   # same resource would have advertised. 1xx, 204 and 304 carry neither a
   # body nor a Content-Type.
   pub def to_http(version : String, include_body : Bool = true) : String
-    no_entity = @status_code == 204 || @status_code == 304 || (@status_code >= 100 && @status_code < 200)
+    no_entity = no_entity?
     unless @headers.has_key?("Content-Type") || no_entity
       @headers["Content-Type"] = @content_type
     end
@@ -100,5 +162,25 @@ pub class Response
     reason = phrase(@status_code)
     payload = include_body && !no_entity ? @body : ""
     version + " " + @status_code.to_s + " " + reason + "\r\n" + @headers.to_s + "\r\n" + payload
+  end
+
+  private def no_entity? : Bool
+    @status_code == 204 || @status_code == 304 || (@status_code >= 100 && @status_code < 200)
+  end
+
+  private def stream_head : String
+    unless @headers.has_key?("Content-Type") || no_entity?
+      @headers["Content-Type"] = @content_type
+    end
+    @chunked = @version == "HTTP/1.1" && !@headers.has_key?("Content-Length") && !no_entity?
+    @headers["Transfer-Encoding"] = "chunked" if @chunked
+    unless @headers.has_key?("Connection")
+      @headers["Connection"] = @keepalive && reusable? ? "keep-alive" : "close"
+    end
+    @version + " " + @status_code.to_s + " " + phrase(@status_code) + "\r\n" + @headers.to_s + "\r\n"
+  end
+
+  private def chunk(text : String) : String
+    text.bytesize.to_s(16) + "\r\n" + text + "\r\n"
   end
 end

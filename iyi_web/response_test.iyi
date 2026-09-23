@@ -77,4 +77,60 @@ describe "Response" do
     cached.headers["ETag"] = "W/\"1\""
     assert cached.to_http("HTTP/1.1") == "HTTP/1.1 304 Not Modified\r\nETag: W/\"1\"\r\n\r\n"
   end
+
+  it "streams a flushed body in chunks and ends it with the last chunk" do
+    writes = [] of String
+    res = Response.new
+    res.attach(->(bytes : String) { writes << bytes; nil }, "HTTP/1.1", true, false)
+    res.print("ab")
+    res.flush
+    assert res.headers_sent?
+    res.print("cd")
+    res.finish
+    assert writes.size == 4
+    assert writes[0].starts_with?("HTTP/1.1 200 OK\r\n")
+    assert writes[0].includes?("Transfer-Encoding: chunked\r\n")
+    assert writes[0].includes?("Connection: keep-alive\r\n")
+    assert !writes[0].includes?("Content-Length")
+    assert writes[1] == "2\r\nab\r\n"
+    assert writes[2] == "2\r\ncd\r\n"
+    assert writes[3] == "0\r\n\r\n"
+    assert res.reusable?
+  end
+
+  it "streams raw bytes when the length is known or the client speaks HTTP/1.0" do
+    sized = [] of String
+    known = Response.new
+    known.attach(->(bytes : String) { sized << bytes; nil }, "HTTP/1.1", true, false)
+    known.headers["Content-Length"] = "4"
+    known.print("abcd")
+    known.finish
+    assert sized[1] == "abcd"
+    assert sized.size == 2
+    assert known.reusable?
+
+    old = [] of String
+    legacy = Response.new
+    legacy.attach(->(bytes : String) { old << bytes; nil }, "HTTP/1.0", true, false)
+    legacy.print("x")
+    legacy.finish
+    assert old[0].includes?("Connection: close\r\n")
+    assert old[1] == "x"
+    assert !legacy.reusable?
+  end
+
+  it "keeps buffering when nothing is attached, and sends no body for HEAD" do
+    buffered = Response.new
+    buffered.print("a")
+    buffered.flush
+    assert !buffered.headers_sent?
+    assert buffered.body == "a"
+
+    heads = [] of String
+    head = Response.new
+    head.attach(->(bytes : String) { heads << bytes; nil }, "HTTP/1.1", true, true)
+    head.print("hidden")
+    head.finish
+    assert heads.size == 1
+  end
 end

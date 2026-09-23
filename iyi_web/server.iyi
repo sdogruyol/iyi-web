@@ -104,7 +104,11 @@ pub class Server
     failure = isolated { serve_connection(client, exchange) }
     if failure && !exchange.writing
       if ctx = exchange.context
-        isolated { answer_panic(client, ctx, exchange.started, failure) }
+        # A response that has started streaming cannot become a 500: its
+        # status line is already on the wire. The connection just ends.
+        unless ctx.response.headers_sent?
+          isolated { answer_panic(client, ctx, exchange.started, failure) }
+        end
       end
     end
     client.close
@@ -140,8 +144,7 @@ pub class Server
       in Tuple(Request, String, Bool)
         leftover = it[1]
         keepalive = wants_keepalive?(it[2], requests)
-        dispatch(client, it[0], keepalive, exchange)
-        return unless keepalive
+        return unless dispatch(client, it[0], keepalive, exchange)
         requests = requests + 1
       end
     end
@@ -153,7 +156,9 @@ pub class Server
     already + 1 < @config.max_keepalive_requests
   end
 
-  private def dispatch(client : IyiSocket, request : Request, keepalive : Bool, exchange : Exchange) : Nil
+  # Runs the chain for one request and writes its response. True when the
+  # connection may carry another request.
+  private def dispatch(client : IyiSocket, request : Request, keepalive : Bool, exchange : Exchange) : Bool
     @in_flight = @in_flight + 1
     defer leave
     ctx = Context.for(request)
@@ -162,16 +167,24 @@ pub class Server
     defer ctx.params.cleanup
     exchange.context = ctx
     exchange.started = Time.monotonic
+    head = HTTP.same_name?(request.method, "HEAD")
+    ctx.response.attach(->(bytes : String) { write_raw(client, bytes) }, wire_version(request), keepalive, head)
     stamp(ctx)
     @handler.call(ctx)
     if conn = ctx.response.headers["connection"]?
       keepalive = false if conn.downcase == "close"
     end
-    ctx.response.headers["Connection"] = keepalive ? "keep-alive" : "close"
     exchange.writing = true
-    write_raw(client, ctx.response.to_http(wire_version(request), !HTTP.same_name?(request.method, "HEAD")))
+    if ctx.response.headers_sent?
+      ctx.response.finish
+      keepalive = keepalive && ctx.response.reusable?
+    else
+      ctx.response.headers["Connection"] = keepalive ? "keep-alive" : "close"
+      write_raw(client, ctx.response.to_http(wire_version(request), !head))
+    end
     exchange.writing = false
     exchange.context = nil
+    keepalive
   end
 
   private def leave : Nil

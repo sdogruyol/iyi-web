@@ -57,10 +57,12 @@ pub class CompressHandler < Handler
     response = ctx.response
     headers = response.headers
 
-    # A HEAD has no body left to encode by the time the router is done, and
-    # a body someone else encoded is theirs.
+    # A HEAD has no body left to encode by the time the router is done, a
+    # body someone else encoded is theirs, and a streamed body is already
+    # on the wire with its headers.
     return if ctx.request.method == "HEAD"
     return if headers.has_key?("Content-Encoding")
+    return if response.headers_sent?
 
     # No entity (1xx, 204, 304), or a byte range of the identity body whose
     # `Content-Range` would no longer describe an encoded one.
