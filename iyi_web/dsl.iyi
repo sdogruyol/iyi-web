@@ -21,6 +21,7 @@ import iyi_web/path
 import iyi_web/compress
 import iyi_web/event_stream
 import iyi_web/cli
+import iyi_web/templates
 
 using std/file::{File}
 using std/kernel::{abort}
@@ -36,6 +37,26 @@ using iyi_web/path::{PathHandler}
 using iyi_web/compress::{CompressHandler}
 using iyi_web/event_stream::{EventStream}
 using iyi_web/cli::{CLIParser, cli_parser}
+
+# Templates from `iyi_web/templates`, so `using iyi_web/dsl` is enough. A
+# template path is relative to the file that calls `render`.
+pub macro render(filename)
+  ::IyiWeb::Templates.render({{ filename }})
+end
+
+pub macro render(filename, layout)
+  ::IyiWeb::Templates.render({{ filename }}, {{ layout }})
+end
+
+pub macro content_for(key)
+  ::IyiWeb::Templates.content_for({{ key }}) do
+    {{ yield }}
+  end
+end
+
+pub macro yield_content(key)
+  ::IyiWeb::Templates.yield_content({{ key }})
+end
 
 HTTP_METHODS   = %w(get post put patch delete options head query)
 FILTER_METHODS = %w(get post put patch delete options query)

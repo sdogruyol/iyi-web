@@ -91,6 +91,16 @@ get "/api/ordered" do |env|
   env["order"]? || ""
 end
 
+get "/rendered/:name" do |env|
+  name = env.params.url["name"]
+  render "fixtures/views/page.eiy"
+end
+
+get "/laid-out/:name" do |env|
+  name = env.params.url["name"]
+  render "fixtures/views/with_content_for.eiy", "fixtures/views/layout_with_yield.eiy"
+end
+
 get "/big-text" do |env|
   env.text("x" * 2000)
 end
@@ -154,6 +164,14 @@ describe "iyi_web/dsl" do
     whole = handler_chain
     assert dispatch(whole, "GET", "/ordered").response.body == "first,second"
     assert dispatch(whole, "GET", "/api/ordered").response.body == "first,second,api-1,api-2"
+  end
+
+  it "renders templates, with a layout and content_for, through the DSL" do
+    handler = RouteHandler.new(app)
+    assert dispatch(handler, "GET", "/rendered/ada").response.body == "Hello ada\n"
+    laid = dispatch(handler, "GET", "/laid-out/ada").response.body
+    assert laid.includes?("<head><title>Page of ada</title>\n</head>")
+    assert laid.includes?("<body>Hello ada\n</body>")
   end
 
   it "compresses responses with gzip true" do
