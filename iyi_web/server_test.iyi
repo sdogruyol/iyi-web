@@ -187,10 +187,13 @@ group do |g|
         assert status_line(short) == "HTTP/1.1 400 Bad Request"
       end
 
-      it "rejects a Content-Length above the cap" do
+      it "answers a Content-Length above the cap with 413 before reading the body" do
         cfg.max_request_body_size = 8
         huge = exchange(port, close_request("POST", "/echo", "Content-Length: 20\r\n") + "xxxxxxxxxxxxxxxxxxxx")
-        assert status_line(huge) == "HTTP/1.1 400 Bad Request"
+        assert status_line(huge) == "HTTP/1.1 413 Content Too Large"
+        assert http_header(huge, "Connection") == "close"
+        early = exchange(port, close_request("POST", "/echo", "Content-Length: 5000000\r\n"))
+        assert status_line(early) == "HTTP/1.1 413 Content Too Large"
         cfg.max_request_body_size = 8 * 1024 * 1024
       end
 

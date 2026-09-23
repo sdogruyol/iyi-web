@@ -134,6 +134,9 @@ pub class Server
       in ParseError
         write_error(client, 400, "Bad Request")
         return
+      in TooLarge
+        write_error(client, 413, "Content Too Large")
+        return
       in Tuple(Request, String, Bool)
         leftover = it[1]
         keepalive = wants_keepalive?(it[2], requests)
@@ -230,20 +233,22 @@ pub class Server
     request.version.empty? ? "HTTP/1.1" : request.version
   end
 
-  private def read_request(client : IyiSocket, leftover : String) : Tuple(Request, String, Bool) | ParseError | Closed
+  # A body over `max_request_body_size` is refused as soon as its
+  # `Content-Length` is read, before the body itself is buffered; a chunked
+  # body is measured once it has arrived.
+  private def read_request(client : IyiSocket, leftover : String) : Tuple(Request, String, Bool) | ParseError | TooLarge | Closed
     buffer = leftover
     loop do
       incoming = parse_incoming(buffer)
       if req = incoming.request
-        if req.body.bytesize > @config.max_request_body_size
-          return ParseError.new("request body too large")
-        end
+        return TooLarge.new if req.body.bytesize > @config.max_request_body_size
         leftover_after = buffer[incoming.consumed, buffer.bytesize - incoming.consumed]
         return {req, leftover_after, incoming.close}
       end
       if reason = incoming.error
         return ParseError.new(reason)
       end
+      return TooLarge.new if declared_too_large?(buffer)
 
       case chunk = client.read(65536)
       in Cancelled
@@ -254,6 +259,23 @@ pub class Server
         buffer = buffer + chunk
       end
     end
+  end
+
+  private def declared_too_large?(buffer : String) : Bool
+    head_end = HTTP.find_headers_end(buffer)
+    return false unless head_end
+    lines = HTTP.split_crlf(buffer[0, head_end])
+    index = 1
+    while index < lines.size
+      line = lines[index]
+      colon = line.index(':')
+      if colon && line[0, colon].strip.downcase == "content-length"
+        declared = line[colon + 1, line.bytesize - colon - 1].strip.to_i64?
+        return declared ? declared > @config.max_request_body_size.to_i64 : false
+      end
+      index = index + 1
+    end
+    false
   end
 
   private def write_error(client : IyiSocket, status : Int32, body : String) : Nil
@@ -274,6 +296,9 @@ pub class Server
 end
 
 pub struct Closed
+end
+
+pub struct TooLarge
 end
 
 # What a connection's task was doing when it stopped: the request being
