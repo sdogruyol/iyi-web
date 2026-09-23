@@ -8,6 +8,7 @@
 module iyi_web/dsl
 
 import std/file
+import std/kernel
 import iyi_web/body
 import iyi_web/context
 import iyi_web/router
@@ -19,8 +20,10 @@ import iyi_web/static
 import iyi_web/path
 import iyi_web/compress
 import iyi_web/event_stream
+import iyi_web/cli
 
 using std/file::{File}
+using std/kernel::{abort}
 using iyi_web/body::{IntoBody}
 using iyi_web/context::{Context}
 using iyi_web/router::{Router, RouteHandler}
@@ -32,6 +35,7 @@ using iyi_web/static::{StaticHandler}
 using iyi_web/path::{PathHandler}
 using iyi_web/compress::{CompressHandler}
 using iyi_web/event_stream::{EventStream}
+using iyi_web/cli::{CLIParser, cli_parser}
 
 HTTP_METHODS   = %w(get post put patch delete options head query)
 FILTER_METHODS = %w(get post put patch delete options query)
@@ -171,20 +175,44 @@ end
 
 class Holder
   property server : Server?
+  property extra_options : Proc(CLIParser, Nil)?
 
   def initialize
     @server = nil
+    @extra_options = nil
   end
 end
 
 HOLDER = Holder.new
 
-pub def run : Nil
-  start(nil)
+# Adds the application's own flags to the ones `run` understands.
+pub def extra_options(&block : CLIParser -> Nil) : Nil
+  HOLDER.extra_options = block
 end
 
-pub def run(port : Int32) : Nil
+# Reads the command line (`-b HOST`, `-p PORT`, `-h` and any
+# `extra_options`), then serves. A *port* given here wins over `-p`;
+# `args: nil` skips the command line.
+pub def run(port : Int32? = nil, args : Array(String)? = Program.args) : Nil
+  if list = args
+    read_arguments(list)
+  end
   start(port)
+end
+
+private def read_arguments(args : Array(String)) : Nil
+  parser = cli_parser(config)
+  if extra = HOLDER.extra_options
+    extra.call(parser)
+  end
+  if problem = parser.parse(args)
+    abort(problem + "\n\n" + parser.usage)
+  end
+  if parser.help?
+    puts parser.usage
+    STDOUT.flush
+    abort(nil, 0)
+  end
 end
 
 pub def stop : Nil

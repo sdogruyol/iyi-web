@@ -1,0 +1,162 @@
+# The command-line flags `run` reads from the program's arguments: where to
+# bind, which port, and help. An application adds its own flags through
+# `extra_options`, which hands it the same parser.
+#
+# A flag spelled with a word after it (`--port PORT`) takes a value, given
+# as `--port 4000`, `--port=4000`, `-p 4000` or `-p4000`. The parser returns
+# what went wrong instead of stopping the program, so `run` decides how to
+# report it and tests can read the answer.
+module iyi_web/cli
+
+import iyi_web/config
+
+using iyi_web/config::{Config}
+
+private record Flag,
+  short : String,
+  long : String,
+  value : Bool,
+  label : String,
+  description : String,
+  handler : Proc(String, String?)
+
+pub class CLIParser
+  @flags : Array(Flag)
+  @help : Bool
+
+  def initialize
+    @flags = [] of Flag
+    @help = false
+  end
+
+  # `on "-w COUNT", "--workers COUNT", "Worker count" { |value| ... }`.
+  pub def on(short : String, long : String, description : String, &block : String -> Nil) : Nil
+    add(short, long, description, ->(value : String) { block.call(value); nil.as(String?) })
+  end
+
+  # One spelling: `on "--verbose", "Log more" { |_| ... }`.
+  pub def on(flag : String, description : String, &block : String -> Nil) : Nil
+    handler = ->(value : String) { block.call(value); nil.as(String?) }
+    flag.starts_with?("--") ? add("", flag, description, handler) : add(flag, "", description, handler)
+  end
+
+  # Like `on`, but the block may refuse the value by returning a message.
+  pub def on_checked(short : String, long : String, description : String, &block : String -> String?) : Nil
+    add(short, long, description, block)
+  end
+
+  # True once `-h` or `--help` was given.
+  pub def help? : Bool
+    @help
+  end
+
+  pub def usage : String
+    lines = ["Options:"]
+    rows = [{"-h, --help", "Shows this help"}]
+    @flags.each do |flag|
+      names = [flag.short, flag.long].select { |name| !name.empty? }
+      spelled = names.map { |name| flag.value ? name + " " + flag.label : name }
+      rows << {spelled.join(", "), flag.description}
+    end
+    width = 0
+    rows.each { |row| width = row[0].bytesize if row[0].bytesize > width }
+    rows.each { |row| lines << "    " + row[0] + " " * (width - row[0].bytesize + 4) + row[1] }
+    lines.join("\n")
+  end
+
+  # Nil when every flag was understood; otherwise what went wrong.
+  # Arguments that are not flags, and everything after `--`, are left alone.
+  pub def parse(args : Array(String)) : String?
+    index = 0
+    while index < args.size
+      arg = args[index]
+      index = index + 1
+      break if arg == "--"
+      if arg == "-h" || arg == "--help"
+        @help = true
+        next
+      end
+      next unless arg.starts_with?("-") && arg.bytesize > 1
+      name = arg
+      inline = nil
+      if arg.starts_with?("--")
+        if eq = arg.index('=')
+          name = arg[0, eq]
+          inline = arg[eq + 1, arg.bytesize - eq - 1]
+        end
+      elsif arg.starts_with?("-") && arg.bytesize > 2
+        name = arg[0, 2]
+        inline = arg[2, arg.bytesize - 2]
+      end
+      flag = find(name)
+      return "Invalid option: " + arg unless flag
+      value = ""
+      if flag.value
+        if given = inline
+          value = given
+        elsif index < args.size
+          value = args[index]
+          index = index + 1
+        else
+          return "Missing argument for option: " + name
+        end
+      elsif inline
+        return "Option " + name + " takes no value"
+      end
+      if problem = flag.handler.call(value)
+        return problem
+      end
+    end
+    nil
+  end
+
+  private def add(short : String, long : String, description : String, handler : Proc(String, String?)) : Nil
+    short_name, short_label = split_spec(short)
+    long_name, long_label = split_spec(long)
+    label = long_label.empty? ? short_label : long_label
+    @flags << Flag.new(short: short_name, long: long_name, value: !label.empty?, label: label, description: description, handler: handler)
+  end
+
+  private def find(name : String) : Flag?
+    @flags.each do |flag|
+      return flag if name == flag.short || name == flag.long
+    end
+    nil
+  end
+
+  private def split_spec(spec : String) : Tuple(String, String)
+    space = spec.index(' ')
+    space ? {spec[0, space], spec[space + 1, spec.bytesize - space - 1].strip} : {spec, ""}
+  end
+end
+
+# The flags every application understands: `-b/--bind`, `-p/--port`, and
+# the TLS flags, which are refused because iyi-web does not terminate TLS.
+pub def cli_parser(config : Config) : CLIParser
+  parser = CLIParser.new
+  parser.on_checked("-b HOST", "--bind HOST", "Host to bind (defaults to 0.0.0.0)") do |value|
+    config.host = value
+    nil
+  end
+  parser.on_checked("-p PORT", "--port PORT", "Port to listen for connections (defaults to 3000)") do |value|
+    port = port_number(value)
+    if port
+      config.port = port
+      nil
+    else
+      "Invalid port \"" + value + "\": must be an integer between 0 and 65535."
+    end
+  end
+  tls = "TLS is not supported: terminate TLS at a reverse proxy."
+  parser.on_checked("-s", "--ssl", "Enables SSL") { |value| tls }
+  parser.on_checked("", "--ssl-key-file FILE", "SSL key file") { |value| tls }
+  parser.on_checked("", "--ssl-cert-file FILE", "SSL certificate file") { |value| tls }
+  parser
+end
+
+private def port_number(text : String) : Int32?
+  return nil if text.empty? || text.strip != text
+  number = text.to_i?
+  return nil unless number
+  number >= 0 && number <= 65535 ? number : nil
+end

@@ -1,0 +1,56 @@
+# Command-line flags: bind and port reach the config, bad input is named,
+# help is noticed, and an application's own flags run.
+module iyi_web/cli_test
+
+import iyi_web/cli
+import iyi_web/config
+import iyi_web/spec
+
+using iyi_web/cli::{CLIParser, cli_parser}
+using iyi_web/config::{Config}
+using iyi_web/spec
+
+describe "cli_parser" do
+  it "sets host and port in every spelling" do
+    cfg = Config.new
+    assert cli_parser(cfg).parse(["-b", "127.0.0.1", "--port=4000"]).nil?
+    assert cfg.host == "127.0.0.1"
+    assert cfg.port == 4000
+    assert cli_parser(cfg).parse(["--bind", "0.0.0.0", "-p5000"]).nil?
+    assert cfg.host == "0.0.0.0"
+    assert cfg.port == 5000
+    assert cli_parser(cfg).parse(["-p", "0"]).nil?
+    assert cfg.port == 0
+  end
+
+  it "names an invalid port, an unknown flag and a missing value" do
+    cfg = Config.new
+    assert cli_parser(cfg).parse(["-p", "70000"]) == "Invalid port \"70000\": must be an integer between 0 and 65535."
+    assert cli_parser(cfg).parse(["--port", " 80"]) == "Invalid port \" 80\": must be an integer between 0 and 65535."
+    assert cli_parser(cfg).parse(["--nope"]) == "Invalid option: --nope"
+    assert cli_parser(cfg).parse(["--port"]) == "Missing argument for option: --port"
+  end
+
+  it "refuses the TLS flags" do
+    assert cli_parser(Config.new).parse(["--ssl"]) == "TLS is not supported: terminate TLS at a reverse proxy."
+  end
+
+  it "notices help and leaves plain arguments and everything after -- alone" do
+    parser = cli_parser(Config.new)
+    assert parser.parse(["serve", "-h", "--", "--nope"]).nil?
+    assert parser.help?
+    assert parser.usage.includes?("-p PORT, --port PORT")
+    assert parser.usage.includes?("-h, --help")
+  end
+
+  it "runs an application's own flags" do
+    seen = [] of String
+    parser = cli_parser(Config.new)
+    parser.on("-w COUNT", "--workers COUNT", "Worker count") { |value| seen << value }
+    parser.on("--verbose", "Log more") { |value| seen << "verbose" }
+    assert parser.parse(["--workers", "4", "--verbose"]).nil?
+    assert seen == ["4", "verbose"]
+    assert parser.parse(["--verbose=1"]) == "Option --verbose takes no value"
+    assert parser.usage.includes?("-w COUNT, --workers COUNT")
+  end
+end
