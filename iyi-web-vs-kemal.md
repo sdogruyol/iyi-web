@@ -8,9 +8,11 @@ zincirinden (`iyi` 0.14.0, `~/.local/share/iyi`) okundu.
 
 Routing, DSL ve middleware omurgası büyük ölçüde aynı. Eksikler iki grupta:
 
-1. iyi-web'de Kemal'den farklı ve hatalı davranan beş durum. Hepsi çalıştırılıp
-   doğrulandı.
+1. iyi-web'de Kemal'den farklı ve hatalı davranan altı durum. Hepsi
+   çalıştırılıp doğrulandı.
 2. Eksik özellikler. Bir kısmı önce iyi'nin kendisinde değişiklik gerektiriyor.
+
+Bölüm 1–4 başlangıçtaki durumu anlatıyor; yapılanlar ve kalanlar bölüm 5'te.
 
 ## 1. Doğrulanmış hatalı davranışlar
 
@@ -105,4 +107,90 @@ Kemal çekirdeğinde olmayan ama örneklerinde görülenler:
 
 ## 5. Durum
 
-Bu bölüm iş ilerledikçe güncellenir.
+iyi-web `main`, iyi 0.14.0. `iyi test iyi_web` 27 test dosyasının hepsinde
+geçiyor. README'deki örnekler tek bir programda derlenip çalıştırıldı ve
+curl ile denendi.
+
+### Düzelen hatalar
+
+Bölüm 1'deki altı durumun hepsi:
+
+- **Handler'da panic:** Her bağlantı kendi `group`'unda çalışıyor. Panic
+  eden isteğe `error 500` sayfası, yoksa yerleşik sayfa dönüyor; panic
+  mesajı yalnız development'ta görünüyor (`show_exceptions`). Yalnız o
+  bağlantı kapanıyor, diğerleri etkilenmiyor.
+- **Kopan istemci:** Yalnız o istek bitiyor. iyi'nin socket katmanı yine de
+  stderr'e bir panic satırı yazıyor (bkz. ön koşullar).
+- **Header enjeksiyonu:** Header adında ve değerinde kontrol karakteri panic
+  ile reddediliyor. `send_file` dosya adını RFC 6266/8187'ye göre kodluyor.
+- **Parametre adları:** Her route kendi adlarını okuyor. `/users/:id` ile
+  `/users/:user_id/posts` birlikte çalışıyor; Kemal burada hata veriyor.
+- **Aynı route iki kez:** Program başlarken hata vererek duruyor.
+- **Sondaki `/`:** `/about/` isteği `/about` route'una gidiyor.
+
+### Kapanan eksikler
+
+| Alan | Yapılan |
+|---|---|
+| Hata sayfaları | `error 500`, `show_exceptions`, 413. Before filtresinin koyduğu hata durumuna da hata sayfası uygulanıyor |
+| JSON parametreleri | `env.params.json`, `_json`, bozuk JSON'a 400 |
+| Dosya yükleme | `params.files`, `all_files`, `FileUpload`, iki sınır ve 413. Her dosya tahmin edilemeyen adlı, 0700 izinli kendi dizinine yazılıyor ve yanıttan sonra siliniyor |
+| Parametre detayları | `raw_body`. JSON ve multipart gövde ilk kullanıldığında ayrıştırılıyor |
+| Parça parça yanıt | `flush`, `headers_sent?`, HTTP/1.1'de chunked gövde. Panic'te gönderilmemiş gövde atılıyor |
+| SSE | `sse`, `Router#sse`, `EventStream` (`send`, `comment`, `close`); HEAD kısa devresi; `event`/`id` içinde satır sonu reddi |
+| Statik dosyalar | gzip ve deflate (`Vary`), ETag/Last-Modified ile 304, Range (206, 416, `multipart/byteranges`), `dir_index`, `dir_listing`, dizin için sonda `/` yönlendirmesi, `static_headers`, `nosniff`, `Accept-Ranges` |
+| `send_file` | Range, `disposition:`, dosya adı kodlaması |
+| Şablonlar | `render` (layout ile), `content_for`, `yield_content`; iç içe `render` çalışıyor |
+| Context | `set`/`get`/`get?`, `route_pattern`, `route_found?` |
+| Yardımcılar | Satırdaki hepsi; `status` kodu `HTTP::Status` yerine `Int32` olarak alıyor |
+| Middleware | `only`/`exclude`, `use(handler, position)`, `use(path, [handlers])`, `CompressHandler` |
+| Filtreler | Satırdaki hepsi |
+| Cookie | `domain`, `expires`, `delete_cookie`; değerler kodlanıp çözülüyor |
+| Komut satırı | `-b`, `-p`, `-h`, `extra_options`. `-s` ve `--ssl-*` TLS olmadığını söyleyip programı durduruyor |
+
+### Kalanlar
+
+iyi-web içinde yapılabilecekler:
+
+- `error 404 do |env, ex|` biçimi ve exception sınıfına göre `error`. Panic
+  metni `Panicked#text` ile okunabiliyor; exception sınıflarının iyi'de
+  doğrudan karşılığı yok.
+- Aynı anahtarın birden çok değeri (`fetch_all`). Sorgu ve form tabloları son
+  değeri tutuyor.
+- Değiştirilebilir logger. `LogHandler` sabit biçimde stdout'a yazıyor.
+- `send_file`: gzip, bellekteki veriyi gönderme, HEAD'de dosyayı okumama.
+- Statik dosyalar: önceden sıkıştırılmış `.gz` dosyaları, sistem MIME
+  tablosu.
+- `add_context_storage_type`. Saklanabilen tipler sabit (`StoreValue`).
+- Örnekler: yalnız `examples/hello.iyi` var.
+
+Önce iyi'de değişiklik gerektirenler:
+
+| iyi'de eksik | Beklediği iyi-web özelliği |
+|---|---|
+| Aynı fd'de okuma ve yazma için ayrı bekleme (`two fibers waiting on one fd`) | WebSocket (`ws`) |
+| Socket hatalarının panic yerine değer dönmesi (`panic: cannot write to socket`) | Kopan istemcinin stderr'e panic yazmaması; akışta istemcinin gittiğini anlama; WebSocket kapanışı |
+| Sinyal yakalama (SIGINT, SIGTERM) | Düzgün kapanış, `shutdown_message`, yarıdaki istekleri bitirme |
+| TLS | `-s`, `--ssl-key-file`, `--ssl-cert-file`, `bind_tls` |
+| std/socket'te SO_REUSEPORT, unix socket, IPv6, okuma ve yazma zaman aşımı | `reuse_port`, unix socket'te dinleme, yavaş istemcilere zaman aşımı |
+| std/file'da konuma atlama (`seek`) | Büyük dosyaları ve Range'i belleğe okumadan gönderme |
+| `require` ile eklenen paketin `std/...` import'larının paketin içinde değil std'de aranması (`has no module 'std/file'`) | `require` ile kurulum. Şimdilik `iyi_web/` projenin `lib/` dizinine kopyalanıyor |
+
+iyi'de bulunan, iyi-web içinde aşılan sorunlar:
+
+- `File.tempfile` pid ve sayaçtan tahmin edilebilir ad üretiyor, sonra
+  var-mı-diye-bakıp-yazıyor. Paylaşılan geçici dizinde önceden konan bir
+  symlink, yüklenen dosyayı saldırganın seçtiği yere yazdırıyordu
+  (çalıştırılarak doğrulandı). iyi-web artık her yükleme için `mkdir` ile
+  0700 izinli, rastgele adlı bir dizin açıyor.
+- `std/uri` `Params.parse` hatalı `%`'de panic veriyor. iyi-web kendi
+  çözücüsünü kullanıyor (`codec.iyi`).
+- `std/option_parser` hatalı girdide panic veriyor. iyi-web kendi
+  `CLIParser`'ını kullanıyor.
+- `std/file` import eden bir programda tohumsuz `Random.new` derlenmiyor
+  (`undefined method 'open' for Std::File:Module`). iyi-web tohumu kendisi
+  veriyor (`token.iyi`).
+- Derleyici: bir blok, dosyada kendisinden sonra tanımlanan üst düzey bir
+  sabite eriştiğinde `BUG: __iyi_once is not defined` veriyor (örneğin
+  `extra_options` bloğu altta tanımlı bir diziyi kullanınca). Sabiti bloğun
+  üstüne almak yetiyor.
