@@ -31,6 +31,7 @@ pub class Config
   @max_keepalive_requests : Int32
   @max_request_body_size : Int32
   @custom_handlers : Array(Handler)
+  @positioned_handlers : Array(Tuple(Int32, Handler))
   @shutdown_message : Bool
   @show_exceptions : Bool?
   @max_ranges : Int32
@@ -57,6 +58,7 @@ pub class Config
     @max_keepalive_requests = 100
     @max_request_body_size = 8 * 1024 * 1024
     @custom_handlers = [] of Handler
+    @positioned_handlers = [] of Tuple(Int32, Handler)
     @shutdown_message = true
     @show_exceptions = nil
     @max_ranges = 16
@@ -172,6 +174,16 @@ pub class Config
 
   pub def add_handler(handler : Handler) : Nil
     @custom_handlers << handler
+  end
+
+  # *position* is the handler's index in the final chain, counted before
+  # the router, which always stays last.
+  pub def add_handler(handler : Handler, position : Int32) : Nil
+    @positioned_handlers << {position, handler}
+  end
+
+  pub def positioned_handlers : Array(Tuple(Int32, Handler))
+    @positioned_handlers
   end
 
   # 0 turns `Range` support off.

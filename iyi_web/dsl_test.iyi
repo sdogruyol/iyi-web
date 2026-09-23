@@ -2,17 +2,37 @@
 # bare word; this file is that consumer.
 module iyi_web/dsl_test
 
+import std/compress
 import iyi_web/dsl
 import iyi_web/router
+import iyi_web/handler
+import iyi_web/context
 import iyi_web/harness
 import iyi_web/config
 import iyi_web/spec
 
+using std/compress::{Gzip}
 using iyi_web/dsl
 using iyi_web/router::{Router, RouteHandler}
+using iyi_web/handler::{Handler}
+using iyi_web/context::{Context}
 using iyi_web/harness
 using iyi_web/config
 using iyi_web/spec
+
+class Tag < Handler
+  @label : String
+
+  def initialize(@label : String)
+    super()
+  end
+
+  pub def call(ctx : Context) : Nil
+    previous = ctx["order"]?
+    ctx["order"] = previous ? previous + "," + @label : @label
+    call_next(ctx)
+  end
+end
 
 get "/dsl" do |env|
   "from-dsl"
@@ -40,6 +60,40 @@ mounted.get "/in" do |env|
   "mounted-dsl"
 end
 mount "/sub", mounted
+
+before_get ["/listed-a", "/listed-b"] do |env|
+  env.response.headers["X-Listed"] = "1"
+end
+
+get "/listed-a" do |env|
+  "a"
+end
+
+get "/listed-b" do |env|
+  "b"
+end
+
+get "/halted" do |env|
+  halt env, status_code: 403, response: "Forbidden"
+  "unreachable"
+end
+
+get "/headed" do |env|
+  headers env, {"X-A" => "1", "X-B" => "2"}
+  "headed"
+end
+
+get "/ordered" do |env|
+  env["order"]? || ""
+end
+
+get "/api/ordered" do |env|
+  env["order"]? || ""
+end
+
+get "/big-text" do |env|
+  env.text("x" * 2000)
+end
 
 describe "iyi_web/dsl" do
   it "registers GET and POST on the process app" do
@@ -72,5 +126,60 @@ describe "iyi_web/dsl" do
     assert config.serve_static == false
     public_folder("./assets")
     assert config.public_folder == "./assets"
+  end
+
+  it "registers one filter for a list of paths" do
+    handler = RouteHandler.new(app)
+    assert dispatch(handler, "GET", "/listed-a").response.headers["x-listed"]? == "1"
+    assert dispatch(handler, "GET", "/listed-b").response.headers["x-listed"]? == "1"
+    assert dispatch(handler, "GET", "/dsl").response.headers["x-listed"]?.nil?
+  end
+
+  it "halts and sets headers with the helper functions" do
+    handler = RouteHandler.new(app)
+    halted = dispatch(handler, "GET", "/halted")
+    assert halted.response.status_code == 403
+    assert halted.response.body == "Forbidden"
+    headed = dispatch(handler, "GET", "/headed")
+    assert headed.response.headers["x-a"] == "1"
+    assert headed.response.headers["x-b"] == "2"
+  end
+
+  it "places a positioned handler first and scopes a handler list to a path" do
+    logging(false)
+    serve_static(false)
+    use Tag.new("second")
+    use Tag.new("first"), 0
+    use "/api", [Tag.new("api-1"), Tag.new("api-2")]
+    whole = handler_chain
+    assert dispatch(whole, "GET", "/ordered").response.body == "first,second"
+    assert dispatch(whole, "GET", "/api/ordered").response.body == "first,second,api-1,api-2"
+  end
+
+  it "compresses responses with gzip true" do
+    gzip true
+    request = http_request("GET", "/big-text")
+    request.headers["Accept-Encoding"] = "gzip"
+    packed = dispatch(handler_chain, request)
+    assert packed.response.headers["content-encoding"] == "gzip"
+    assert Gzip.decompress(packed.response.body) == "x" * 2000
+  end
+
+  it "takes static options as a hash and calls static_headers" do
+    serve_static({"dir_listing" => true, "gzip" => true})
+    assert config.serve_static
+    assert config.static_dir_listing
+    assert config.static_gzip
+    assert !config.static_dir_index
+    public_folder(__DIR__ + "/fixtures")
+    static_headers do |env, path, info|
+      env.response.headers["X-Served"] = info.size.to_s
+    end
+    served = dispatch(handler_chain, "GET", "/hello.txt")
+    assert served.response.body == "hello-static"
+    assert served.response.headers["x-served"] == "12"
+    listed = dispatch(handler_chain, "GET", "/")
+    assert listed.response.body.includes?("hello.txt")
+    serve_static(false)
   end
 end

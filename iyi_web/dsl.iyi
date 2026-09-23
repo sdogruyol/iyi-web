@@ -7,6 +7,7 @@
 # wants unqualified.
 module iyi_web/dsl
 
+import std/file
 import iyi_web/body
 import iyi_web/context
 import iyi_web/router
@@ -16,7 +17,9 @@ import iyi_web/log
 import iyi_web/server
 import iyi_web/static
 import iyi_web/path
+import iyi_web/compress
 
+using std/file::{File}
 using iyi_web/body::{IntoBody}
 using iyi_web/context::{Context}
 using iyi_web/router::{Router, RouteHandler}
@@ -26,6 +29,7 @@ using iyi_web/log::{LogHandler}
 using iyi_web/server::{Server}
 using iyi_web/static::{StaticHandler}
 using iyi_web/path::{PathHandler}
+using iyi_web/compress::{CompressHandler}
 
 HTTP_METHODS   = %w(get post put patch delete options head query)
 FILTER_METHODS = %w(get post put patch delete options query)
@@ -46,6 +50,14 @@ pub def after_all(path : String = "*", &block : Context -> B) : Nil forall B : I
   APP.after(path, &block)
 end
 
+pub def before_all(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
+  APP.before(paths, &block)
+end
+
+pub def after_all(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
+  APP.after(paths, &block)
+end
+
 {% for method in FILTER_METHODS %}
   pub def before_{{ method.id }}(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
     APP.before_{{ method.id }}(path, &block)
@@ -53,6 +65,14 @@ end
 
   pub def after_{{ method.id }}(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
     APP.after_{{ method.id }}(path, &block)
+  end
+
+  pub def before_{{ method.id }}(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
+    APP.before_{{ method.id }}(paths, &block)
+  end
+
+  pub def after_{{ method.id }}(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
+    APP.after_{{ method.id }}(paths, &block)
   end
 {% end %}
 
@@ -76,8 +96,34 @@ pub def use(handler : Handler) : Nil
   add_handler(handler)
 end
 
+# *position* is the index the handler takes in the finished chain: 0 puts
+# it before request logging. The router always stays last.
+pub def use(handler : Handler, position : Int32) : Nil
+  config.add_handler(handler, position)
+end
+
 pub def use(path : String, handler : Handler) : Nil
   add_handler(PathHandler.new(path, handler))
+end
+
+pub def use(path : String, handlers : Array(H)) : Nil forall H
+  handlers.each { |handler| add_handler(PathHandler.new(path, handler)) }
+end
+
+# `gzip true` compresses every textual response the client accepts
+# compressed; see `CompressHandler`.
+pub def gzip(enabled : Bool = false) : Nil
+  add_handler(CompressHandler.new) if enabled
+end
+
+# Ends the request with *status_code* and *response*. The rest of the
+# block still runs, but its return value is discarded.
+pub def halt(env : Context, status_code : Int32 = 200, response : String = "") : Nil
+  env.halt(status_code, response)
+end
+
+pub def headers(env : Context, values : Hash(String, String)) : Nil
+  values.each { |name, value| env.response.headers[name] = value }
 end
 
 pub def host(value : String) : Nil
@@ -94,6 +140,22 @@ end
 
 pub def serve_static(status : Bool) : Nil
   config.serve_static = status
+end
+
+# The static handler's options, `"gzip"`, `"dir_listing"` and
+# `"dir_index"`. A key left out counts as false.
+pub def serve_static(options : Hash(String, Bool)) : Nil
+  cfg = config
+  cfg.serve_static = true
+  cfg.static_gzip = options["gzip"]? || false
+  cfg.static_dir_listing = options["dir_listing"]? || false
+  cfg.static_dir_index = options["dir_index"]? || false
+end
+
+# Runs for every file the static handler serves, before its body is
+# written: add caching or CORS headers here.
+pub def static_headers(&block : Context, String, File::Info -> Nil) : Nil
+  config.static_headers = block
 end
 
 pub def public_folder(path : String) : Nil
@@ -130,17 +192,27 @@ pub def running? : Bool
   config.running
 end
 
+# The chain `run` serves: request logging, static files, the middleware
+# added with `use`, then the router. Built fresh on every call, which is
+# also how a test drives the whole application without a socket.
+pub def handler_chain : Handler
+  cfg = config
+  handlers = [] of Handler
+  handlers << LogHandler.new if cfg.logging
+  if cfg.serve_static
+    handlers << StaticHandler.new(cfg.public_folder, cfg.static_dir_index, cfg.static_dir_listing, cfg.static_gzip, cfg.max_ranges, cfg.static_headers)
+  end
+  cfg.custom_handlers.each { |handler| handlers << handler }
+  cfg.positioned_handlers.each { |entry| handlers = insert_at(handlers, entry[0], entry[1]) }
+  handlers << RouteHandler.new(app)
+  chain(handlers)
+end
+
 private def start(port : Int32 | Nil) : Nil
   cfg = config
   cfg.port = port if port
 
-  handlers = [] of Handler
-  handlers << LogHandler.new if cfg.logging
-  handlers << StaticHandler.new(cfg.public_folder) if cfg.serve_static
-  cfg.custom_handlers.each { |handler| handlers << handler }
-  handlers << RouteHandler.new(app)
-
-  server = Server.new(chain(handlers), cfg, app.error_handlers)
+  server = Server.new(handler_chain, cfg, app.error_handlers)
   bound = server.bind(cfg.host, cfg.port)
   cfg.port = bound
   HOLDER.server = server
@@ -150,6 +222,17 @@ private def start(port : Int32 | Nil) : Nil
     puts "[" + cfg.env + "] " + cfg.app_name + " is ready to lead at http://" + display_host(cfg.host) + ":" + bound.to_s
     server.listen
   end
+end
+
+private def insert_at(handlers : Array(Handler), at : Int32, handler : Handler) : Array(Handler)
+  index = at < 0 ? 0 : at
+  placed = [] of Handler
+  handlers.each_with_index do |existing, position|
+    placed << handler if position == index
+    placed << existing
+  end
+  placed << handler if index >= handlers.size
+  placed
 end
 
 private def display_host(host : String) : String
