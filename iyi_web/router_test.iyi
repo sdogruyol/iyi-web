@@ -506,6 +506,31 @@ describe "Router" do
       assert paths.includes?("GET /bare")
     end
 
+    it "refuses a route defined twice, across mounts too" do
+      assert panics? {
+        routes do |r|
+          r.get "/twice" do |env|
+            "one"
+          end
+          r.get "/twice/" do |env|
+            "two"
+          end
+        end
+      }
+      assert panics? {
+        routes do |r|
+          r.get "/api/ping" do |env|
+            "one"
+          end
+          inner = Router.new
+          inner.get "/ping" do |env|
+            "two"
+          end
+          r.mount("/api", inner)
+        end
+      }
+    end
+
     it "serves a route with or without a trailing slash" do
       handler = routes do |r|
         r.get "/about" do |env|

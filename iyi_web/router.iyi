@@ -201,7 +201,9 @@ pub class RouteHandler < Handler
 
     seen = {} of String => Bool
     router.routes.each do |route|
-      @tree.add("/" + route.method + route.path, route)
+      unless @tree.add("/" + route.method + route.path, route)
+        raise "route #{route.method} #{route.path} is defined twice"
+      end
       unless seen.has_key?(route.method)
         @methods << route.method
         seen[route.method] = true

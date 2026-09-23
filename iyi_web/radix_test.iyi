@@ -91,6 +91,24 @@ describe "Tree" do
     end
   end
 
+  it "gives each route its own name for a shared parameter segment" do
+    tree = Tree(String).new
+    tree.add("/GET/users/:id", "user")
+    tree.add("/GET/users/:user_id/posts", "posts")
+    assert params(tree, "/GET/users/5")["id"] == "5"
+    posts = params(tree, "/GET/users/5/posts")
+    assert posts["user_id"] == "5"
+    assert !posts.has_key?("id")
+  end
+
+  it "refuses a second payload for the same path" do
+    tree = Tree(String).new
+    assert tree.add("/GET/dup", "first")
+    assert !tree.add("/GET/dup", "second")
+    assert !tree.add("/GET/dup/", "third")
+    assert payload(tree, "/GET/dup") == "first"
+  end
+
   it "matches a path with or without a trailing slash" do
     tree = sample_tree
     assert payload(tree, "/GET/a/b/") == "ab"
