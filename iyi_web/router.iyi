@@ -285,7 +285,9 @@ pub class RouteHandler < Handler
 
   private def drop_head_body(ctx : Context) : Nil
     return unless ctx.request.method == "HEAD"
-    unless ctx.response.headers.has_key?("Content-Length")
+    status = ctx.response.status_code
+    bodiless = status == 204 || status == 304 || (status >= 100 && status < 200)
+    unless ctx.response.headers.has_key?("Content-Length") || bodiless
       ctx.response.headers["Content-Length"] = ctx.response.body.bytesize.to_s
     end
     ctx.response.set_body("")

@@ -80,17 +80,21 @@ pub class Response
   end
 
   # Serialise to the bytes a TCP connection is owed. `Content-Length` is
-  # always written here so a keep-alive connection has a frame; a handler
-  # that already set one is left alone. HEAD omits the body (RFC 9110 §9.3.2)
-  # but keeps the length a GET of the same resource would have advertised.
+  # written for every status that can carry a body, so a keep-alive
+  # connection has a frame; a handler that already set one is left alone.
+  # HEAD omits the body (RFC 9110 §9.3.2) but keeps the length a GET of the
+  # same resource would have advertised. 1xx, 204 and 304 carry neither a
+  # body nor a Content-Type.
   pub def to_http(version : String, include_body : Bool = true) : String
-    unless @headers.has_key?("Content-Type")
+    no_entity = @status_code == 204 || @status_code == 304 || (@status_code >= 100 && @status_code < 200)
+    unless @headers.has_key?("Content-Type") || no_entity
       @headers["Content-Type"] = @content_type
     end
 
-    no_entity = @status_code == 204 || @status_code == 304 || (@status_code >= 100 && @status_code < 200)
-    unless @headers.has_key?("Content-Length")
-      @headers["Content-Length"] = no_entity ? "0" : @body.bytesize.to_s
+    # RFC 9110 §8.6: no Content-Length on 1xx or 204; a 304 keeps one only
+    # when the handler set it to the selected representation's length.
+    unless @headers.has_key?("Content-Length") || no_entity
+      @headers["Content-Length"] = @body.bytesize.to_s
     end
 
     reason = phrase(@status_code)

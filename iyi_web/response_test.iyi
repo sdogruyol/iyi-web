@@ -67,10 +67,14 @@ describe "Response" do
     assert res.to_http("HTTP/1.1", false) == "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 2\r\n\r\n"
   end
 
-  it "sends no entity body for 204" do
+  it "sends no entity body, Content-Type or Content-Length for 204 and 304" do
     res = Response.new
     res.status_code = 204
     res.set_body("nope")
-    assert res.to_http("HTTP/1.1") == "HTTP/1.1 204 No Content\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 0\r\n\r\n"
+    assert res.to_http("HTTP/1.1") == "HTTP/1.1 204 No Content\r\n\r\n"
+    cached = Response.new
+    cached.status_code = 304
+    cached.headers["ETag"] = "W/\"1\""
+    assert cached.to_http("HTTP/1.1") == "HTTP/1.1 304 Not Modified\r\nETag: W/\"1\"\r\n\r\n"
   end
 end
