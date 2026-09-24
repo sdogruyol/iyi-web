@@ -37,7 +37,7 @@ private def random_bytes(count : Int32) : String
   String.new(count) do |target|
     index = 0
     while index < count
-      target[index] = (rng.next_u32 & 255_u32).to_u8
+      target[index] = (rng.next_u & 255_u32).to_u8
       index = index + 1
     end
   end

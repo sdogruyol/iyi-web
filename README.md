@@ -40,7 +40,7 @@ a route returns is checked when the program compiles.
 
 ## Requirements
 
-[iyi](https://iyi-lang.com) 0.14.0 or later.
+[iyi](https://iyi-lang.com) 0.14.1 or later.
 
 ## Installation
 

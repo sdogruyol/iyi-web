@@ -3,9 +3,12 @@
 # `IyiSocket#accept` / `#read` / `#write` park the calling fiber, so a
 # slow client costs one task, not the thread. Closing the listener
 # answers `Cancelled` on a parked `accept`, which is how `close` ends
-# `listen`. The response is still this library's: handlers mutate a
-# class, and `Set-Cookie` may appear more than once, which a Hash cannot
-# hold.
+# `listen`. A connection's own failure - a reset, a peer that has gone -
+# answers `SocketError`: a read that gets one ends the connection, and a
+# write that gets one panics its task, so a handler streaming to a client
+# that left stops rather than writing on. The response is still this
+# library's: handlers mutate a class, and `Set-Cookie` may appear more
+# than once, which a Hash cannot hold.
 #
 # Every connection runs as its own task inside its own group. `listen`'s
 # group cancels every live child on the first failure (III.4.3), so a
@@ -26,7 +29,7 @@ import iyi_web/config
 import iyi_web/http_date
 import iyi_web/log
 
-using std/socket::{IyiSocket}
+using std/socket::{IyiSocket, SocketError}
 using std/http::{HTTP}
 using std/html::{HTML}
 using iyi_web/handler::{Handler}
@@ -69,11 +72,20 @@ pub class Server
     raise "server is not bound" unless listener
 
     group do |g|
+      pause = 5
       while !listener.closed?
         case client = listener.accept
         in Cancelled
           break
+        in SocketError
+          # The listener's own trouble - descriptors run out, most often -
+          # is waited out rather than spun on: 5 ms doubling to a second,
+          # as `std/http`'s server does, and the next accept that works
+          # resets it.
+          sleep(pause)
+          pause = pause * 2 if pause < 1000
         in IyiSocket
+          pause = 5
           accepted = client
           g.spawn do
             serve_isolated(accepted)
@@ -267,7 +279,7 @@ pub class Server
       return TooLarge.new if declared_too_large?(buffer)
 
       case chunk = client.read(65536)
-      in Cancelled
+      in Cancelled, SocketError
         return Closed.new
       in String
         return Closed.new if chunk.empty? && buffer.empty?
@@ -304,8 +316,10 @@ pub class Server
   end
 
   private def write_raw(client : IyiSocket, bytes : String) : Nil
-    case client.write(bytes)
+    case wrote = client.write(bytes)
     in Cancelled
+    in SocketError
+      raise wrote.message
     in Int32
     end
   end
