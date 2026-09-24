@@ -4,6 +4,15 @@ All notable changes to iyi-web are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- iyi-web is installed as an `iyi.mod` requirement instead of copying
+  `iyi_web/` into `lib/`: `iyi get github.com/sdogruyol/iyi-web --as web`, then
+  `using web/iyi_web/dsl`. The README's examples name modules this way, with one
+  `using` line and no `import`. Requires iyi newer than 0.14.1.
+
 ## [0.1.0] - 2026-09-24
 
 The first release. Requires iyi 0.14.1 or later.
@@ -52,4 +61,5 @@ The first release. Requires iyi 0.14.1 or later.
   `Content-Length` is read, before the body is buffered.
 - Static file paths with a `..` segment or a NUL byte are refused.
 
+[Unreleased]: https://github.com/sdogruyol/iyi-web/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/sdogruyol/iyi-web/releases/tag/v0.1.0

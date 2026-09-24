@@ -150,6 +150,7 @@ All six cases from section 1:
 | Filters | Everything in the row |
 | Cookies | `domain`, `expires`, `delete_cookie`; values are encoded and decoded |
 | Command line | `-b`, `-p`, `-h`, `extra_options`. `-s` and `--ssl-*` stop the program with a message that TLS is not supported |
+| Installation | `iyi get github.com/sdogruyol/iyi-web --as web` writes `require github.com/sdogruyol/iyi-web v0.1.0 as web` to `iyi.mod`; files write `using web/iyi_web/dsl` (iyi after 0.14.1) |
 
 ### Remaining
 
@@ -178,7 +179,6 @@ Needing changes in iyi first:
 | TLS | `-s`, `--ssl-key-file`, `--ssl-cert-file`, `bind_tls` |
 | SO_REUSEPORT, unix sockets, IPv6, and read and write timeouts in std/socket | `reuse_port`, listening on a unix socket, timeouts for slow clients |
 | `seek` in std/file | Sending large files and ranges without reading them into memory |
-| Resolving the `std/...` imports of a package added with `require` in std rather than inside the package (`has no module 'std/file'`) | Installing with `require`. Until then, `iyi_web/` is copied into the project's `lib/` directory |
 
 Problems found in iyi and worked around in iyi-web:
 

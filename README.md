@@ -5,8 +5,7 @@ The web framework for [iyi](https://iyi-lang.com).
 ```iyi
 module app
 
-import iyi_web/dsl
-using iyi_web/dsl
+using web/iyi_web/dsl
 
 get "/" do |env|
   "Hello, world!"
@@ -40,37 +39,61 @@ a route returns is checked when the program compiles.
 
 ## Requirements
 
-[iyi](https://iyi-lang.com) 0.14.1 or later.
+[iyi](https://iyi-lang.com) newer than 0.14.1. The `as` short name on an
+`iyi.mod` requirement, and a `using` that imports the module it names, are not
+in 0.14.1.
 
 ## Installation
 
-iyi-web is distributed as source. Copy the `iyi_web` directory of a release
-into your project's `lib/` directory:
+iyi-web is an iyi module. Add it to your project's `iyi.mod` under the short
+name `web`:
 
 ```sh
-git clone --depth 1 --branch v0.1.0 https://github.com/sdogruyol/iyi-web.git
-mkdir -p lib
-cp -R iyi-web/iyi_web lib/
-rm -rf iyi-web
+iyi get github.com/sdogruyol/iyi-web --as web
 ```
 
-iyi resolves imports from `lib/` relative to the working directory, so run
-`iyi` from the project root. To upgrade, replace `lib/iyi_web` with the
-directory from the new release.
+This fetches the latest release, records it in `iyi.sum` and writes one line to
+`iyi.mod`:
+
+```
+require github.com/sdogruyol/iyi-web v0.1.0 as web
+```
+
+Files then name iyi-web's modules as `web/iyi_web/...`. A `using` imports the
+module it names, so one line is enough:
+
+```iyi
+using web/iyi_web/dsl
+using web/iyi_web/router::{Router}
+```
+
+`iyi get -u` moves to the latest release, and
+`iyi get github.com/sdogruyol/iyi-web@v0.1.0` to a given one.
+
+iyi reads `iyi.mod` from the directory of the file being built, so keep the
+entry file, and every `*_test.iyi` that uses iyi-web, beside it. Modules of
+your own can live in subdirectories.
 
 ## Quick start
 
-Save the program at the top of this page as `app.iyi` and run it:
+Start a project, add iyi-web, and save the program at the top of this page as
+`app.iyi`:
 
 ```sh
+mkdir app && cd app
+iyi init app
+iyi get github.com/sdogruyol/iyi-web --as web
 iyi run app.iyi
 ```
+
+`iyi init` writes `iyi.mod` together with a starter `main.iyi`, `greet.iyi`
+and `main_test.iyi`, which can be deleted.
 
 The server listens on http://localhost:3000. Pass `-p 8080` or set `PORT` to
 use another port.
 
 The examples below extend this program. Each goes between the `using` line and
-`run`, and any `import` or `using` lines it shows go at the top of the file.
+`run`, and any `using` lines it shows go at the top of the file.
 
 ## Routing
 
@@ -121,8 +144,7 @@ and `Bool` do. The check happens at compile time, on the route. Implement
 `IntoBody` to return your own types:
 
 ```iyi
-import iyi_web/body
-using iyi_web/body::{IntoBody}
+using web/iyi_web/body::{IntoBody}
 
 struct Temperature
   def initialize(@celsius : Int32)
@@ -257,7 +279,6 @@ end
 `JSON.build` or `JSON.to_json`:
 
 ```iyi
-import std/json
 using std/json::{JSON}
 
 get "/api/items/:id" do |env|
@@ -451,8 +472,7 @@ the panic message in development and hides it in every other environment;
 ## Routers
 
 ```iyi
-import iyi_web/router
-using iyi_web/router::{Router}
+using web/iyi_web/router::{Router}
 
 admin = Router.new
 
@@ -481,8 +501,7 @@ the DSL to define one:
 # routes/health.iyi
 module routes/health
 
-import iyi_web/router
-using iyi_web/router::{Router}
+using web/iyi_web/router::{Router}
 
 pub def health_routes : Router
   router = Router.new
@@ -494,7 +513,6 @@ end
 ```
 
 ```iyi
-import routes/health
 using routes/health
 
 mount health_routes
@@ -506,10 +524,8 @@ Requests pass through request logging, static files, the middleware added with
 `use` in the order it was added, and then the router.
 
 ```iyi
-import iyi_web/cors
-import iyi_web/override
-using iyi_web/cors::{CORSHandler}
-using iyi_web/override::{OverrideMethodHandler}
+using web/iyi_web/cors::{CORSHandler}
+using web/iyi_web/override::{OverrideMethodHandler}
 
 gzip true
 use OverrideMethodHandler.new
@@ -523,11 +539,11 @@ before request logging.
 
 | Handler | Module | Purpose |
 |---|---|---|
-| `CompressHandler` | `iyi_web/compress` | Compresses textual responses of 860 bytes or more with gzip or deflate when `Accept-Encoding` allows it. `gzip true` adds it. |
-| `CORSHandler` | `iyi_web/cors` | Sets `Access-Control-Allow-Origin` and answers preflight requests with `204`. Takes `origin` (default `*`), `methods`, `headers` (default `*`) and `max_age` (seconds as a string, default `"86400"`). |
-| `OverrideMethodHandler` | `iyi_web/override` | Treats a form `POST` with `_method` set to `PUT`, `PATCH` or `DELETE` as that method. |
-| `LogHandler` | `iyi_web/log` | Prints one line per request. Added by default; `logging false` removes it. |
-| `StaticHandler` | `iyi_web/static` | Serves the public folder. Added by default; `serve_static false` removes it. |
+| `CompressHandler` | `web/iyi_web/compress` | Compresses textual responses of 860 bytes or more with gzip or deflate when `Accept-Encoding` allows it. `gzip true` adds it. |
+| `CORSHandler` | `web/iyi_web/cors` | Sets `Access-Control-Allow-Origin` and answers preflight requests with `204`. Takes `origin` (default `*`), `methods`, `headers` (default `*`) and `max_age` (seconds as a string, default `"86400"`). |
+| `OverrideMethodHandler` | `web/iyi_web/override` | Treats a form `POST` with `_method` set to `PUT`, `PATCH` or `DELETE` as that method. |
+| `LogHandler` | `web/iyi_web/log` | Prints one line per request. Added by default; `logging false` removes it. |
+| `StaticHandler` | `web/iyi_web/static` | Serves the public folder. Added by default; `serve_static false` removes it. |
 
 To write your own, subclass `Handler`, override `call`, and pass the request
 on with `call_next`. A handler that does not call `call_next` ends the chain.
@@ -536,10 +552,8 @@ the filter path syntax; `only_match?` and `exclude_match?` answer for the
 current request:
 
 ```iyi
-import iyi_web/handler
-import iyi_web/context
-using iyi_web/handler::{Handler}
-using iyi_web/context::{Context}
+using web/iyi_web/handler::{Handler}
+using web/iyi_web/context::{Context}
 
 class RequireToken < Handler
   @token : String
@@ -593,7 +607,6 @@ end
 ## Templates
 
 ```iyi
-import std/html
 using std/html::{HTML}
 
 get "/profile/:name" do |env|
@@ -636,8 +649,7 @@ local variables where `render` is written.
 ## Configuration
 
 ```iyi
-import iyi_web/config
-using iyi_web/config
+using web/iyi_web/config
 
 config.app_name = "storefront"
 config.max_request_body_size = 1024 * 1024
@@ -711,18 +723,15 @@ IYI_WEB_ENV=production ./app -p 8080
 
 ## Testing
 
-`iyi_web/harness` sends requests through a router in-process, without a
+`web/iyi_web/harness` sends requests through a router in-process, without a
 socket:
 
 ```iyi
-# test/health_test.iyi
-module test/health_test
+# health_test.iyi
+module health_test
 
-import iyi_web/router
-import iyi_web/harness
-import routes/health
-using iyi_web/router::{RouteHandler}
-using iyi_web/harness
+using web/iyi_web/router::{RouteHandler}
+using web/iyi_web/harness
 using routes/health
 
 handler = RouteHandler.new(health_routes)
@@ -733,42 +742,45 @@ assert response.body == "ok"
 ```
 
 ```sh
-iyi test test
+iyi test
 ```
 
 A test is a `*_test.iyi` program that exits non-zero on failure, and
-`iyi test test` runs every one under `test/`. `http_request` and
-`form_request` build requests with a query string, a body or a content type.
-`handler_chain` from `iyi_web/dsl` is the whole application as `run` serves
-it (logging, static files, middleware and routes), for tests that need more
-than one router.
+`iyi test` runs every one in the project. A test that uses iyi-web sits beside
+`iyi.mod`, like the entry file. `http_request` and `form_request` build
+requests with a query string, a body or a content type. `handler_chain` from
+`web/iyi_web/dsl` is the whole application as `run` serves it (logging, static
+files, middleware and routes), for tests that need more than one router.
 
 ## Modules
 
+Paths as written with the short name `web`. Without a short name, a module is
+written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
+
 | Module | Provides |
 |---|---|
-| `iyi_web/dsl` | Routes, filters, `error`, `mount`, `use`, `sse`, `render`, `run` and the setting shorthands |
-| `iyi_web/router` | `Router`, `RouteHandler` |
-| `iyi_web/context` | `Context` |
-| `iyi_web/request` | `Request` |
-| `iyi_web/response` | `Response` |
-| `iyi_web/params` | `Params` |
-| `iyi_web/multipart` | `FileUpload` and the `multipart/form-data` parser |
-| `iyi_web/cookies` | `CookieJar` |
-| `iyi_web/headers` | `Headers` |
-| `iyi_web/body` | `IntoBody` |
-| `iyi_web/handler` | `Handler`, `chain` |
-| `iyi_web/config` | `Config`, `config` |
-| `iyi_web/cli` | `CLIParser` |
-| `iyi_web/event_stream` | `EventStream` |
-| `iyi_web/templates` | `render`, `content_for`, `yield_content` |
-| `iyi_web/compress` | `CompressHandler` and the `Accept-Encoding` helpers |
-| `iyi_web/range` | `Range` header parsing and `206` responses |
-| `iyi_web/cors` | `CORSHandler` |
-| `iyi_web/override` | `OverrideMethodHandler` |
-| `iyi_web/static` | `StaticHandler` |
-| `iyi_web/log` | `LogHandler` |
-| `iyi_web/harness` | `http_request`, `form_request`, `dispatch`, `routes` |
+| `web/iyi_web/dsl` | Routes, filters, `error`, `mount`, `use`, `sse`, `render`, `run` and the setting shorthands |
+| `web/iyi_web/router` | `Router`, `RouteHandler` |
+| `web/iyi_web/context` | `Context` |
+| `web/iyi_web/request` | `Request` |
+| `web/iyi_web/response` | `Response` |
+| `web/iyi_web/params` | `Params` |
+| `web/iyi_web/multipart` | `FileUpload` and the `multipart/form-data` parser |
+| `web/iyi_web/cookies` | `CookieJar` |
+| `web/iyi_web/headers` | `Headers` |
+| `web/iyi_web/body` | `IntoBody` |
+| `web/iyi_web/handler` | `Handler`, `chain` |
+| `web/iyi_web/config` | `Config`, `config` |
+| `web/iyi_web/cli` | `CLIParser` |
+| `web/iyi_web/event_stream` | `EventStream` |
+| `web/iyi_web/templates` | `render`, `content_for`, `yield_content` |
+| `web/iyi_web/compress` | `CompressHandler` and the `Accept-Encoding` helpers |
+| `web/iyi_web/range` | `Range` header parsing and `206` responses |
+| `web/iyi_web/cors` | `CORSHandler` |
+| `web/iyi_web/override` | `OverrideMethodHandler` |
+| `web/iyi_web/static` | `StaticHandler` |
+| `web/iyi_web/log` | `LogHandler` |
+| `web/iyi_web/harness` | `http_request`, `form_request`, `dispatch`, `routes` |
 
 ## Development
 
