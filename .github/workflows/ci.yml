@@ -31,3 +31,6 @@ jobs:
             echo "building $example"
             iyi build "$example" -o "$RUNNER_TEMP/example"
           done
+
+      - name: Test the examples
+        run: iyi test examples
