@@ -1,11 +1,8 @@
 # Cookie header parsing. Setting cookies lives on Context.
 module iyi_web/cookies_test
 
-import iyi_web/cookies
-import iyi_web/spec
-
-using iyi_web/cookies::{CookieJar}
-using iyi_web/spec
+import iyi_web/cookies::{CookieJar}
+import iyi_web/spec::*
 
 describe "CookieJar" do
   it "treats an empty header as an empty jar" do

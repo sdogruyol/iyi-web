@@ -3,9 +3,7 @@
 # onto the response rather than mutating what the client sent.
 module iyi_web/cookies
 
-import iyi_web/codec
-
-using iyi_web/codec
+import iyi_web/codec::*
 
 pub class CookieJar
   @table : Hash(String, String)

@@ -4,13 +4,9 @@
 # own, so a path read beside the macro's file would not be found.
 module iyi_web/templates_test
 
-import iyi_web/templates
-import iyi_web/harness
-import iyi_web/spec
-
-using iyi_web/templates::{render, content_for, yield_content}
-using iyi_web/harness
-using iyi_web/spec
+import iyi_web/templates::{render, content_for, yield_content}
+import iyi_web/harness::*
+import iyi_web/spec::*
 
 WITH_META = "<head><title>Page of world</title>\n</head>\n<body>Hello world\n</body>\n<aside>[]</aside>\n"
 

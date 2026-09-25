@@ -2,13 +2,9 @@
 # status is the one that was actually sent.
 module iyi_web/log
 
-import iyi_web/handler
-import iyi_web/context
-import std/time
-
-using iyi_web/handler::{Handler}
-using iyi_web/context::{Context}
-using std/time::{Time, Span}
+import iyi_web/handler::{Handler}
+import iyi_web/context::{Context}
+import std/time::{Time, Span}
 
 pub class LogHandler < Handler
   pub def call(ctx : Context) : Nil

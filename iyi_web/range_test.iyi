@@ -2,12 +2,9 @@
 # payload. Sizes are small so every expected pair can be read off by hand.
 module iyi_web/range_test
 
-import iyi_web/range
-import iyi_web/spec
+import iyi_web/range::*
+import iyi_web/spec::*
 import std/text
-
-using iyi_web/range
-using iyi_web/spec
 
 # The pairs a header selects, or a panic when it did not select any.
 def pairs(header : String, size : Int32, max_ranges : Int32 = 16) : Array(Tuple(Int32, Int32))

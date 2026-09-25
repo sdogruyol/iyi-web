@@ -3,9 +3,7 @@
 # gets the class `HTTP.reason_for` gives it.
 module iyi_web/status
 
-import std/http
-
-using std/http::{HTTP}
+import std/http::{HTTP}
 
 pub def phrase(code : Int32) : String
   case code

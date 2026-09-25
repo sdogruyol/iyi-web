@@ -2,11 +2,8 @@
 # does not name.
 module iyi_web/status_test
 
-import iyi_web/status
-import iyi_web/spec
-
-using iyi_web/status
-using iyi_web/spec
+import iyi_web/status::*
+import iyi_web/spec::*
 
 describe "phrase" do
   it "names the status codes the framework actually sends" do

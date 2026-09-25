@@ -15,16 +15,11 @@
 # Not in the default stack: `use CompressHandler.new`.
 module iyi_web/compress
 
-import std/compress
+import std/compress::{Gzip, Zlib}
 import std/text
-import iyi_web/headers
-import iyi_web/handler
-import iyi_web/context
-
-using std/compress::{Gzip, Zlib}
-using iyi_web/headers::{Headers}
-using iyi_web/handler::{Handler}
-using iyi_web/context::{Context}
+import iyi_web/headers::{Headers}
+import iyi_web/handler::{Handler}
+import iyi_web/context::{Context}
 
 # Below this many bytes the framing a coding adds costs more than it saves.
 pub COMPRESS_MIN_SIZE = 860

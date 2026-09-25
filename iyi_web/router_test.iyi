@@ -2,15 +2,10 @@
 # filter on one path cannot rewrite the assertions on another.
 module iyi_web/router_test
 
-import iyi_web/router
-import iyi_web/harness
-import iyi_web/context
-import iyi_web/spec
-
-using iyi_web/router::{Router, RouteHandler}
-using iyi_web/harness
-using iyi_web/context::{Context}
-using iyi_web/spec
+import iyi_web/router::{Router, RouteHandler}
+import iyi_web/harness::*
+import iyi_web/context::{Context}
+import iyi_web/spec::*
 
 describe "Router" do
   describe "HTTP verbs" do

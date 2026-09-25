@@ -1,7 +1,6 @@
 module examples/hello
 
-import iyi_web/dsl
-using iyi_web/dsl
+import iyi_web/dsl::*
 
 get "/" do |env|
   "Hello World!"

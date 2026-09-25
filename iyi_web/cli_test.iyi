@@ -2,13 +2,9 @@
 # help is noticed, and an application's own flags run.
 module iyi_web/cli_test
 
-import iyi_web/cli
-import iyi_web/config
-import iyi_web/spec
-
-using iyi_web/cli::{CLIParser, cli_parser}
-using iyi_web/config::{Config}
-using iyi_web/spec
+import iyi_web/cli::{CLIParser, cli_parser}
+import iyi_web/config::{Config}
+import iyi_web/spec::*
 
 describe "cli_parser" do
   it "sets host and port in every spelling" do

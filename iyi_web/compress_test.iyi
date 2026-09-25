@@ -2,19 +2,12 @@
 # response that must go out as it is does.
 module iyi_web/compress_test
 
-import std/compress
-import iyi_web/compress
-import iyi_web/headers
-import iyi_web/handler
-import iyi_web/harness
-import iyi_web/spec
-
-using std/compress::{Gzip, Zlib}
-using iyi_web/compress::{CompressHandler, select_content_coding, compressible_type?, encode_body, append_vary, etag_with_coding}
-using iyi_web/headers::{Headers}
-using iyi_web/handler::{chain}
-using iyi_web/harness
-using iyi_web/spec
+import std/compress::{Gzip, Zlib}
+import iyi_web/compress::{CompressHandler, select_content_coding, compressible_type?, encode_body, append_vary, etag_with_coding}
+import iyi_web/headers::{Headers}
+import iyi_web/handler::{chain}
+import iyi_web/harness::*
+import iyi_web/spec::*
 
 TEXT = "The quick brown fox jumps over the lazy dog. " * 40
 

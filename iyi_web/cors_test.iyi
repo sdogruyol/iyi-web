@@ -1,15 +1,10 @@
 # CORS: preflight is 204 here; a plain OPTIONS still reaches the router.
 module iyi_web/cors_test
 
-import iyi_web/cors
-import iyi_web/handler
-import iyi_web/harness
-import iyi_web/spec
-
-using iyi_web/cors::{CORSHandler}
-using iyi_web/handler::{chain}
-using iyi_web/harness
-using iyi_web/spec
+import iyi_web/cors::{CORSHandler}
+import iyi_web/handler::{chain}
+import iyi_web/harness::*
+import iyi_web/spec::*
 
 def cors_app
   chain([CORSHandler.new, routes { |r|

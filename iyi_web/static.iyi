@@ -12,33 +12,19 @@
 # is first redirected to one, so relative links in the page resolve.
 module iyi_web/static
 
-import std/file
-import std/dir
-import std/html
-import std/time
-import std/uri
-import iyi_web/codec
-import iyi_web/mime
-import iyi_web/handler
-import iyi_web/context
-import iyi_web/config
-import iyi_web/http_date
-import iyi_web/compress
-import iyi_web/range
-
-using std/file::{File}
-using std/dir::{Dir}
-using std/html::{HTML}
-using std/time::{Time}
-using std/uri::{URI}
-using iyi_web/codec
-using iyi_web/mime
-using iyi_web/handler::{Handler}
-using iyi_web/context::{Context}
-using iyi_web/config::{StaticHeadersHook}
-using iyi_web/http_date
-using iyi_web/compress::{COMPRESS_MIN_SIZE, select_content_coding, compressible_type?, encode_body, append_vary, etag_with_coding}
-using iyi_web/range
+import std/file::{File}
+import std/dir::{Dir}
+import std/html::{HTML}
+import std/time::{Time}
+import std/uri::{URI}
+import iyi_web/codec::*
+import iyi_web/mime::*
+import iyi_web/handler::{Handler}
+import iyi_web/context::{Context}
+import iyi_web/config::{StaticHeadersHook}
+import iyi_web/http_date::*
+import iyi_web/compress::{COMPRESS_MIN_SIZE, select_content_coding, compressible_type?, encode_body, append_vary, etag_with_coding}
+import iyi_web/range::*
 
 pub class StaticHandler < Handler
   @root : String

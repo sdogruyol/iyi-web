@@ -150,7 +150,7 @@ All six cases from section 1:
 | Filters | Everything in the row |
 | Cookies | `domain`, `expires`, `delete_cookie`; values are encoded and decoded |
 | Command line | `-b`, `-p`, `-h`, `extra_options`. `-s` and `--ssl-*` stop the program with a message that TLS is not supported |
-| Installation | `iyi get github.com/sdogruyol/iyi-web --as web` writes `require github.com/sdogruyol/iyi-web v0.1.0 as web` to `iyi.mod`; files write `using web/iyi_web/dsl` (iyi after 0.14.1) |
+| Installation | `iyi get github.com/sdogruyol/iyi-web --as web` writes `require github.com/sdogruyol/iyi-web v0.1.0 as web` to `iyi.mod`; files write `import web/iyi_web/dsl::*` (iyi 0.15.0 and later) |
 
 ### Remaining
 

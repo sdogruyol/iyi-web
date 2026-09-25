@@ -2,11 +2,8 @@
 # Request and header types have their own tests.
 module iyi_web/codec_test
 
-import iyi_web/codec
-import iyi_web/spec
-
-using iyi_web/codec
-using iyi_web/spec
+import iyi_web/codec::*
+import iyi_web/spec::*
 
 describe "decode" do
   it "leaves an invalid or truncated percent sequence written" do

@@ -17,29 +17,17 @@
 # catches its panic; the request being handled then gets a 500.
 module iyi_web/server
 
-import std/socket
-import std/http
-import std/html
-import std/time
-import iyi_web/handler
-import iyi_web/context
-import iyi_web/request
-import iyi_web/response
-import iyi_web/config
-import iyi_web/http_date
-import iyi_web/log
-
-using std/socket::{IyiSocket, SocketError}
-using std/http::{HTTP}
-using std/html::{HTML}
-using iyi_web/handler::{Handler}
-using iyi_web/context::{Context}
-using iyi_web/request::{Request, ParseError, Incoming, parse_incoming}
-using iyi_web/response::{Response}
-using iyi_web/config::{Config}
-using iyi_web/http_date
-using iyi_web/log::{request_log_line}
-using std/time::{Time, Span}
+import std/socket::{IyiSocket, SocketError}
+import std/http::{HTTP}
+import std/html::{HTML}
+import std/time::{Time, Span}
+import iyi_web/handler::{Handler}
+import iyi_web/context::{Context}
+import iyi_web/request::{Request, ParseError, Incoming, parse_incoming}
+import iyi_web/response::{Response}
+import iyi_web/config::{Config}
+import iyi_web/http_date::*
+import iyi_web/log::{request_log_line}
 
 pub class Server
   @handler : Handler

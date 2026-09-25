@@ -3,16 +3,11 @@
 # file behind.
 module iyi_web/multipart_test
 
-import std/file
-import std/dir
+import std/file::{File}
+import std/dir::{Dir}
 import std/text
-import iyi_web/multipart
-import iyi_web/spec
-
-using std/file::{File}
-using std/dir::{Dir}
-using iyi_web/multipart
-using iyi_web/spec
+import iyi_web/multipart::*
+import iyi_web/spec::*
 
 BOUNDARY = "----iyiBoundary7MA4YWxk"
 BINARY = "\u0000\r\n--not-a-boundary\r\n\r\n\xFF\xFE end\r\n"

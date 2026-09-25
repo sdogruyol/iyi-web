@@ -17,16 +17,11 @@
 # calls `delete` when the request is over.
 module iyi_web/multipart
 
-import std/file
-import std/dir
+import std/file::{File}
+import std/dir::{Dir}
 import std/text
-import iyi_web/headers
-import iyi_web/token
-
-using std/file::{File}
-using std/dir::{Dir}
-using iyi_web/headers::{Headers}
-using iyi_web/token::{random_hex}
+import iyi_web/headers::{Headers}
+import iyi_web/token::{random_hex}
 
 TEMPFILE_PREFIX = "iyi-web-upload"
 

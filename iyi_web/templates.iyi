@@ -22,9 +22,7 @@
 # `content` local is not overwritten.
 module iyi_web/templates
 
-import std/eiy
-
-using std/eiy::{Eiy}
+import std/eiy::{Eiy}
 
 # The `content_for` blocks of one `render(view, layout)`, by key. Each render
 # makes its own, so two renders never see each other's blocks.

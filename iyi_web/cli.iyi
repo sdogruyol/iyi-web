@@ -8,9 +8,7 @@
 # report it and tests can read the answer.
 module iyi_web/cli
 
-import iyi_web/config
-
-using iyi_web/config::{Config}
+import iyi_web/config::{Config}
 
 private record Flag,
   short : String,

@@ -1,11 +1,8 @@
 # Writable response: status, headers, body, and the exact bytes a socket is owed.
 module iyi_web/response_test
 
-import iyi_web/response
-import iyi_web/spec
-
-using iyi_web/response::{Response}
-using iyi_web/spec
+import iyi_web/response::{Response}
+import iyi_web/spec::*
 
 describe "Response" do
   it "starts as 200 HTML with an empty body" do

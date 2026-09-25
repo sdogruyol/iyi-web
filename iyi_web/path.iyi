@@ -2,13 +2,9 @@
 # for `/api` and its descendants; everything else skips to the next handler.
 module iyi_web/path
 
-import iyi_web/codec
-import iyi_web/handler
-import iyi_web/context
-
-using iyi_web/codec
-using iyi_web/handler::{Handler}
-using iyi_web/context::{Context}
+import iyi_web/codec::*
+import iyi_web/handler::{Handler}
+import iyi_web/context::{Context}
 
 pub class PathHandler < Handler
   @prefix : String

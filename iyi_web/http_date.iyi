@@ -3,9 +3,7 @@
 # `IMF-fixdate` only, the one form a sender is allowed to generate.
 module iyi_web/http_date
 
-import std/time
-
-using std/time::{Time, DayOfWeek}
+import std/time::{Time, DayOfWeek}
 
 pub def http_date(time : Time) : String
   weekday_name(time.day_of_week) + ", " + pad2(time.day) + " " + month_name(time.month) + " " + time.year.to_s + " " + pad2(time.hour) + ":" + pad2(time.minute) + ":" + pad2(time.second) + " GMT"

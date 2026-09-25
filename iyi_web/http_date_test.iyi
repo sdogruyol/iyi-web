@@ -1,13 +1,9 @@
 # RFC 9110 IMF-fixdate, including the example from the spec itself.
 module iyi_web/http_date_test
 
-import iyi_web/http_date
-import iyi_web/spec
-import std/time
-
-using iyi_web/http_date
-using iyi_web/spec
-using std/time::{Time}
+import iyi_web/http_date::*
+import iyi_web/spec::*
+import std/time::{Time}
 
 describe "http_date" do
   it "formats the RFC 9110 example" do

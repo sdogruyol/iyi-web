@@ -6,11 +6,8 @@
 # Not in the default stack: `use CORSHandler.new`.
 module iyi_web/cors
 
-import iyi_web/handler
-import iyi_web/context
-
-using iyi_web/handler::{Handler}
-using iyi_web/context::{Context}
+import iyi_web/handler::{Handler}
+import iyi_web/context::{Context}
 
 pub class CORSHandler < Handler
   @origin : String

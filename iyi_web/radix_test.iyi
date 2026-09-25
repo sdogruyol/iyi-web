@@ -2,11 +2,8 @@
 # *name the rest, and a failed static walk falls back to the param.
 module iyi_web/radix_test
 
-import iyi_web/radix
-import iyi_web/spec
-
-using iyi_web/radix::{Tree}
-using iyi_web/spec
+import iyi_web/radix::{Tree}
+import iyi_web/spec::*
 
 def sample_tree : Tree(String)
   tree = Tree(String).new

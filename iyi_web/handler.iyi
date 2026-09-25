@@ -9,9 +9,7 @@
 module iyi_web/handler
 
 import iyi_web/codec
-import iyi_web/context
-
-using iyi_web/context::{Context}
+import iyi_web/context::{Context}
 
 pub class Handler
   @next_handler : Handler?

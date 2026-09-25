@@ -9,11 +9,8 @@
 # closes. Headers changed after the first `flush` are not sent.
 module iyi_web/response
 
-import iyi_web/headers
-import iyi_web/status
-
-using iyi_web/headers::{Headers}
-using iyi_web/status
+import iyi_web/headers::{Headers}
+import iyi_web/status::*
 
 pub class Response
   @status_code : Int32

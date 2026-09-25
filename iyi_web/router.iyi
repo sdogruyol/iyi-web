@@ -6,21 +6,13 @@
 # sheet is the moment to stop writing.
 module iyi_web/router
 
-import iyi_web/body
-import iyi_web/codec
-import iyi_web/context
-import iyi_web/radix
-import iyi_web/handler
-import iyi_web/status
-import iyi_web/event_stream
-
-using iyi_web/body::{IntoBody}
-using iyi_web/codec
-using iyi_web/context::{Context}
-using iyi_web/radix::{Tree, Match}
-using iyi_web/handler::{Handler}
-using iyi_web/status
-using iyi_web/event_stream::{EventStream}
+import iyi_web/body::{IntoBody}
+import iyi_web/codec::*
+import iyi_web/context::{Context}
+import iyi_web/radix::{Tree, Match}
+import iyi_web/handler::{Handler}
+import iyi_web/status::*
+import iyi_web/event_stream::{EventStream}
 
 alias HandlerProc = Context -> String
 

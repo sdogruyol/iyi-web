@@ -1,15 +1,10 @@
 # POST + `_method` becomes PUT/PATCH/DELETE, the way an HTML form pretends.
 module iyi_web/override_test
 
-import iyi_web/override
-import iyi_web/handler
-import iyi_web/harness
-import iyi_web/spec
-
-using iyi_web/override::{OverrideMethodHandler}
-using iyi_web/handler::{chain}
-using iyi_web/harness
-using iyi_web/spec
+import iyi_web/override::{OverrideMethodHandler}
+import iyi_web/handler::{chain}
+import iyi_web/harness::*
+import iyi_web/spec::*
 
 def override_app
   chain([OverrideMethodHandler.new, routes { |r|

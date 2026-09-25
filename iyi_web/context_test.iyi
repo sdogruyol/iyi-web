@@ -2,15 +2,10 @@
 # is a string bag a middleware can write for a later handler.
 module iyi_web/context_test
 
-import std/time
-import iyi_web/context
-import iyi_web/harness
-import iyi_web/spec
-
-using std/time::{Time}
-using iyi_web/context::{Context}
-using iyi_web/harness
-using iyi_web/spec
+import std/time::{Time}
+import iyi_web/context::{Context}
+import iyi_web/harness::*
+import iyi_web/spec::*
 
 def env : Context
   Context.for(http_request("GET", "/"))

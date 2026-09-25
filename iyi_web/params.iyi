@@ -11,15 +11,10 @@
 # response is written.
 module iyi_web/params
 
-import std/json
-import iyi_web/codec
-import iyi_web/request
-import iyi_web/multipart
-
-using std/json::{JSON, Any}
-using iyi_web/codec
-using iyi_web/request::{Request}
-using iyi_web/multipart::{FileUpload, Multipart, MultipartError, multipart_boundary, parse_multipart}
+import std/json::{JSON, Any}
+import iyi_web/codec::*
+import iyi_web/request::{Request}
+import iyi_web/multipart::{FileUpload, Multipart, MultipartError, multipart_boundary, parse_multipart}
 
 pub class Params
   @url : Hash(String, String)

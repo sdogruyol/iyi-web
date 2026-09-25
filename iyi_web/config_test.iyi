@@ -1,14 +1,11 @@
 # Process-wide config is one object, not a pile of class variables.
 module iyi_web/config_test
 
-import iyi_web/config
-import iyi_web/handler
-import iyi_web/spec
+import iyi_web/config::*
+import iyi_web/handler::{Handler}
+import iyi_web/spec::*
 
-using iyi_web/config
-using iyi_web/config::{Config}
-using iyi_web/handler::{Handler}
-using iyi_web/spec
+import iyi_web/config::{Config}
 
 describe "Config" do
   it "starts with the framework defaults" do

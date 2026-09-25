@@ -3,21 +3,13 @@
 # the caching, compression and range behaviour a production server needs.
 module iyi_web/static_test
 
-import std/file
-import std/compress
-import iyi_web/static
-import iyi_web/handler
-import iyi_web/context
-import iyi_web/harness
-import iyi_web/spec
-
-using std/file::{File}
-using std/compress::{Gzip}
-using iyi_web/static::{StaticHandler}
-using iyi_web/handler::{chain}
-using iyi_web/context::{Context}
-using iyi_web/harness
-using iyi_web/spec
+import std/file::{File}
+import std/compress::{Gzip}
+import iyi_web/static::{StaticHandler}
+import iyi_web/handler::{chain}
+import iyi_web/context::{Context}
+import iyi_web/harness::*
+import iyi_web/spec::*
 
 ROOT = __DIR__ + "/fixtures"
 

@@ -16,11 +16,8 @@
 # response.
 module iyi_web/range
 
-import iyi_web/response
-import iyi_web/token
-
-using iyi_web/response::{Response}
-using iyi_web/token::{random_hex}
+import iyi_web/response::{Response}
+import iyi_web/token::{random_hex}
 
 # The range set is valid, but no range in it selects a byte of the body.
 pub struct Unsatisfiable

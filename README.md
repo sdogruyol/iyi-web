@@ -5,7 +5,7 @@ The web framework for [iyi](https://iyi-lang.com).
 ```iyi
 module app
 
-using web/iyi_web/dsl
+import web/iyi_web/dsl::*
 
 get "/" do |env|
   "Hello, world!"
@@ -39,9 +39,9 @@ a route returns is checked when the program compiles.
 
 ## Requirements
 
-[iyi](https://iyi-lang.com) newer than 0.14.1. The `as` short name on an
-`iyi.mod` requirement, and a `using` that imports the module it names, are not
-in 0.14.1.
+[iyi](https://iyi-lang.com) 0.15.0 or later: the `as` short name on an
+`iyi.mod` requirement, and `import X::{...}` - one line for a module and the
+names it brings into scope - arrived in 0.15.0.
 
 ## Installation
 
@@ -59,12 +59,12 @@ This fetches the latest release, records it in `iyi.sum` and writes one line to
 require github.com/sdogruyol/iyi-web v0.1.0 as web
 ```
 
-Files then name iyi-web's modules as `web/iyi_web/...`. A `using` imports the
-module it names, so one line is enough:
+Files then name iyi-web's modules as `web/iyi_web/...`. One `import` line loads
+a module and brings its names into scope:
 
 ```iyi
-using web/iyi_web/dsl
-using web/iyi_web/router::{Router}
+import web/iyi_web/dsl::*
+import web/iyi_web/router::{Router}
 ```
 
 `iyi get -u` moves to the latest release, and
@@ -92,8 +92,8 @@ and `main_test.iyi`, which can be deleted.
 The server listens on http://localhost:3000. Pass `-p 8080` or set `PORT` to
 use another port.
 
-The examples below extend this program. Each goes between the `using` line and
-`run`, and any `using` lines it shows go at the top of the file.
+The examples below extend this program. Each goes between the `import` line and
+`run`, and any `import` lines it shows go at the top of the file.
 
 ## Routing
 
@@ -144,7 +144,7 @@ and `Bool` do. The check happens at compile time, on the route. Implement
 `IntoBody` to return your own types:
 
 ```iyi
-using web/iyi_web/body::{IntoBody}
+import web/iyi_web/body::{IntoBody}
 
 struct Temperature
   def initialize(@celsius : Int32)
@@ -279,7 +279,7 @@ end
 `JSON.build` or `JSON.to_json`:
 
 ```iyi
-using std/json::{JSON}
+import std/json::{JSON}
 
 get "/api/items/:id" do |env|
   item = JSON.build do |json|
@@ -472,7 +472,7 @@ the panic message in development and hides it in every other environment;
 ## Routers
 
 ```iyi
-using web/iyi_web/router::{Router}
+import web/iyi_web/router::{Router}
 
 admin = Router.new
 
@@ -501,7 +501,7 @@ the DSL to define one:
 # routes/health.iyi
 module routes/health
 
-using web/iyi_web/router::{Router}
+import web/iyi_web/router::{Router}
 
 pub def health_routes : Router
   router = Router.new
@@ -513,7 +513,7 @@ end
 ```
 
 ```iyi
-using routes/health
+import routes/health::*
 
 mount health_routes
 ```
@@ -524,8 +524,8 @@ Requests pass through request logging, static files, the middleware added with
 `use` in the order it was added, and then the router.
 
 ```iyi
-using web/iyi_web/cors::{CORSHandler}
-using web/iyi_web/override::{OverrideMethodHandler}
+import web/iyi_web/cors::{CORSHandler}
+import web/iyi_web/override::{OverrideMethodHandler}
 
 gzip true
 use OverrideMethodHandler.new
@@ -552,8 +552,8 @@ the filter path syntax; `only_match?` and `exclude_match?` answer for the
 current request:
 
 ```iyi
-using web/iyi_web/handler::{Handler}
-using web/iyi_web/context::{Context}
+import web/iyi_web/handler::{Handler}
+import web/iyi_web/context::{Context}
 
 class RequireToken < Handler
   @token : String
@@ -607,7 +607,7 @@ end
 ## Templates
 
 ```iyi
-using std/html::{HTML}
+import std/html::{HTML}
 
 get "/profile/:name" do |env|
   name = HTML.escape(env.params.url["name"])
@@ -649,7 +649,7 @@ local variables where `render` is written.
 ## Configuration
 
 ```iyi
-using web/iyi_web/config
+import web/iyi_web/config::*
 
 config.app_name = "storefront"
 config.max_request_body_size = 1024 * 1024
@@ -730,9 +730,9 @@ socket:
 # health_test.iyi
 module health_test
 
-using web/iyi_web/router::{RouteHandler}
-using web/iyi_web/harness
-using routes/health
+import web/iyi_web/router::{RouteHandler}
+import web/iyi_web/harness::*
+import routes/health::*
 
 handler = RouteHandler.new(health_routes)
 response = dispatch(handler, "GET", "/health").response

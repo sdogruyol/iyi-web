@@ -2,11 +2,8 @@
 # insertion order on write.
 module iyi_web/headers_test
 
-import iyi_web/headers
-import iyi_web/spec
-
-using iyi_web/headers::{Headers}
-using iyi_web/spec
+import iyi_web/headers::{Headers}
+import iyi_web/spec::*
 
 describe "Headers" do
   it "starts empty" do

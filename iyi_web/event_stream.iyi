@@ -13,11 +13,8 @@
 module iyi_web/event_stream
 
 import std/text
-import std/time
-import iyi_web/context
-
-using std/time::{Span}
-using iyi_web/context::{Context}
+import std/time::{Span}
+import iyi_web/context::{Context}
 
 pub class EventStream
   @ctx : Context

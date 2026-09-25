@@ -2,11 +2,8 @@
 # uploads are spooled into.
 module iyi_web/token
 
-import std/random
-import std/time
-
-using std/random::{Random}
-using std/time::{Time}
+import std/random::{Random}
+import std/time::{Time}
 
 # *count* random bytes as `2 * count` lower-case hex digits.
 pub def random_hex(count : Int32) : String

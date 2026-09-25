@@ -1,24 +1,15 @@
-# The DSL writes onto the process app. `using` is what makes `get` a
+# The DSL writes onto the process app. `import iyi_web/dsl::*` is what makes `get` a
 # bare word; this file is that consumer.
 module iyi_web/dsl_test
 
-import std/compress
-import iyi_web/dsl
-import iyi_web/router
-import iyi_web/handler
-import iyi_web/context
-import iyi_web/harness
-import iyi_web/config
-import iyi_web/spec
-
-using std/compress::{Gzip}
-using iyi_web/dsl
-using iyi_web/router::{Router, RouteHandler}
-using iyi_web/handler::{Handler}
-using iyi_web/context::{Context}
-using iyi_web/harness
-using iyi_web/config
-using iyi_web/spec
+import std/compress::{Gzip}
+import iyi_web/dsl::*
+import iyi_web/router::{Router, RouteHandler}
+import iyi_web/handler::{Handler}
+import iyi_web/context::{Context}
+import iyi_web/harness::*
+import iyi_web/config::*
+import iyi_web/spec::*
 
 class Tag < Handler
   @label : String

@@ -1,11 +1,8 @@
 # IntoBody is the compile-time stand-in for Kemal's runtime `is_a?(String)`.
 module iyi_web/body_test
 
-import iyi_web/body
-import iyi_web/spec
-
-using iyi_web/body::{IntoBody}
-using iyi_web/spec
+import iyi_web/body::{IntoBody}
+import iyi_web/spec::*
 
 describe "IntoBody" do
   it "keeps a String" do

@@ -4,23 +4,14 @@
 # `accept` and the group ends.
 module iyi_web/server_test
 
-import std/socket
-import std/http
-import iyi_web/router
-import iyi_web/handler
-import iyi_web/server
-import iyi_web/config
-import iyi_web/harness
-import iyi_web/spec
-
-using std/socket::{IyiSocket}
-using std/http::{HTTP}
-using iyi_web/router::{Router, RouteHandler}
-using iyi_web/handler::{chain}
-using iyi_web/server::{Server}
-using iyi_web/config
-using iyi_web/harness
-using iyi_web/spec
+import std/socket::{IyiSocket}
+import std/http::{HTTP}
+import iyi_web/router::{Router, RouteHandler}
+import iyi_web/handler::{chain}
+import iyi_web/server::{Server}
+import iyi_web/config::*
+import iyi_web/harness::*
+import iyi_web/spec::*
 
 def exchange(port : Int32, request : String) : String
   client = IyiSocket.connect("127.0.0.1", port).or_panic

@@ -1,15 +1,10 @@
 # Request logging must not swallow the route's body or status.
 module iyi_web/log_test
 
-import iyi_web/log
-import iyi_web/handler
-import iyi_web/harness
-import iyi_web/spec
-
-using iyi_web/log::{LogHandler}
-using iyi_web/handler::{chain}
-using iyi_web/harness
-using iyi_web/spec
+import iyi_web/log::{LogHandler}
+import iyi_web/handler::{chain}
+import iyi_web/harness::*
+import iyi_web/spec::*
 
 describe "LogHandler" do
   it "preserves the route's status and body" do

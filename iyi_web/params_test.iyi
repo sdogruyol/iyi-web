@@ -2,15 +2,10 @@
 # most specific: url, then query, then body.
 module iyi_web/params_test
 
-import iyi_web/params
-import iyi_web/request
-import iyi_web/headers
-import iyi_web/spec
-
-using iyi_web/params::{Params}
-using iyi_web/request::{Request}
-using iyi_web/headers::{Headers}
-using iyi_web/spec
+import iyi_web/params::{Params}
+import iyi_web/request::{Request}
+import iyi_web/headers::{Headers}
+import iyi_web/spec::*
 
 describe "Params" do
   it "starts with empty tables" do

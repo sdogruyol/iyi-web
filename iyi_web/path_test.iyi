@@ -1,17 +1,11 @@
 # Prefix-scoped middleware: the inner handler runs only under the prefix.
 module iyi_web/path_test
 
-import iyi_web/path
-import iyi_web/handler
-import iyi_web/harness
-import iyi_web/context
-import iyi_web/spec
-
-using iyi_web/path::{PathHandler}
-using iyi_web/handler::{Handler, chain}
-using iyi_web/harness
-using iyi_web/context::{Context}
-using iyi_web/spec
+import iyi_web/path::{PathHandler}
+import iyi_web/handler::{Handler, chain}
+import iyi_web/harness::*
+import iyi_web/context::{Context}
+import iyi_web/spec::*
 
 class GateHandler < Handler
   pub def call(ctx : Context) : Nil

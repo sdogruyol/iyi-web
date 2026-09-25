@@ -8,6 +8,10 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ### Changed
 
+- Written in iyi 0.15.0's one keyword: `import X::{a}` and `import X::*`
+  where `import X` + `using X` were, produced by `iyi fix .`. Requires iyi
+  0.15.0 or later, which refuses `using`.
+
 - iyi-web is installed as an `iyi.mod` requirement instead of copying
   `iyi_web/` into `lib/`: `iyi get github.com/sdogruyol/iyi-web --as web`, then
   `using web/iyi_web/dsl`. The README's examples name modules this way, with one

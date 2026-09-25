@@ -2,13 +2,9 @@
 # and the errors a bad header block must produce rather than guess through.
 module iyi_web/request_test
 
-import iyi_web/request
-import iyi_web/headers
-import iyi_web/spec
-
-using iyi_web/request::{Request, ParseError, parse_head, with_body, split_target}
-using iyi_web/headers::{Headers}
-using iyi_web/spec
+import iyi_web/request::{Request, ParseError, parse_head, with_body, split_target}
+import iyi_web/headers::{Headers}
+import iyi_web/spec::*
 
 def parsed(block : String) : Request
   case parse_head(block)

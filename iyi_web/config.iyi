@@ -5,13 +5,9 @@
 # object rather than a handful of globals.
 module iyi_web/config
 
-import std/file
-import iyi_web/handler
-import iyi_web/context
-
-using std/file::{File}
-using iyi_web/handler::{Handler}
-using iyi_web/context::{Context}
+import std/file::{File}
+import iyi_web/handler::{Handler}
+import iyi_web/context::{Context}
 
 # Called for every file the static handler serves, before its body is
 # written: the context, the file's path and its `File::Info`.

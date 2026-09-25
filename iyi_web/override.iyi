@@ -3,11 +3,8 @@
 # Not in the default chain: `use OverrideMethodHandler.new`.
 module iyi_web/override
 
-import iyi_web/handler
-import iyi_web/context
-
-using iyi_web/handler::{Handler}
-using iyi_web/context::{Context}
+import iyi_web/handler::{Handler}
+import iyi_web/context::{Context}
 
 pub class OverrideMethodHandler < Handler
   pub def call(ctx : Context) : Nil

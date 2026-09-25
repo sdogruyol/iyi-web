@@ -6,29 +6,17 @@
 # what a handler sees.
 module iyi_web/context
 
-import std/file
-import std/json
-import std/time
-import iyi_web/request
-import iyi_web/response
-import iyi_web/params
-import iyi_web/cookies
-import iyi_web/headers
-import iyi_web/http_date
-import iyi_web/mime
-import iyi_web/range
-
-using std/file::{File}
-using std/json::{JSON}
-using std/time::{Time}
-using iyi_web/request::{Request}
-using iyi_web/response::{Response}
-using iyi_web/params::{Params}
-using iyi_web/cookies::{CookieJar, encode_cookie_value}
-using iyi_web/headers::{Headers}
-using iyi_web/http_date
-using iyi_web/mime
-using iyi_web/range::{respond_ranged}
+import std/file::{File}
+import std/json::{JSON}
+import std/time::{Time}
+import iyi_web/request::{Request}
+import iyi_web/response::{Response}
+import iyi_web/params::{Params}
+import iyi_web/cookies::{CookieJar, encode_cookie_value}
+import iyi_web/headers::{Headers}
+import iyi_web/http_date::*
+import iyi_web/mime::*
+import iyi_web/range::{respond_ranged}
 
 # What `set` stores for later filters, middleware and the route.
 pub alias StoreValue = Nil | String | Int32 | Int64 | Float64 | Bool

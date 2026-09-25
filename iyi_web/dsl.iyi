@@ -1,44 +1,29 @@
-# iyi-web's DSL, and the reason `using` exists.
+# iyi-web's DSL, and the reason an import names what it brings into scope.
 #
 # The original's first line is the whole problem: "Kemal DSL is defined here
 # and it's baked into global scope." `require "kemal"` injects `get` and
-# `before_all` into the importing program. `using` moves that decision to
+# `before_all` into the importing program. `import iyi_web/dsl::{get}` moves that decision to
 # the consumer: the library exports names, the program says which ones it
 # wants unqualified.
 module iyi_web/dsl
 
-import std/file
-import std/kernel
-import iyi_web/body
-import iyi_web/context
-import iyi_web/router
-import iyi_web/handler
-import iyi_web/config
-import iyi_web/log
-import iyi_web/server
-import iyi_web/static
-import iyi_web/path
-import iyi_web/compress
-import iyi_web/event_stream
-import iyi_web/cli
+import std/file::{File}
+import std/kernel::{abort}
+import iyi_web/body::{IntoBody}
+import iyi_web/context::{Context}
+import iyi_web/router::{Router, RouteHandler}
+import iyi_web/handler::{Handler, chain}
+import iyi_web/config::*
+import iyi_web/log::{LogHandler}
+import iyi_web/server::{Server}
+import iyi_web/static::{StaticHandler}
+import iyi_web/path::{PathHandler}
+import iyi_web/compress::{CompressHandler}
+import iyi_web/event_stream::{EventStream}
+import iyi_web/cli::{CLIParser, cli_parser}
 import iyi_web/templates
 
-using std/file::{File}
-using std/kernel::{abort}
-using iyi_web/body::{IntoBody}
-using iyi_web/context::{Context}
-using iyi_web/router::{Router, RouteHandler}
-using iyi_web/handler::{Handler, chain}
-using iyi_web/config
-using iyi_web/log::{LogHandler}
-using iyi_web/server::{Server}
-using iyi_web/static::{StaticHandler}
-using iyi_web/path::{PathHandler}
-using iyi_web/compress::{CompressHandler}
-using iyi_web/event_stream::{EventStream}
-using iyi_web/cli::{CLIParser, cli_parser}
-
-# Templates from `iyi_web/templates`, so `using iyi_web/dsl` is enough. A
+# Templates from `iyi_web/templates`, so `import iyi_web/dsl::*` is enough. A
 # template path is relative to the file that calls `render`.
 pub macro render(filename)
   ::IyiWeb::Templates.render({{ filename }})
