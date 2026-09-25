@@ -1,0 +1,71 @@
+# Streaming: a response sent in pieces with `flush`, and server-sent events
+# with `sse`. Run from the repository root with
+# `iyi run examples/streaming_and_sse.iyi` and open http://localhost:3000.
+#
+#   curl -N localhost:3000/export.csv
+#   curl -N localhost:3000/countdown
+#   curl -N -H 'Last-Event-ID: 7' localhost:3000/ticks
+module examples/streaming_and_sse
+
+import std/time::{Span}
+import iyi_web/dsl::*
+
+PAGE = <<-HTML
+  <ul id="ticks"></ul>
+  <script>
+    const ticks = new EventSource("/ticks");
+    ticks.addEventListener("tick", (event) => {
+      const item = document.createElement("li");
+      item.textContent = "tick " + event.lastEventId + ": " + event.data;
+      document.getElementById("ticks").append(item);
+    });
+  </script>
+  HTML
+
+get "/" do |env|
+  PAGE
+end
+
+# Headers go out with the first `flush`, so set them before it; the body
+# then goes out chunked, and later changes to headers are not sent.
+get "/export.csv" do |env|
+  env.response.content_type = "text/csv; charset=utf-8"
+  env.response.headers["Content-Disposition"] = "attachment; filename=\"export.csv\""
+  env.response.print("id,total\n")
+  env.response.flush
+  (1..5).each { |id| env.response.print(id.to_s + "," + (id * 10).to_s + "\n") }
+  # What is printed after the last flush is sent when the route returns.
+  nil
+end
+
+# Each flush reaches the client straight away; `sleep` parks this fiber
+# only, so other connections are served meanwhile.
+get "/countdown" do |env|
+  env.response.content_type = "text/plain; charset=utf-8"
+  [3, 2, 1].each do |n|
+    env.response.print(n.to_s + "...\n")
+    env.response.flush
+    sleep(500)
+  end
+  "Lift-off!\n"
+end
+
+# `sse` is a GET route answering `text/event-stream`; each `send` is one
+# event, flushed as it is sent, and the stream ends when the block returns.
+# A reconnecting browser sends the id of the last event it saw, so the
+# stream can carry on from there; `retry:` sets its reconnect delay. When a
+# client leaves mid-stream the next write ends this route, with one panic
+# line on standard error; other connections carry on.
+sse "/ticks" do |stream, env|
+  first = (env.request.headers["Last-Event-ID"]? || "0").to_i? || 0
+  stream.send("connected", retry: Span.milliseconds(2000))
+  ((first + 1)..(first + 5)).each do |tick|
+    # Multi-line data goes out as one `data:` line per line.
+    stream.send("line one\nline two", event: "tick", id: tick)
+    # A comment line keeps idle proxies from closing the connection.
+    stream.comment("keep-alive") if tick.even?
+    sleep(300)
+  end
+end
+
+run

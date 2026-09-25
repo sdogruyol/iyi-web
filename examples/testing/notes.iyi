@@ -1,0 +1,38 @@
+# The application under test, as a module: a function that builds its
+# router. The program (examples/testing.iyi) mounts it and serves it; the
+# test (examples/testing_test.iyi) sends it requests in-process.
+module examples/testing/notes
+
+import iyi_web/router::{Router}
+
+# Every call builds a new router with its own empty list of notes, so each
+# test starts from a clean application.
+pub def notes_routes : Router
+  notes = [] of String
+  router = Router.new
+
+  router.get "/notes" do |env|
+    env.json(notes)
+  end
+
+  router.get "/notes/:index" do |env|
+    index = env.params.url["index"].to_i? || -1
+    if index >= 0 && index < notes.size
+      env.text(notes[index])
+    else
+      env.halt(404, "No such note")
+    end
+  end
+
+  router.post "/notes" do |env|
+    text = (env.params.body["text"]? || "").strip
+    if text.empty?
+      env.halt(422, "A note needs text")
+    else
+      notes << text
+      env.status(201).text("Note " + (notes.size - 1).to_s)
+    end
+  end
+
+  router
+end

@@ -1,0 +1,84 @@
+# Cookies, redirects and the per-request store: a sign-in that sets a
+# session cookie, a filter that loads the user into the context, and routes
+# that read it back. Run from the repository root with
+# `iyi run examples/cookies_and_context.iyi`.
+#
+#   curl -i -c jar -d 'name=Ada' localhost:3000/sign-in
+#   curl -b jar -c jar localhost:3000/account
+#   curl -i -b jar -c jar -X POST localhost:3000/sign-out
+module examples/cookies_and_context
+
+import std/base64::{Base64}
+import std/file::{File}
+import iyi_web/dsl::*
+
+# Session token => user name. The cookie carries only an unguessable
+# token, read from the operating system's random source.
+SESSIONS = {} of String => String
+
+def new_token : String
+  random = File.open("/dev/urandom")
+  bytes = random.read_bytes(24)
+  random.close
+  Base64.urlsafe_encode(bytes)
+end
+
+# Filters, handlers and routes share values through `env.set` and
+# `env.get?`; a value keeps its type (String, Int32, Int64, Float64, Bool or
+# nil). Cookies arrive decoded.
+before_all do |env|
+  if token = env.cookies["session"]?
+    env.set("user", SESSIONS[token]?)
+  end
+  visits = (env.cookies["visits"]? || "0").to_i? || 0
+  env.set("visits", visits + 1)
+end
+
+get "/" do |env|
+  visits = env.get("visits")
+  # `get` answers the union of storable types; narrow it to use it as one.
+  count = visits.is_a?(Int32) ? visits : 1
+  env.set_cookie("visits", count.to_s, max_age: 365 * 86400, same_site: "Lax")
+  "Visit number " + count.to_s
+end
+
+# 303 See Other: the browser follows a form POST with a GET.
+post "/sign-in" do |env|
+  name = env.params.body["name"]? || ""
+  if name.empty?
+    env.halt(422, "A name is required")
+  else
+    token = new_token
+    SESSIONS[token] = name
+    # `http_only` keeps scripts from reading it; add `secure: true` behind HTTPS.
+    env.set_cookie("session", token, http_only: true, same_site: "Lax", max_age: 86400)
+    env.redirect("/account", 303)
+  end
+end
+
+get "/account" do |env|
+  user = env.get?("user")
+  if user.is_a?(String)
+    "Signed in as " + user
+  else
+    # A redirect skips the rest of the chain; the route's value is dropped.
+    env.redirect("/")
+    ""
+  end
+end
+
+post "/sign-out" do |env|
+  if token = env.cookies["session"]?
+    SESSIONS.delete(token)
+  end
+  # Deleting needs the same `path` and `domain` the cookie was set with.
+  env.delete_cookie("session")
+  env.redirect("/", 303)
+end
+
+# An old address, moved for good.
+get "/profile" do |env|
+  env.redirect("/account", 301)
+end
+
+run

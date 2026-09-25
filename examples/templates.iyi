@@ -1,0 +1,55 @@
+# Templates: a view rendered inside a layout, `content_for` blocks the layout
+# prints, and a partial rendered from a view. The views are in
+# examples/views/. Run from the repository root with
+# `iyi run examples/templates.iyi` and open http://localhost:3000.
+#
+#   curl localhost:3000/
+#   curl localhost:3000/books/2
+module examples/templates
+
+import std/html::{HTML}
+import iyi_web/dsl::*
+
+struct Book
+  getter id : Int32
+  getter title : String
+  getter author : String
+  getter year : Int32
+
+  def initialize(@id : Int32, @title : String, @author : String, @year : Int32)
+  end
+end
+
+# Constants are defined before the blocks that read them.
+BOOKS = [
+  Book.new(1, "The Left Hand of Darkness", "Ursula K. Le Guin", 1969),
+  Book.new(2, "Kindred", "Octavia E. Butler", 1979),
+  Book.new(3, "Snow & Silence", "Unknown <anonymous>", 2001),
+]
+
+# Templates are compiled into the program and see the locals where `render`
+# is written: `books` here, `book` below. Paths are relative to this file.
+get "/" do |env|
+  books = BOOKS
+  render "views/books.eiy", "views/layout.eiy"
+end
+
+get "/books/:id" do |env|
+  id = env.params.url["id"].to_i? || 0
+  if book = BOOKS.find { |candidate| candidate.id == id }
+    render "views/book.eiy", "views/layout.eiy"
+  else
+    # An error status hands the response to the `error 404` page below.
+    env.response.status_code = 404
+    ""
+  end
+end
+
+# Error pages can render templates too. Output is not escaped for you, so
+# every template escapes what came from outside with `HTML.escape`.
+error 404 do |env|
+  path = env.request.path
+  render "views/not_found.eiy", "views/layout.eiy"
+end
+
+run

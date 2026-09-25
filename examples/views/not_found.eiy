@@ -1,0 +1,3 @@
+<% content_for "title" do %>Not found<% end -%>
+<h1>Nothing at <%= HTML.escape(path) %></h1>
+<p><a href="/">All books</a></p>

@@ -1,0 +1,1 @@
+<li><a href="/books/<%= book.id %>"><%= HTML.escape(book.title) %></a> by <%= HTML.escape(book.author) %></li>

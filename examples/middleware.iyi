@@ -1,0 +1,69 @@
+# Middleware: a handler of our own limited with `only` and `exclude`, CORS
+# for one path prefix, gzip for every response, and static files from
+# examples/public/. Run from the repository root, where the public folder
+# path below resolves, with `iyi run examples/middleware.iyi`.
+#
+#   curl localhost:3000/
+#   curl -H 'Accept-Encoding: gzip' -o /dev/null -D - localhost:3000/site.css
+#   curl -H 'X-Api-Key: secret' localhost:3000/api/report
+#   curl -i -X OPTIONS -H 'Origin: https://app.example.com' -H 'Access-Control-Request-Method: POST' localhost:3000/api/report
+module examples/middleware
+
+import iyi_web/dsl::*
+import iyi_web/handler::{Handler}
+import iyi_web/context::{Context}
+import iyi_web/cors::{CORSHandler}
+
+# A handler sees every request that reaches its place in the chain, and
+# passes it on with `call_next`; not calling it ends the chain. `only` and
+# `exclude` record the paths and methods it is for, in the filter syntax.
+class ApiKey < Handler
+  @key : String
+
+  def initialize(@key : String)
+    super()
+    only ["/api/*"], "*"
+    exclude ["/api/health"], "*"
+  end
+
+  pub def call(ctx : Context) : Nil
+    return call_next(ctx) unless only_match?(ctx)
+    return call_next(ctx) if exclude_match?(ctx)
+    if ctx.request.headers["X-Api-Key"]? == @key
+      # Later handlers and the route read what a handler stored.
+      ctx.set("client", "reporting")
+      call_next(ctx)
+    else
+      ctx.halt(401, "Unauthorized")
+    end
+  end
+end
+
+# Static files are served before `use` middleware and routes. The folder is
+# relative to the working directory, not to this file.
+public_folder "examples/public"
+
+static_headers do |env, path, info|
+  env.response.headers["Cache-Control"] = "public, max-age=3600"
+end
+
+# `use` handlers run in the order they are added. CORS goes first so a
+# preflight, which carries no API key, is answered before `ApiKey` runs.
+use "/api", CORSHandler.new(origin: "https://app.example.com")
+use ApiKey.new(Program.env("API_KEY") || "secret")
+
+# Compresses textual responses of 860 bytes or more for clients that send
+# `Accept-Encoding: gzip` or `deflate`.
+gzip true
+
+get "/api/health" do |env|
+  "ok"
+end
+
+get "/api/report" do |env|
+  client = env.get("client").to_s
+  lines = (1..30).map { |day| "2026-09-" + day.to_s + ": " + (day * 17).to_s + " orders for " + client }
+  env.text(lines.join("\n") + "\n")
+end
+
+run

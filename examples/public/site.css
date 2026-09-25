@@ -1,0 +1,49 @@
+/* Large enough (860 bytes or more) for the static handler to send it
+   gzip-compressed to a client that accepts it. */
+:root {
+  --text: #1f2328;
+  --muted: #59636e;
+  --accent: #0969da;
+  --background: #ffffff;
+  --border: #d1d9e0;
+}
+
+html {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--text);
+  background: var(--background);
+}
+
+body {
+  max-width: 40rem;
+  margin: 3rem auto;
+  padding: 0 1rem;
+  line-height: 1.6;
+}
+
+h1 {
+  font-size: 1.75rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem;
+}
+
+p {
+  color: var(--muted);
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  padding: 0.1em 0.3em;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}

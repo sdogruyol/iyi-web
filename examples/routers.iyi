@@ -1,0 +1,87 @@
+# Routers: groups of routes with their own filters, mounted under a prefix,
+# nested with `namespace`, and the application's error pages. Run from the
+# repository root with `iyi run examples/routers.iyi`.
+#
+#   curl localhost:3000/api/v1/status
+#   curl -H 'Authorization: Bearer secret' localhost:3000/admin/reports/2026/09
+#   curl -i localhost:3000/admin
+#   curl -i localhost:3000/boom
+module examples/routers
+
+import std/html::{HTML}
+import iyi_web/dsl::*
+import iyi_web/router::{Router}
+
+# A router built by a function, the shape a larger application gives each
+# module of routes. It needs no DSL, only `Router`.
+def admin_routes : Router
+  admin = Router.new
+
+  # Filter paths are relative to where the router is mounted: the default
+  # `*` becomes `/admin/*` below, so this guards the admin pages only.
+  # Setting an error status, rather than halting, lets the `error 401` page
+  # answer instead of the route.
+  admin.before do |env|
+    unless env.request.headers["Authorization"]? == "Bearer secret"
+      env.response.status_code = 401
+    end
+  end
+
+  admin.get "/" do |env|
+    "Dashboard"
+  end
+
+  # `namespace` hands the nested router to its block.
+  admin.namespace "/reports" do |reports|
+    reports.get "/:year/:month" do |env|
+      "Report for " + env.params.url["year"] + "-" + env.params.url["month"]
+    end
+  end
+
+  # Error pages are the application's, wherever they are declared; a
+  # mounted router's page replaces the program's for the same code.
+  admin.error 401 do |env|
+    env.response.headers["WWW-Authenticate"] = "Bearer"
+    "<h1>Sign in to see the admin pages</h1>"
+  end
+
+  admin
+end
+
+api = Router.new
+
+# After filters run once the route has, for routes this router owns.
+api.after do |env|
+  env.response.headers["Cache-Control"] = "no-store"
+end
+
+api.namespace "/v1" do |v1|
+  v1.get "/status" do |env|
+    env.json({"status" => "ok", "version" => "v1"})
+  end
+end
+
+mount "/admin", admin_routes
+mount "/api", api
+
+# A program-level `before_all` runs for every request, even one no route
+# matches.
+before_all do |env|
+  env.response.headers["X-Content-Type-Options"] = "nosniff"
+end
+
+error 404 do |env|
+  "<h1>No page at " + HTML.escape(env.request.path) + "</h1>"
+end
+
+# A route that panics gets `500`, this page and a log line; the server keeps
+# serving other connections.
+error 500 do |env|
+  "<h1>Something went wrong</h1>"
+end
+
+get "/boom" do |env|
+  raise "the database is on fire"
+end
+
+run

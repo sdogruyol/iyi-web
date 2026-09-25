@@ -1,0 +1,72 @@
+# HTML forms: url-encoded fields, multipart file uploads with limits, and a
+# form that deletes through `_method`. Run from the repository root with
+# `iyi run examples/forms_and_uploads.iyi` and open http://localhost:3000.
+#
+#   curl -d 'email=ada@example.com' localhost:3000/subscribe
+#   curl -F 'title=Holiday' -F 'photos[]=@README.md' -F 'photos[]=@LICENSE' localhost:3000/albums
+#   curl -d '_method=DELETE' localhost:3000/albums/7
+module examples/forms_and_uploads
+
+import std/html::{HTML}
+import iyi_web/dsl::*
+import iyi_web/config::*
+import iyi_web/multipart::{FileUpload}
+import iyi_web/override::{OverrideMethodHandler}
+
+# Limits are checked while the body is read, before any route runs. Past
+# them the client gets `413 Content Too Large`.
+config.max_request_body_size = 2 * 1024 * 1024
+config.max_file_uploads = 3
+config.max_multipart_form_field_size = 1024
+
+# HTML forms only send GET and POST; this turns a POST carrying
+# `_method=DELETE` (or PUT, PATCH) into that method before routing.
+use OverrideMethodHandler.new
+
+FORMS = <<-HTML
+  <form method="post" action="/subscribe">
+    <input name="email" type="email"> <button>Subscribe</button>
+  </form>
+  <form method="post" action="/albums" enctype="multipart/form-data">
+    <input name="title"> <input name="photos[]" type="file" multiple> <button>Upload</button>
+  </form>
+  <form method="post" action="/albums/7">
+    <input type="hidden" name="_method" value="DELETE"> <button>Delete album 7</button>
+  </form>
+  HTML
+
+get "/" do |env|
+  FORMS
+end
+
+# Url-encoded and multipart text fields both land in `env.params.body`.
+post "/subscribe" do |env|
+  email = env.params.body["email"]? || ""
+  if email.includes?("@")
+    env.text("Subscribed " + email)
+  else
+    env.halt(422, "An email address is required")
+  end
+end
+
+# Each file is already on disk in a private temporary directory, and is
+# deleted once the response is sent: copy it elsewhere to keep it. Names
+# ending in `[]` keep every file sent under them, in `all_files`.
+post "/albums" do |env|
+  title = env.params.body["title"]? || "Untitled"
+  photos = env.params.all_files["photos[]"]? || [] of FileUpload
+  lines = ["<h1>" + HTML.escape(title) + "</h1>", "<ul>"]
+  photos.each do |photo|
+    # The filename is the client's: escape it before printing, and never
+    # join it to a directory path as is.
+    lines << "<li>" + HTML.escape(photo.filename) + " (" + photo.content_type + ", " + photo.size.to_s + " bytes)</li>"
+  end
+  lines << "</ul>"
+  lines.join("\n")
+end
+
+delete "/albums/:id" do |env|
+  env.text("Deleted album " + env.params.url["id"])
+end
+
+run

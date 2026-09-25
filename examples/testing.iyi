@@ -1,0 +1,16 @@
+# Testing an application without a socket. The routes live in
+# examples/testing/notes.iyi so both this program and
+# examples/testing_test.iyi can load them. Run the program from the
+# repository root with `iyi run examples/testing.iyi`, and its test with
+# `iyi test examples`.
+#
+#   curl -d 'text=Buy milk' localhost:3000/notes
+#   curl localhost:3000/notes
+module examples/testing
+
+import iyi_web/dsl::*
+import examples/testing/notes::*
+
+mount notes_routes
+
+run

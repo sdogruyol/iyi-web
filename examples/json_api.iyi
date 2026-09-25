@@ -1,0 +1,117 @@
+# A JSON API over an in-memory store: list, show, create, update and delete
+# todos. Run from the repository root with `iyi run examples/json_api.iyi`.
+#
+#   curl localhost:3000/todos
+#   curl -X POST localhost:3000/todos -H 'Content-Type: application/json' -d '{"title":"Write docs"}'
+#   curl -X PATCH localhost:3000/todos/1 -H 'Content-Type: application/json' -d '{"done":true}'
+#   curl -X DELETE localhost:3000/todos/1
+module examples/json_api
+
+import std/json::{ToJSON, Builder}
+import iyi_web/dsl::*
+import iyi_web/context::{Context}
+
+class Todo
+  getter id : Int32
+  property title : String
+  property done : Bool
+
+  def initialize(@id : Int32, @title : String, @done : Bool = false)
+  end
+end
+
+# Implementing `ToJSON` is what lets `env.json` serialise a `Todo`, alone or
+# inside an `Array`.
+impl ToJSON for Todo
+  def to_json(json : Builder) : Nil
+    json.object do
+      json.field("id", @id)
+      json.field("title", @title)
+      json.field("done", @done)
+    end
+  end
+end
+
+# Kept in memory for as long as the program runs. A constant cannot be
+# reassigned, so the last id given out lives in an object.
+TODOS = {} of Int32 => Todo
+
+class Ids
+  @last = 0
+
+  def next : Int32
+    @last += 1
+  end
+end
+
+IDS = Ids.new
+
+# The todo named by `:id`, or a `404` that ends the request. A segment that
+# is not a number names no todo either.
+def find_todo(env : Context) : Todo?
+  id = env.params.url["id"].to_i?
+  todo = id ? TODOS[id]? : nil
+  env.halt(404, %({"error":"not found"})) unless todo
+  todo
+end
+
+# `env.params.json` holds the members of a JSON object body, as `JSON::Any`.
+def json_string(env : Context, key : String) : String?
+  value = env.params.json[key]?
+  value ? value.as_s? : nil
+end
+
+# `halt` sends its body as is; give error bodies the JSON content type too.
+before_all "/todos/*" do |env|
+  env.response.content_type = "application/json; charset=utf-8"
+end
+
+# A body declared as JSON that does not parse gets `400` before the route
+# runs; this page replaces the default text. It returns the body rather than
+# calling `env.json`: iyi-web 0.1.1 drops a body an error page writes itself.
+error 400 do |env|
+  %({"error":"invalid JSON"})
+end
+
+get "/todos" do |env|
+  env.json(TODOS.values)
+end
+
+get "/todos/:id" do |env|
+  if todo = find_todo(env)
+    env.json(todo)
+  end
+end
+
+post "/todos" do |env|
+  title = json_string(env, "title")
+  if title.nil? || title.empty?
+    env.halt(422, %({"error":"title is required"}))
+  else
+    id = IDS.next
+    TODOS[id] = Todo.new(id, title)
+    env.status(201).json(TODOS[id])
+  end
+end
+
+patch "/todos/:id" do |env|
+  if todo = find_todo(env)
+    if title = json_string(env, "title")
+      todo.title = title
+    end
+    if done = env.params.json["done"]?
+      todo.done = done.as_bool? == true
+    end
+    env.json(todo)
+  end
+end
+
+delete "/todos/:id" do |env|
+  if todo = find_todo(env)
+    TODOS.delete(todo.id)
+    env.response.status_code = 204
+  end
+  nil
+end
+
+run

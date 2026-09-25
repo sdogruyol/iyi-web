@@ -851,6 +851,33 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/log` | `LogHandler`, `Logger`, `StdoutLogger` |
 | `web/iyi_web/harness` | `http_request`, `form_request`, `dispatch`, `routes` |
 
+## Examples
+
+`examples/` holds small programs, each on one topic. They import iyi-web by
+its path inside this repository, `iyi_web/dsl` where an application writes
+`web/iyi_web/dsl`, so run them from the repository root; arguments for the
+program go after `--`:
+
+```sh
+iyi run examples/json_api.iyi
+iyi run examples/json_api.iyi -- -p 8080
+```
+
+| Example | Shows |
+|---|---|
+| `hello.iyi` | The smallest application |
+| `json_api.iyi` | CRUD over an in-memory store with `env.json`, `env.params.json`, status codes and `404` via `halt` |
+| `forms_and_uploads.iyi` | Form fields, multipart uploads with limits, and `_method` override |
+| `templates.iyi` | Views in `examples/views/` with a layout, `content_for` and a partial |
+| `routers.iyi` | `Router`, `mount`, `namespace`, router filters and error pages |
+| `middleware.iyi` | A custom `Handler` with `only` and `exclude`, CORS, gzip and static files from `examples/public/` |
+| `streaming_and_sse.iyi` | `flush`, chunked responses and server-sent events |
+| `cookies_and_context.iyi` | Cookies, redirects and `env.set` / `env.get` |
+| `testing.iyi` | Routes in their own module, tested in-process by `testing_test.iyi` |
+
+Each file's opening comment lists `curl` commands to try. `iyi test examples`
+runs the example test.
+
 ## Development
 
 ```sh

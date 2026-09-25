@@ -1,0 +1,44 @@
+# A test is a `*_test.iyi` program that exits non-zero on failure;
+# `iyi test examples` runs every one under examples/. The harness sends
+# requests straight to a handler, so no port is opened.
+module examples/testing_test
+
+import iyi_web/router::{RouteHandler}
+import iyi_web/harness::*
+import examples/testing/notes::*
+
+# A fresh application for each check keeps them independent.
+def app : RouteHandler
+  RouteHandler.new(notes_routes)
+end
+
+# An empty list is still a JSON array.
+response = dispatch(app, "GET", "/notes").response
+assert response.status_code == 200
+assert response.content_type == "application/json; charset=utf-8"
+assert response.body == "[]"
+
+# `form_request` builds a url-encoded POST; the handler parses it as the
+# server would.
+handler = app
+created = dispatch(handler, form_request("POST", "/notes", "text=Buy+milk")).response
+assert created.status_code == 201
+assert created.body == "Note 0"
+assert dispatch(handler, "GET", "/notes/0").response.body == "Buy milk"
+assert dispatch(handler, "GET", "/notes").response.body == %(["Buy milk"])
+
+# Blank text is refused, and nothing is stored.
+refused = dispatch(handler, form_request("POST", "/notes", "text=++")).response
+assert refused.status_code == 422
+assert dispatch(handler, "GET", "/notes").response.body == %(["Buy milk"])
+
+# Past the end, a negative index and a word all answer 404.
+["/notes/1", "/notes/-1", "/notes/first"].each do |path|
+  assert dispatch(handler, "GET", path).response.status_code == 404
+end
+
+# The router answers 405 with an Allow header for a known path and an
+# unknown method.
+wrong = dispatch(handler, "DELETE", "/notes").response
+assert wrong.status_code == 405
+assert wrong.headers["Allow"]? == "GET, POST, HEAD"

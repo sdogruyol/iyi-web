@@ -1,0 +1,7 @@
+<% content_for "title" do %>All books<% end -%>
+<h1>Books</h1>
+<ul>
+<% books.each do |book| -%>
+<%= render "_book.eiy" -%>
+<% end -%>
+</ul>
