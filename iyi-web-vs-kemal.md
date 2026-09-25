@@ -110,9 +110,14 @@ Not in Kemal's core, but seen in its examples:
 
 ## 5. Status
 
-iyi-web `main`, iyi 0.14.0. `iyi test iyi_web` passes in all 27 test files.
-The README examples were built into a single program, run, and exercised with
-curl.
+iyi-web `master`, iyi 0.15.0 (the released toolchain). `iyi test iyi_web`
+passes in all 31 test files and `iyi test examples` in its one. Every example
+was built, run and exercised with curl; WebSockets with Node's client.
+
+iyi 0.14.1 lifted most of what section 4 listed as needed in iyi first:
+`std/signal`, read and write timeouts, `SocketError` values instead of
+panics, one reader and one writer per descriptor, IPv6, unix sockets and
+`IO#seek`.
 
 ### Fixed defects
 
@@ -122,8 +127,8 @@ All six cases from section 1:
   that panics gets the `error 500` page, or the built-in page when there is
   none; the panic message is shown only in development (`show_exceptions`).
   Only that connection closes; the others are not affected.
-- **Disconnecting client:** Only that request ends. iyi's socket layer still
-  writes a panic line to stderr (see Remaining).
+- **Disconnecting client:** Only that request ends. The runtime still writes
+  a line to stderr for the caught panic (see Remaining).
 - **Header injection:** A control character in a header name or value is
   refused with a panic. `send_file` encodes the filename per RFC 6266/8187.
 - **Parameter names:** Each route reads its own names. `/users/:id` and
@@ -131,26 +136,42 @@ All six cases from section 1:
 - **The same route twice:** The program stops with an error at startup.
 - **Trailing `/`:** A request for `/about/` goes to the `/about` route.
 
+Found later and fixed:
+
+- **Connections accepted together:** the accept loop's block captured one
+  variable that every accept overwrote, so connections accepted at the same
+  moment were served by one task; 40 parallel clients got 20 answers.
+- **Request bodies:** the buffer grew by concatenation and was parsed again
+  after every read, so a body cost the square of its size (64 MB: 19.3 s,
+  now 0.24 s). `Expect: 100-continue` is answered.
+- **Error pages written with a helper** (`env.json` in an `error` block) were
+  sent empty.
+
 ### Closed gaps
 
 | Area | Done |
 |---|---|
-| Error pages | `error 500`, `show_exceptions`, 413. An error status set by a before filter also gets its error page |
+| Error pages | `error 500`, `show_exceptions`, 413. An error status set by a before filter also gets its error page; a page may be written with `env.json` and the other helpers |
 | JSON parameters | `env.params.json`, `_json`, 400 for malformed JSON |
 | File uploads | `params.files`, `all_files`, `FileUpload`, both limits and 413. Each file is written into a directory of its own, with an unguessable name and mode 0700, and deleted after the response |
-| Parameter details | `raw_body`. JSON and multipart bodies are parsed on first use |
+| Parameter details | `raw_body`, `query_all` / `body_all` (Kemal's `fetch_all`). JSON and multipart bodies are parsed on first use |
 | Incremental responses | `flush`, `headers_sent?`, a chunked body on HTTP/1.1. A panic discards the unsent body |
 | SSE | `sse`, `Router#sse`, `EventStream` (`send`, `comment`, `close`); a HEAD short-circuit; line breaks rejected in `event`/`id` |
-| Static files | gzip and deflate (`Vary`), 304 via ETag/Last-Modified, Range (206, 416, `multipart/byteranges`), `dir_index`, `dir_listing`, a trailing-`/` redirect for directories, `static_headers`, `nosniff`, `Accept-Ranges` |
-| `send_file` | Range, `disposition:`, filename encoding |
+| WebSocket | `ws`, `Router#ws`; handshake with 101, 400, 403 (`websocket_allowed_origins`), 405 and 426; `on_message`, `on_binary`, `on_ping`, `on_pong`, `on_close`, `send`, `send_binary`, `ping`, `pong`, `close`; sends from any fiber |
+| Static files | gzip and deflate (`Vary`, up to 1 MiB), 304 via ETag/Last-Modified, Range (206, 416, `multipart/byteranges`), `dir_index`, `dir_listing`, a trailing-`/` redirect for directories, `static_headers`, `nosniff`, `Accept-Ranges`; files streamed from disk, HEAD without reading them |
+| `send_file` | Range, `disposition:`, filename encoding, streamed from disk, HEAD without reading the file; `send_data` for bytes in memory |
 | Templates | `render` (with a layout), `content_for`, `yield_content`; nested `render` works |
 | Context | `set`/`get`/`get?`, `route_pattern`, `route_found?` |
 | Helpers | Everything in the row; `status` takes the code as an `Int32` rather than an `HTTP::Status` |
 | Middleware | `only`/`exclude`, `use(handler, position)`, `use(path, [handlers])`, `CompressHandler` |
 | Filters | Everything in the row |
 | Cookies | `domain`, `expires`, `delete_cookie`; values are encoded and decoded |
-| Command line | `-b`, `-p`, `-h`, `extra_options`. `-s` and `--ssl-*` stop the program with a message that TLS is not supported |
+| Logging | `Logger` / `StdoutLogger`, `logger`, `log "message"`, `logging false` |
+| Shutdown | INT and TERM drain: the listener closes, idle connections close, requests in flight finish within `shutdown_timeout` (30 s); a second signal cuts off at once; `shutdown_message` |
+| Command line | `-b` (IPv4 or IPv6), `-p`, `-h`, `extra_options`. `-s` and `--ssl-*` stop the program with a message that TLS is not supported |
+| Listening options | IPv6 and `unix_socket`; `read_timeout`, `write_timeout` and `idle_timeout` (not in Kemal) |
 | Installation | `iyi get github.com/sdogruyol/iyi-web` writes `require github.com/sdogruyol/iyi-web v0.1.1` to `iyi.mod`, and files write `import github.com/sdogruyol/iyi-web/iyi_web/dsl::*`; with `--as web` the line ends `as web` and files write `import web/iyi_web/dsl::*` (iyi 0.15.0 and later) |
+| Examples | Ten, from `hello` to a JSON API, uploads, templates, routers, middleware, SSE, a WebSocket chat room, cookies and in-process testing |
 
 ### Remaining
 
@@ -159,42 +180,53 @@ Possible within iyi-web:
 - The `error 404 do |env, ex|` form and `error` per exception class. The panic
   text can be read with `Panicked#text`; exception classes have no direct
   equivalent in iyi.
-- Several values for one key (`fetch_all`). The query and form tables keep the
-  last value.
-- A swappable logger. `LogHandler` writes to stdout in a fixed format.
-- `send_file`: gzip, sending data held in memory, answering HEAD without
-  reading the file.
+- `send_file` with gzip. Static files are compressed up to 1 MiB only, since
+  `std/compress` encodes a whole string at once.
+- Headers set after a streamed file response has started (an after filter,
+  `CompressHandler`) are not sent; Kemal behaves the same.
 - Static files: precompressed `.gz` files, the system MIME table.
 - `add_context_storage_type`. The types that can be stored are fixed
   (`StoreValue`).
-- Examples: there is only `examples/hello.iyi`.
+- WebSocket subprotocols and `permessage-deflate` (Kemal has neither).
+  WebSocket sessions are not closed with `1001` when the server drains; they
+  are cut off at `shutdown_timeout`.
+- A command-line flag for `unix_socket`.
+- A 64 MB request body peaks at several times its size in memory: the bytes
+  are copied into a string for `std/http`'s parser, which copies the body out
+  again.
 
 Needing changes in iyi first:
 
 | Missing in iyi | iyi-web feature waiting on it |
 |---|---|
-| Separate read and write waits on the same fd (`two fibers waiting on one fd`) | WebSocket (`ws`) |
-| Socket errors returned as values instead of panics (`panic: cannot write to socket`) | No panic on stderr when a client disconnects; noticing during a stream that the client has gone; closing WebSockets |
-| Signal trapping (SIGINT, SIGTERM) | Graceful shutdown, `shutdown_message`, finishing in-flight requests |
 | TLS | `-s`, `--ssl-key-file`, `--ssl-cert-file`, `bind_tls` |
-| SO_REUSEPORT, unix sockets, IPv6, and read and write timeouts in std/socket | `reuse_port`, listening on a unix socket, timeouts for slow clients |
-| `seek` in std/file | Sending large files and ranges without reading them into memory |
+| SO_REUSEPORT in std/socket | `reuse_port` |
+| A caught panic that the runtime does not print | No `iyi: panic:` line on stderr when a client disconnects mid-response, or a write times out |
+| A streaming `std/compress` | Compressing large static files and `send_file` |
 
-Problems found in iyi and worked around in iyi-web:
+Problems found in iyi and worked around in iyi-web. The first four are fixed
+in iyi 0.14.1 or 0.15.0:
 
-- `File.tempfile` derives a predictable name from the pid and a counter, then
-  checks whether the path exists before writing to it. A symlink planted there
-  beforehand in a shared temporary directory had an upload written wherever
-  the attacker chose (reproduced). iyi-web now creates a randomly named
-  directory with mode 0700 through `mkdir` for each upload.
-- `std/uri` `Params.parse` panics on a malformed `%`. iyi-web uses its own
-  decoder (`codec.iyi`).
-- `std/option_parser` panics on invalid input. iyi-web uses its own
-  `CLIParser`.
-- In a program that imports `std/file`, an unseeded `Random.new` does not
-  compile (`undefined method 'open' for Std::File:Module`). iyi-web supplies
-  the seed itself (`token.iyi`).
-- Compiler: a block that refers to a top-level constant defined further down
-  the file fails with `BUG: __iyi_once is not defined` (for example, an
-  `extra_options` block that uses an array defined below it). Moving the
-  constant above the block is enough.
+- `File.tempfile` derived a predictable name and wrote through a symlink
+  planted there (fixed in 0.14.1). iyi-web still spools each upload into a
+  randomly named directory with mode 0700.
+- `std/uri` `Params.parse` panicked on a malformed `%` (fixed in 0.14.1: it
+  is lenient now). iyi-web keeps its own decoder (`codec.iyi`).
+- In a program that imports `std/file`, an unseeded `Random.new` did not
+  compile (fixed). `token.iyi` now falls back to it where there is no
+  `/dev/urandom`.
+- A block referring to a top-level constant defined further down the file
+  failed with `BUG: __iyi_once is not defined` (fixed).
+- `std/option_parser` panics on invalid input unless `invalid_option` and
+  `missing_option` handlers are set. iyi-web uses its own `CLIParser`.
+- `File.exists?` answers false for a unix socket's file, because it opens the
+  path for reading; `File.info?` reports it.
+- A method a subclass inherits cannot call a top-level function of its
+  module by its short name ("not brought into scope"); the full name works.
+- An integer literal passed to an imported function taking `Int64` is not
+  autocast, and the error says the function is not in scope.
+- `JSON.to_json` refuses a hash whose values are a union, such as
+  `{"version" => 1, "healthy" => true}`.
+- A closure captures a variable rather than its value, and a `while` body is
+  not a scope, so a task spawned in a loop sees the loop's last value. This
+  is Crystal's rule too; it caused the accept-loop bug above.
