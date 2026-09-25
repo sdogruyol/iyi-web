@@ -34,3 +34,24 @@ jobs:
 
       - name: Test the examples
         run: iyi test examples
+
+  # What the next tag has to be called, from what the exported surface did
+  # since the last one: an export gone is a new minor before v1 and a new
+  # major after, and a pull request that makes one says so here. On the
+  # latest iyi, since `iyi mod release` arrived in 0.15.1 - after the
+  # oldest release the tests pin.
+  surface:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The tags, which the surface is compared against.
+          fetch-depth: 0
+
+      - name: Install iyi
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/iyilang/iyi/master/install.sh | IYI_PREFIX="$HOME/.iyi" sh
+          echo "$HOME/.iyi/bin" >> "$GITHUB_PATH"
+
+      - name: What the next release has to be
+        run: iyi mod release
