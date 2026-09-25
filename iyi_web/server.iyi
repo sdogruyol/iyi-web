@@ -15,6 +15,22 @@
 # handler's panic, or a write to a client that has gone, would otherwise
 # close every other connection too. Reading a task's value is what
 # catches its panic; the request being handled then gets a 500.
+#
+# A stop is a drain. `close` and `shutdown` close the listener, close the
+# connections parked waiting for a request, and let each request in flight
+# finish, its connection closing after the response; `listen` returns when
+# the last connection has ended. What is still running at the deadline is
+# cut off: its task group is cancelled, so a sleep or a socket wait answers
+# `Cancelled`, and its socket is closed, so a write to it panics and a
+# handler still streaming stops. The drain is watched the way Kemal
+# watches it, every 10 ms, and only once the listener is closed.
+#
+# A slow client holds one task, and the timeouts bound for how long: a
+# request has `read_timeout` to arrive whole, a keep-alive connection
+# `idle_timeout` to start its next one, and a write `write_timeout` for
+# the client to take bytes. The socket's own bound is per wait, so the
+# read bound is set before every read from what is left of the request's
+# deadline; a client trickling a byte at a time still runs out.
 module iyi_web/server
 
 import std/socket::{IyiSocket, SocketError}
@@ -36,6 +52,12 @@ pub class Server
   @in_flight : Int32
   @host : String
   @port : Int32
+  @first_connection : Connection?
+  @draining : Bool
+  @deadline : Span
+  @cut : Bool
+  @listening : Bool
+  @stopped : Channel(Int32)
 
   # *error_pages* are the application's `error` handlers; the one for 500
   # renders the page a panicking request gets.
@@ -44,6 +66,12 @@ pub class Server
     @in_flight = 0
     @host = "127.0.0.1"
     @port = 0
+    @first_connection = nil
+    @draining = false
+    @deadline = Span.zero
+    @cut = false
+    @listening = false
+    @stopped = Channel(Int32).new
   end
 
   pub def bind(host : String, port : Int32) : Int32
@@ -54,9 +82,21 @@ pub class Server
     @port
   end
 
+  # Listens at *path*, a unix socket's file, which must not exist yet; the
+  # listener's close removes it.
+  pub def bind_unix(path : String) : Nil
+    @socket = IyiSocket.listen_unix(path)
+    @host = path
+    @port = 0
+  end
+
+  # Serves until `close` or `shutdown` has drained the connections.
   pub def listen : Nil
     listener = @socket
+    return if @draining
     raise "server is not bound" unless listener
+    @listening = true
+    defer stopped_listening
 
     group do |g|
       pause = 5
@@ -73,21 +113,36 @@ pub class Server
           pause = pause * 2 if pause < 1000
         in IyiSocket
           pause = 5
-          accepted = client
+          conn = Connection.new(client)
+          track(conn)
           g.spawn do
-            serve_isolated(accepted)
+            serve_isolated(conn)
             0
           end
         end
       end
+      # Closed by `close` or `shutdown`, or this task was cancelled, which
+      # is a stop that does not wait.
+      begin_drain(0) unless @draining
+      wait_for_connections
       0
     end
   end
 
+  # Stops taking connections and drains them, giving the requests in flight
+  # `shutdown_timeout` seconds; answers at once, and `listen` returns when
+  # the drain is over.
   pub def close : Nil
-    listener = @socket
-    @socket = nil
-    listener.close if listener
+    begin_drain(@config.shutdown_timeout)
+  end
+
+  # Like `close`, with *timeout* seconds for the requests in flight, and
+  # waits for `listen` to return. A deadline already running is only ever
+  # brought forward: `shutdown(0)` during a drain cuts off what is left
+  # now.
+  pub def shutdown(timeout : Int32 = @config.shutdown_timeout) : Nil
+    begin_drain(timeout)
+    @stopped.receive if @listening
   end
 
   pub def in_flight : Int32
@@ -98,10 +153,15 @@ pub class Server
     @port
   end
 
-  private def serve_isolated(client : IyiSocket) : Nil
+  private def serve_isolated(conn : Connection) : Nil
+    client = conn.socket
+    # The connection's write bound, set once. Its read bound is set before
+    # every read, in `read_request`.
+    client.write_timeout_ms = milliseconds(@config.write_timeout)
     exchange = Exchange.new
-    failure = isolated { serve_connection(client, exchange) }
-    if failure && !exchange.writing
+    failure = isolated(conn) { serve_connection(conn, exchange) }
+    # A connection cut off at shutdown has nobody left to answer.
+    if failure && !exchange.writing && !client.closed?
       if ctx = exchange.context
         # A response that has started streaming cannot become a 500: its
         # status line is already on the wire. The connection just ends.
@@ -110,13 +170,82 @@ pub class Server
         end
       end
     end
+    untrack(conn)
     client.close
   end
 
+  private def begin_drain(timeout : Int32) : Nil
+    deadline = Time.monotonic + Span.seconds(timeout < 0 ? 0_i64 : timeout.to_i64)
+    @deadline = deadline if !@draining || deadline < @deadline
+    @draining = true
+    if listener = @socket
+      @socket = nil
+      listener.close
+    end
+    # A task parked waiting for a request wakes to `Cancelled`, which ends
+    # its connection; one that has any of a request goes on to answer it.
+    conn = @first_connection
+    while conn
+      conn.socket.close if conn.idle
+      conn = conn.following
+    end
+    cut_off if timeout <= 0
+  end
+
+  private def wait_for_connections : Nil
+    while @first_connection && !@cut
+      cut_off if Time.monotonic >= @deadline || sleep(10).is_a?(Cancelled)
+    end
+  end
+
+  # The tasks cut off end on their own; `listen`'s group waits for them.
+  private def cut_off : Nil
+    @cut = true
+    conn = @first_connection
+    while conn
+      conn.cut
+      conn = conn.following
+    end
+  end
+
+  private def stopped_listening : Nil
+    @listening = false
+    @stopped.close
+  end
+
+  private def track(conn : Connection) : Nil
+    first = @first_connection
+    conn.following = first
+    first.previous = conn if first
+    @first_connection = conn
+  end
+
+  private def untrack(conn : Connection) : Nil
+    following = conn.following
+    previous = conn.previous
+    if previous
+      previous.following = following
+    else
+      @first_connection = following
+    end
+    following.previous = previous if following
+    conn.following = nil
+    conn.previous = nil
+  end
+
+  # A timeout setting in seconds as the socket takes it; nil and 0 are none.
+  private def milliseconds(seconds : Int32?) : Int32?
+    return nil unless seconds
+    return nil if seconds <= 0
+    seconds >= 2147483 ? 2147483647 : seconds * 1000
+  end
+
   # Runs *block* as its own task and answers its panic, if it had one. The
-  # group is this call's alone, so the failure goes no further.
-  private def isolated(&block : -> Nil) : Panicked?
+  # group is this call's alone, so the failure goes no further; *conn*
+  # keeps it, for a cut-off to cancel.
+  private def isolated(conn : Connection? = nil, &block : -> Nil) : Panicked?
     outcome = group do |g|
+      conn.group = g if conn
       task = g.spawn do
         block.call
         0
@@ -126,11 +255,12 @@ pub class Server
     outcome.is_a?(Panicked) ? outcome : nil
   end
 
-  private def serve_connection(client : IyiSocket, exchange : Exchange) : Nil
+  private def serve_connection(conn : Connection, exchange : Exchange) : Nil
+    client = conn.socket
     leftover = ""
     requests = 0
     loop do
-      parsed = read_request(client, leftover)
+      parsed = read_request(conn, leftover, requests == 0)
       case parsed
       in Closed
         return
@@ -139,6 +269,9 @@ pub class Server
         return
       in TooLarge
         write_error(client, 413, "Content Too Large")
+        return
+      in TimedOut
+        write_error(client, 408, "Request Timeout")
         return
       in Tuple(Request, String, Bool)
         leftover = it[1]
@@ -151,6 +284,7 @@ pub class Server
 
   private def wants_keepalive?(wire_close : Bool, already : Int32) : Bool
     return false unless @config.keepalive
+    return false if @draining
     return false if wire_close
     already + 1 < @config.max_keepalive_requests
   end
@@ -173,6 +307,9 @@ pub class Server
     if conn = ctx.response.headers["connection"]?
       keepalive = false if conn.downcase == "close"
     end
+    # Cut off at shutdown while the handler ran: nobody is left to answer.
+    return false if client.closed?
+    keepalive = false if @draining
     exchange.writing = true
     if ctx.response.headers_sent?
       ctx.response.finish
@@ -252,8 +389,18 @@ pub class Server
   # A body over `max_request_body_size` is refused as soon as its
   # `Content-Length` is read, before the body itself is buffered; a chunked
   # body is measured once it has arrived.
-  private def read_request(client : IyiSocket, leftover : String) : Tuple(Request, String, Bool) | ParseError | TooLarge | Closed
+  #
+  # A request has `read_timeout` to arrive whole, counted from its first
+  # byte - from the accept, for a connection's *first* request - and one
+  # cut short is `TimedOut`. A keep-alive connection waits `idle_timeout`
+  # for that first byte; a connection that sent nothing is just `Closed`.
+  # While the server drains, a keep-alive connection takes no further
+  # request, and a new one only the request it has already sent.
+  private def read_request(conn : Connection, leftover : String, first : Bool) : Tuple(Request, String, Bool) | ParseError | TooLarge | TimedOut | Closed
+    client = conn.socket
     buffer = leftover
+    limit = milliseconds(@config.read_timeout)
+    since = first ? conn.accepted : Time.monotonic
     loop do
       incoming = parse_incoming(buffer)
       if req = incoming.request
@@ -266,15 +413,43 @@ pub class Server
       end
       return TooLarge.new if declared_too_large?(buffer)
 
-      case chunk = client.read(65536)
-      in Cancelled, SocketError
+      return Closed.new if client.closed?
+      waiting = buffer.empty?
+      wait = limit
+      if waiting && !first
+        return Closed.new if @draining
+        wait = milliseconds(@config.idle_timeout)
+      elsif limit
+        left = limit.to_i64 - elapsed_ms(since)
+        if left <= 0
+          return Closed.new if waiting
+          return TimedOut.new
+        end
+        wait = left.to_i32
+      end
+      wait = 0 if waiting && @draining
+      client.read_timeout_ms = wait
+      conn.idle = waiting
+      chunk = client.read(65536)
+      conn.idle = false
+      case chunk
+      in Cancelled
+        return Closed.new
+      in SocketError
+        return TimedOut.new if chunk.timed_out? && !waiting
         return Closed.new
       in String
-        return Closed.new if chunk.empty? && buffer.empty?
+        return Closed.new if chunk.empty? && waiting
         return ParseError.new("connection closed mid-headers") if chunk.empty?
+        since = Time.monotonic if waiting && !first
         buffer = buffer + chunk
       end
     end
+  end
+
+  private def elapsed_ms(since : Span) : Int64
+    gone = Time.monotonic - since
+    gone.total_seconds_i64 * 1000_i64 + (gone.nanoseconds // 1000000).to_i64
   end
 
   private def declared_too_large?(buffer : String) : Bool
@@ -304,6 +479,9 @@ pub class Server
   end
 
   private def write_raw(client : IyiSocket, bytes : String) : Nil
+    # Closed under the task by a cut-off at shutdown: the panic is what
+    # stops a handler that is still streaming.
+    raise "the connection was cut off at shutdown" if client.closed?
     case wrote = client.write(bytes)
     in Cancelled
     in SocketError
@@ -319,6 +497,9 @@ end
 pub struct TooLarge
 end
 
+pub struct TimedOut
+end
+
 # What a connection's task was doing when it stopped: the request being
 # handled, until its response starts going out.
 class Exchange
@@ -330,5 +511,35 @@ class Exchange
     @context = nil
     @started = Time.monotonic
     @writing = false
+  end
+end
+
+# A connection `listen` took, as a drain sees it: its socket, when it was
+# taken, whether its task is parked waiting for a request's first byte,
+# and the group running that task. The server keeps them in a list of its
+# own, which a connection leaves in constant time.
+class Connection
+  getter socket : IyiSocket
+  getter accepted : Span
+  property idle : Bool
+  property group : IyiGroup?
+  property previous : Connection?
+  property following : Connection?
+
+  def initialize(@socket : IyiSocket)
+    @accepted = Time.monotonic
+    @idle = false
+    @group = nil
+    @previous = nil
+    @following = nil
+  end
+
+  # Cancels the task and closes the socket, which wakes a read or a write
+  # parked on it.
+  def cut : Nil
+    if running = @group
+      running.cancel_children
+    end
+    @socket.close
   end
 end

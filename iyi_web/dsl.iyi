@@ -9,6 +9,7 @@ module iyi_web/dsl
 
 import std/file::{File}
 import std/kernel::{abort}
+import std/signal::{Signal}
 import iyi_web/body::{IntoBody}
 import iyi_web/context::{Context}
 import iyi_web/router::{Router, RouteHandler}
@@ -210,6 +211,11 @@ end
 # Reads the command line (`-b HOST`, `-p PORT`, `-h` and any
 # `extra_options`), then serves. A *port* given here wins over `-p`;
 # `args: nil` skips the command line.
+#
+# Returns once the server has stopped - by `stop`, or by INT or TERM - and
+# the requests in flight then have finished, or `shutdown_timeout` seconds
+# have passed and the rest were cut off. A second signal during that wait
+# cuts them off at once.
 pub def run(port : Int32? = nil, args : Array(String)? = Program.args) : Nil
   if list = args
     read_arguments(list)
@@ -232,6 +238,8 @@ private def read_arguments(args : Array(String)) : Nil
   end
 end
 
+# Stops taking connections. The requests in flight are left to finish;
+# `run` waits for them before it returns.
 pub def stop : Nil
   current = HOLDER.server
   raise "#{config.app_name} is already stopped" unless current
@@ -265,14 +273,54 @@ private def start(port : Int32 | Nil) : Nil
   cfg.port = port if port
 
   server = Server.new(handler_chain, cfg, app.error_handlers)
-  bound = server.bind(cfg.host, cfg.port)
-  cfg.port = bound
+  address = ""
+  if path = cfg.unix_socket
+    server.bind_unix(path)
+    address = "unix://" + path
+  else
+    bound = server.bind(cfg.host, cfg.port)
+    cfg.port = bound
+    address = "http://" + display_host(cfg.host) + ":" + bound.to_s
+  end
   HOLDER.server = server
   cfg.running = true
 
   unless cfg.env == "test"
-    puts "[" + cfg.env + "] " + cfg.app_name + " is ready to lead at http://" + display_host(cfg.host) + ":" + bound.to_s
-    server.listen
+    puts "[" + cfg.env + "] " + cfg.app_name + " is ready to lead at " + address
+    STDOUT.flush
+    serve(server, cfg)
+  end
+end
+
+private def serve(server : Server, cfg : Config) : Nil
+  group do |g|
+    g.spawn do
+      stop_on_signals(server, cfg)
+      0
+    end
+    g.spawn do
+      server.listen
+      # Stopped some other way, or drained: nobody waits for a signal now.
+      g.cancel_children
+      0
+    end
+  end
+end
+
+# The first INT or TERM stops the server the way `stop` does; one that
+# arrives while it drains cuts off what is left.
+private def stop_on_signals(server : Server, cfg : Config) : Nil
+  while true
+    return if Signal.wait(Signal::INT, Signal::TERM).is_a?(Cancelled)
+    unless HOLDER.server
+      server.shutdown(0)
+      return
+    end
+    if cfg.shutdown_message
+      puts "[" + cfg.env + "] " + cfg.app_name + " is going to take a rest!"
+      STDOUT.flush
+    end
+    stop
   end
 end
 
@@ -287,6 +335,10 @@ private def insert_at(handlers : Array(Handler), at : Int32, handler : Handler) 
   placed
 end
 
+# 0.0.0.0 and `::` listen everywhere; the URL names this machine. An IPv6
+# address is bracketed, as a URL writes it.
 private def display_host(host : String) : String
-  host == "0.0.0.0" ? "localhost" : host
+  return "localhost" if host == "0.0.0.0"
+  return "[::1]" if host == "::" || host == "[::]"
+  host.includes?(":") && !host.starts_with?("[") ? "[" + host + "]" : host
 end

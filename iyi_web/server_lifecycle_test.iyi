@@ -1,0 +1,335 @@
+# A server's life at its edges, over real sockets: the drain a stop is,
+# the timeouts that bound a slow client, and the addresses beyond IPv4.
+# Every example serves on its own server, since a drain ends it, and on a
+# config of its own, so a timeout set for one example reaches no other.
+module iyi_web/server_lifecycle_test
+
+import std/file::{File}
+import std/socket::{IyiSocket, SocketError}
+import std/time::{Time, Span}
+import iyi_web/router::{Router, RouteHandler}
+import iyi_web/handler::{chain}
+import iyi_web/server::{Server}
+import iyi_web/config::{Config}
+import iyi_web/harness::*
+import iyi_web/spec::*
+
+router = Router.new
+router.get "/" do |env|
+  "home"
+end
+router.get "/slow" do |env|
+  sleep(300)
+  "slow done"
+end
+router.get "/stuck" do |env|
+  sleep(10000)
+  "late"
+end
+router.get "/big" do |env|
+  "x" * (32 * 1024 * 1024)
+end
+
+# The connection's bytes until the server closes it.
+def read_all(client : IyiSocket) : String
+  buffer = ""
+  loop do
+    case chunk = client.read(65536)
+    in String
+      break if chunk.empty?
+      buffer = buffer + chunk
+    in Cancelled, SocketError
+      break
+    end
+  end
+  buffer
+end
+
+# One response on a connection that stays open.
+def read_frame(client : IyiSocket) : String
+  buffer = ""
+  loop do
+    size = http_frame_size(buffer)
+    break if size && buffer.bytesize >= size
+    chunk = client.read(4096).or_panic
+    break if chunk.empty?
+    buffer = buffer + chunk
+  end
+  buffer
+end
+
+def quiet_config : Config
+  cfg = Config.new
+  cfg.logging = false
+  cfg
+end
+
+def since(started : Span) : Span
+  Time.monotonic - started
+end
+
+# Polls *check* for up to two seconds.
+def wait_for(&check : -> Bool) : Bool
+  tries = 0
+  while tries < 400
+    return true if check.call
+    sleep(5)
+    tries = tries + 1
+  end
+  false
+end
+
+# A fresh server on IPv4 loopback, served while *block* runs.
+def serving(router : Router, cfg : Config, &block : Server -> Nil) : Nil
+  server = Server.new(chain([RouteHandler.new(router)]), cfg)
+  server.bind("127.0.0.1", 0)
+  serve(server, &block)
+end
+
+# Serves *server* while *block* runs, then shuts it down; `listen` has
+# returned by the time this does.
+def serve(server : Server, &block : Server -> Nil) : Nil
+  group do |g|
+    g.spawn do
+      server.listen
+      0
+    end
+    g.spawn do
+      block.call(server)
+      server.shutdown(0)
+      0
+    end
+  end
+end
+
+def connect(server : Server) : IyiSocket
+  IyiSocket.connect("127.0.0.1", server.bound_port).or_panic
+end
+
+class Flag
+  property value : Bool
+
+  def initialize
+    @value = false
+  end
+end
+
+describe "Server shutdown" do
+  it "lets a request in flight finish, closes its connection after it and refuses new ones" do
+    serving(router, quiet_config) do |server|
+      client = connect(server)
+      client.write("GET /slow HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+      assert wait_for { server.in_flight == 1 }
+      refused = Flag.new
+      started = Time.monotonic
+      group do |g|
+        g.spawn do
+          server.shutdown(5)
+          0
+        end
+        g.spawn do
+          refused.value = IyiSocket.connect("127.0.0.1", server.bound_port).is_a?(SocketError)
+          0
+        end
+      end
+      took = since(started)
+      answer = read_all(client)
+      client.close
+      assert refused.value
+      assert status_line(answer) == "HTTP/1.1 200 OK"
+      assert http_header(answer, "Connection") == "close"
+      assert http_body(answer) == "slow done"
+      assert server.in_flight == 0
+      assert took < Span.seconds(2)
+    end
+  end
+
+  it "cuts off a request still running at the timeout" do
+    serving(router, quiet_config) do |server|
+      client = connect(server)
+      client.write("GET /stuck HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+      assert wait_for { server.in_flight == 1 }
+      started = Time.monotonic
+      server.shutdown(1)
+      took = since(started)
+      assert read_all(client) == ""
+      client.close
+      assert server.in_flight == 0
+      assert took >= Span.milliseconds(900)
+      assert took < Span.seconds(3)
+    end
+  end
+
+  it "brings a running deadline forward when asked again with 0" do
+    serving(router, quiet_config) do |server|
+      client = connect(server)
+      client.write("GET /stuck HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+      assert wait_for { server.in_flight == 1 }
+      started = Time.monotonic
+      server.close
+      sleep(100)
+      assert server.in_flight == 1
+      server.shutdown(0)
+      assert since(started) < Span.seconds(2)
+      assert read_all(client) == ""
+      client.close
+    end
+  end
+
+  it "closes an idle keep-alive connection at once" do
+    serving(router, quiet_config) do |server|
+      client = connect(server)
+      client.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+      first = read_frame(client)
+      assert http_header(first, "Connection") == "keep-alive"
+      started = Time.monotonic
+      server.shutdown(5)
+      assert since(started) < Span.seconds(1)
+      assert read_all(client) == ""
+      client.close
+    end
+  end
+end
+
+describe "Server timeouts" do
+  it "answers 408 to a request that does not arrive whole in read_timeout, however it trickles" do
+    cfg = quiet_config
+    cfg.read_timeout = 1
+    serving(router, cfg) do |server|
+      client = connect(server)
+      started = Time.monotonic
+      client.write("GET / HTTP/1.1\r\n").or_panic
+      answer = ""
+      group do |g|
+        g.spawn do
+          # A header every 200 ms: each wait is short, the request is not.
+          sent = 0
+          while sent < 10
+            sleep(200)
+            break unless client.write("X-Slow: #{sent}\r\n").is_a?(Int32)
+            sent = sent + 1
+          end
+          0
+        end
+        g.spawn do
+          answer = read_all(client)
+          0
+        end
+      end
+      took = since(started)
+      client.close
+      assert status_line(answer) == "HTTP/1.1 408 Request Timeout"
+      assert http_header(answer, "Connection") == "close"
+      assert took >= Span.milliseconds(900)
+      assert took < Span.milliseconds(1800)
+    end
+  end
+
+  it "closes a connection that sends nothing in read_timeout without answering" do
+    cfg = quiet_config
+    cfg.read_timeout = 1
+    serving(router, cfg) do |server|
+      client = connect(server)
+      started = Time.monotonic
+      assert read_all(client) == ""
+      client.close
+      assert since(started) >= Span.milliseconds(900)
+    end
+  end
+
+  it "closes a keep-alive connection idle for idle_timeout, and not one whose next request has begun" do
+    cfg = quiet_config
+    cfg.idle_timeout = 1
+    cfg.read_timeout = 3
+    serving(router, cfg) do |server|
+      idle = connect(server)
+      idle.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+      assert http_body(read_frame(idle)) == "home"
+      started = Time.monotonic
+      assert read_all(idle) == ""
+      idle.close
+      took = since(started)
+      assert took >= Span.milliseconds(900)
+      assert took < Span.seconds(2)
+
+      busy = connect(server)
+      busy.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+      assert http_body(read_frame(busy)) == "home"
+      busy.write("GET / HTTP/1.1\r\n").or_panic
+      sleep(1500)
+      busy.write("Host: localhost\r\nConnection: close\r\n\r\n").or_panic
+      second = read_all(busy)
+      busy.close
+      assert status_line(second) == "HTTP/1.1 200 OK"
+      assert http_body(second) == "home"
+    end
+  end
+
+  it "ends a response whose client stops reading for write_timeout" do
+    cfg = quiet_config
+    cfg.write_timeout = 1
+    serving(router, cfg) do |server|
+      client = connect(server)
+      client.write("GET /big HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+      assert wait_for { server.in_flight == 1 }
+      assert wait_for { server.in_flight == 0 }
+      client.close
+    end
+  end
+
+  it "takes 0 or nil as no timeout, not as none left" do
+    cfg = quiet_config
+    cfg.read_timeout = 0
+    cfg.idle_timeout = nil
+    cfg.write_timeout = 0
+    serving(router, cfg) do |server|
+      client = connect(server)
+      sleep(100)
+      client.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+      assert http_body(read_frame(client)) == "home"
+      sleep(100)
+      client.write("GET / HTTP/1.1\r\n").or_panic
+      sleep(100)
+      client.write("Host: localhost\r\nConnection: close\r\n\r\n").or_panic
+      answer = read_all(client)
+      client.close
+      assert http_body(answer) == "home"
+    end
+  end
+end
+
+describe "Server addresses" do
+  it "serves on IPv6 loopback, bare and bracketed" do
+    ["::1", "[::1]"].each do |host|
+      server = Server.new(chain([RouteHandler.new(router)]), quiet_config)
+      port = server.bind(host, 0)
+      serve(server) do |running|
+        client = IyiSocket.connect("::1", port).or_panic
+        client.write("GET / HTTP/1.1\r\nHost: [::1]\r\nConnection: close\r\n\r\n").or_panic
+        answer = read_all(client)
+        client.close
+        assert status_line(answer) == "HTTP/1.1 200 OK"
+        assert http_body(answer) == "home"
+      end
+    end
+  end
+
+  it "serves on a unix socket and removes its file at shutdown" do
+    path = File.tempfile("iyi-web", ".sock")
+    File.delete(path)
+    server = Server.new(chain([RouteHandler.new(router)]), quiet_config)
+    server.bind_unix(path)
+    serve(server) do |running|
+      # `File.exists?` opens the path, which a socket refuses; stat does not.
+      listed = File.info?(path)
+      assert listed ? listed.type.socket? : false
+      client = IyiSocket.connect_unix(path).or_panic
+      client.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").or_panic
+      answer = read_all(client)
+      client.close
+      assert status_line(answer) == "HTTP/1.1 200 OK"
+      assert http_body(answer) == "home"
+    end
+    assert File.info?(path).nil?
+  end
+end

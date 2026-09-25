@@ -20,6 +20,11 @@ describe "Config" do
     assert fresh.max_request_body_size == 8 * 1024 * 1024
     assert fresh.keepalive
     assert fresh.max_keepalive_requests == 100
+    assert fresh.shutdown_timeout == 30
+    assert fresh.read_timeout == 60
+    assert fresh.write_timeout == 60
+    assert fresh.idle_timeout == 75
+    assert fresh.unix_socket.nil?
     assert fresh.custom_handlers.empty?
   end
 

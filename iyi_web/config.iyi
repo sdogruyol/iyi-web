@@ -39,6 +39,11 @@ pub class Config
   @static_dir_listing : Bool
   @static_gzip : Bool
   @static_headers : StaticHeadersHook?
+  @shutdown_timeout : Int32
+  @read_timeout : Int32?
+  @write_timeout : Int32?
+  @idle_timeout : Int32?
+  @unix_socket : String?
 
   def initialize
     @app_name = "iyi-web"
@@ -69,6 +74,11 @@ pub class Config
     @static_dir_listing = false
     @static_gzip = true
     @static_headers = nil
+    @shutdown_timeout = 30
+    @read_timeout = 60
+    @write_timeout = 60
+    @idle_timeout = 75
+    @unix_socket = nil
   end
 
   pub def app_name : String
@@ -178,6 +188,64 @@ pub class Config
 
   pub def shutdown_message : Bool
     @shutdown_message
+  end
+
+  pub def shutdown_message=(value : Bool) : Bool
+    @shutdown_message = value
+  end
+
+  # Seconds a stop - `stop`, or the first INT or TERM - gives the requests
+  # in flight to finish before they are cut off. 0 cuts them off at once.
+  pub def shutdown_timeout : Int32
+    @shutdown_timeout
+  end
+
+  pub def shutdown_timeout=(value : Int32) : Int32
+    @shutdown_timeout = value
+  end
+
+  # Seconds a client has to send a whole request, headers and body,
+  # counted from its first byte - from the accept, for a connection's
+  # first request. A request cut short gets 408. nil or 0 turns it off.
+  pub def read_timeout : Int32?
+    @read_timeout
+  end
+
+  pub def read_timeout=(value : Int32?) : Int32?
+    @read_timeout = value
+  end
+
+  # Seconds one write may wait for the client to take bytes; one that runs
+  # out ends the connection. A bound per wait, not per response, so a
+  # stream may last as long as its client keeps reading. nil or 0 turns it
+  # off.
+  pub def write_timeout : Int32?
+    @write_timeout
+  end
+
+  pub def write_timeout=(value : Int32?) : Int32?
+    @write_timeout = value
+  end
+
+  # Seconds a keep-alive connection waits for its next request before it
+  # is closed. nil or 0 turns it off.
+  pub def idle_timeout : Int32?
+    @idle_timeout
+  end
+
+  pub def idle_timeout=(value : Int32?) : Int32?
+    @idle_timeout = value
+  end
+
+  # A path to listen at instead of `host` and `port`: a unix socket, for a
+  # reverse proxy on the same machine. The file must not exist yet; it is
+  # removed when the server stops.
+  pub def unix_socket : String?
+    @unix_socket
+  end
+
+  pub def unix_socket=(value : String?) : String?
+    @unix_socket = value
   end
 
   pub def custom_handlers : Array(Handler)

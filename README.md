@@ -36,6 +36,8 @@ a route returns is checked when the program compiles.
 - Templates with layouts, compiled into the program
 - Command-line flags for host and port
 - Persistent connections, each served by its own fiber
+- Graceful shutdown on `INT` and `TERM`, and timeouts for slow and idle clients
+- IPv4, IPv6 and unix-socket listeners
 
 ## Requirements
 
@@ -710,6 +712,12 @@ config.max_request_body_size = 1024 * 1024
 | `max_file_uploads` | `128` | |
 | `max_multipart_form_field_size` | `8 * 1024 * 1024` | |
 | `max_ranges` | `16` | |
+| `shutdown_timeout` | `30` | |
+| `shutdown_message` | `true` | |
+| `read_timeout` | `60` | |
+| `write_timeout` | `60` | |
+| `idle_timeout` | `75` | |
+| `unix_socket` | `nil` | |
 | `app_name` | `"iyi-web"` | |
 
 - `max_keepalive_requests` caps the requests served on one connection before
@@ -722,6 +730,17 @@ config.max_request_body_size = 1024 * 1024
 - `app_name` and `env` appear in the line printed at startup. With `env` set
   to `test`, `run` binds the port without serving requests.
 - `powered_by true` adds `X-Powered-By: iyi-web` to every response.
+- `unix_socket` is a path to listen at instead of `host` and `port`, for a
+  proxy on the same machine: `config.unix_socket = "/run/app.sock"`. The file
+  must not exist yet; it is removed when the server stops.
+- Timeouts are in seconds, and `nil` or `0` turns one off. A client has
+  `read_timeout` to send a whole request, headers and body, counted from its
+  first byte (from the connection, for its first request); a request cut
+  short gets `408 Request Timeout` and its connection is closed, and a
+  connection that sent nothing is closed. `idle_timeout` is how long a
+  keep-alive connection waits for its next request. `write_timeout` is how
+  long one write waits for the client to take bytes; one that runs out ends
+  the connection, so a stream lasts as long as its client keeps reading.
 
 ### Logging
 
@@ -763,8 +782,10 @@ logger JSONLogger.new
 ```
 
 `-b HOST` (`--bind`) and `-p PORT` (`--port`) set the host and port;
-`run 8080` still wins over `-p`. An unknown flag or an invalid port stops the
-program with the reason and the list of flags. `extra_options` adds your own:
+`run 8080` still wins over `-p`. The host may be an IPv6 address, bare or
+bracketed (`-b ::1`, `-b '[::1]'`); `::` takes IPv6 connections only. An
+unknown flag or an invalid port stops the program with the reason and the
+list of flags. `extra_options` adds your own:
 
 ```iyi
 extra_options do |parser|
@@ -774,6 +795,18 @@ end
 
 `run(args: nil)` ignores the command line.
 
+### Stopping
+
+`INT` (Ctrl-C) or `TERM` stops the server as `stop` does: it takes no new
+connections, closes the idle ones, and lets each request in flight finish,
+closing its connection after the response. `run` returns once they have, or
+after `shutdown_timeout` seconds, when the rest are cut off: their fibers are
+cancelled and their connections closed. A second signal cuts them off at
+once. A server-sent-events stream is in flight for as long as it is open.
+
+With `shutdown_message` on, the stop prints
+`[production] storefront is going to take a rest!`. Code after `run` runs.
+
 ## Deployment
 
 ```sh
@@ -782,8 +815,9 @@ IYI_WEB_ENV=production ./app -p 8080
 ```
 
 - iyi-web speaks plain HTTP/1.1. Terminate TLS at a reverse proxy such as
-  nginx, Caddy or HAProxy, and let the proxy enforce connection timeouts: the
-  server does not time out idle or slow clients.
+  nginx, Caddy or HAProxy; it can reach the server over a unix socket
+  (`unix_socket`). Keep `idle_timeout` above the proxy's own keep-alive
+  timeout, so that the proxy is the one to close an idle connection.
 - Static files and `send_file` read whole files into memory. Serve large files
   from the proxy or a CDN.
 - A client that disconnects while its response is being written ends that
