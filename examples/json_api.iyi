@@ -67,10 +67,9 @@ before_all "/todos/*" do |env|
 end
 
 # A body declared as JSON that does not parse gets `400` before the route
-# runs; this page replaces the default text. It returns the body rather than
-# calling `env.json`: iyi-web 0.1.1 drops a body an error page writes itself.
+# runs; this page replaces the default text.
 error 400 do |env|
-  %({"error":"invalid JSON"})
+  env.json({"error" => "invalid JSON"})
 end
 
 get "/todos" do |env|
