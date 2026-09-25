@@ -298,6 +298,26 @@ describe "Server timeouts" do
   end
 end
 
+describe "Server connections" do
+  it "serves each of many connections accepted in one burst on its own socket" do
+    # Connected and sent before `listen` runs, so its accepts do not park
+    # between them.
+    server = Server.new(chain([RouteHandler.new(router)]), quiet_config)
+    server.bind("127.0.0.1", 0)
+    clients = [] of IyiSocket
+    20.times { clients << connect(server) }
+    clients.each { |client| client.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").or_panic }
+    serve(server) do |running|
+      clients.each do |client|
+        answer = read_all(client)
+        client.close
+        assert status_line(answer) == "HTTP/1.1 200 OK"
+        assert http_body(answer) == "home"
+      end
+    end
+  end
+end
+
 describe "Server addresses" do
   it "serves on IPv6 loopback, bare and bracketed" do
     ["::1", "[::1]"].each do |host|

@@ -116,10 +116,7 @@ pub class Server
           pause = 5
           conn = Connection.new(client)
           track(conn)
-          g.spawn do
-            serve_isolated(conn)
-            0
-          end
+          spawn_connection(g, conn)
         end
       end
       # Closed by `close` or `shutdown`, or this task was cancelled, which
@@ -173,6 +170,17 @@ pub class Server
     end
     untrack(conn)
     client.close
+  end
+
+  # A method of its own because a `while` body is not a scope: a block
+  # spawned in the accept loop captures the loop's one `conn`, which the
+  # next accept overwrites before the task runs. A parameter is bound per
+  # call.
+  private def spawn_connection(g : IyiGroup, conn : Connection) : Nil
+    g.spawn do
+      serve_isolated(conn)
+      0
+    end
   end
 
   private def begin_drain(timeout : Int32) : Nil
