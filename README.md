@@ -580,7 +580,7 @@ before request logging.
 | `CompressHandler` | `web/iyi_web/compress` | Compresses textual responses of 860 bytes or more with gzip or deflate when `Accept-Encoding` allows it. `gzip true` adds it. |
 | `CORSHandler` | `web/iyi_web/cors` | Sets `Access-Control-Allow-Origin` and answers preflight requests with `204`. Takes `origin` (default `*`), `methods`, `headers` (default `*`) and `max_age` (seconds as a string, default `"86400"`). |
 | `OverrideMethodHandler` | `web/iyi_web/override` | Treats a form `POST` with `_method` set to `PUT`, `PATCH` or `DELETE` as that method. |
-| `LogHandler` | `web/iyi_web/log` | Prints one line per request. Added by default; `logging false` removes it. |
+| `LogHandler` | `web/iyi_web/log` | Writes one line per request to `config.logger`. Added by default; `logging false` removes it. |
 | `StaticHandler` | `web/iyi_web/static` | Serves the public folder. Added by default; `serve_static false` removes it. |
 
 To write your own, subclass `Handler`, override `call`, and pass the request
@@ -701,6 +701,7 @@ config.max_request_body_size = 1024 * 1024
 | `public_folder` | `"./public"` | `public_folder "assets"` |
 | `serve_static` | `true` | `serve_static false` |
 | `logging` | `true` | `logging false` |
+| `logger` | `StdoutLogger.new` | `logger MyLogger.new` |
 | `powered_by_header` | `false` | `powered_by true` |
 | `show_exceptions?` | `true` in development | `config.show_exceptions = false` |
 | `keepalive` | `true` | |
@@ -721,6 +722,36 @@ config.max_request_body_size = 1024 * 1024
 - `app_name` and `env` appear in the line printed at startup. With `env` set
   to `test`, `run` binds the port without serving requests.
 - `powered_by true` adds `X-Powered-By: iyi-web` to every response.
+
+### Logging
+
+Each request is logged as one line, `GET /users 200 1.234ms`, after its
+response has been built; a request whose handler panicked is logged with its
+`500`. `log "message"` writes a line of the application's own. Both go to
+`config.logger`, standard output by default, and `logging false` silences
+both.
+
+A logger is a subclass of `Logger` from `web/iyi_web/log` with
+`write(message)`; override `request(ctx, elapsed)` as well to choose what a
+request line holds:
+
+```iyi
+import std/time::{Span}
+import web/iyi_web/log::{Logger}
+import web/iyi_web/context::{Context}
+
+class JSONLogger < Logger
+  pub def request(ctx : Context, elapsed : Span) : Nil
+    write(%({"method":"#{ctx.request.method}","path":"#{ctx.request.path}","status":#{ctx.response.status_code}}))
+  end
+
+  pub def write(message : String) : Nil
+    STDERR.puts message
+  end
+end
+
+logger JSONLogger.new
+```
 
 ### Command line
 
@@ -817,7 +848,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/cors` | `CORSHandler` |
 | `web/iyi_web/override` | `OverrideMethodHandler` |
 | `web/iyi_web/static` | `StaticHandler` |
-| `web/iyi_web/log` | `LogHandler` |
+| `web/iyi_web/log` | `LogHandler`, `Logger`, `StdoutLogger` |
 | `web/iyi_web/harness` | `http_request`, `form_request`, `dispatch`, `routes` |
 
 ## Development

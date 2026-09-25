@@ -8,6 +8,7 @@ module iyi_web/config
 import std/file::{File}
 import iyi_web/handler::{Handler}
 import iyi_web/context::{Context}
+import iyi_web/log::{Logger, StdoutLogger}
 
 # Called for every file the static handler serves, before its body is
 # written: the context, the file's path and its `File::Info`.
@@ -20,6 +21,7 @@ pub class Config
   @env : String
   @public_folder : String
   @logging : Bool
+  @logger : Logger
   @running : Bool
   @serve_static : Bool
   @powered_by_header : Bool
@@ -49,6 +51,7 @@ pub class Config
     @port = parsed ? parsed : 3000
     @public_folder = "./public"
     @logging = true
+    @logger = StdoutLogger.new
     @running = false
     @serve_static = true
     @powered_by_header = false
@@ -114,6 +117,15 @@ pub class Config
 
   pub def logging=(value : Bool) : Bool
     @logging = value
+  end
+
+  # Where request lines and `log` messages go while `logging` is on.
+  pub def logger : Logger
+    @logger
+  end
+
+  pub def logger=(value : Logger) : Logger
+    @logger = value
   end
 
   pub def running : Bool

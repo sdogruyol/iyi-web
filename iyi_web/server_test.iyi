@@ -10,6 +10,7 @@ import iyi_web/router::{Router, RouteHandler}
 import iyi_web/handler::{chain}
 import iyi_web/server::{Server}
 import iyi_web/config::*
+import iyi_web/log::{Logger}
 import iyi_web/harness::*
 import iyi_web/spec::*
 
@@ -37,6 +38,18 @@ def read_frame(client : IyiSocket) : String
   end
   size = http_frame_size(buffer)
   size && size <= buffer.bytesize ? buffer[0, size] : buffer
+end
+
+class Collected < Logger
+  property lines : Array(String)
+
+  def initialize
+    @lines = [] of String
+  end
+
+  pub def write(message : String) : Nil
+    @lines << message
+  end
 end
 
 def close_request(method : String, path : String, extra : String = "") : String
@@ -281,6 +294,22 @@ group do |g|
         hidden = exchange(port, close_request("GET", "/boom-twice"))
         assert status_line(hidden) == "HTTP/1.1 500 Internal Server Error"
         assert !http_body(hidden).includes?("handler failed")
+      end
+
+      it "logs the 500 a panicking route gets through the configured logger" do
+        previous = cfg.logger
+        collected = Collected.new
+        cfg.logger = collected
+        cfg.logging = true
+        exchange(port, close_request("GET", "/boom"))
+        assert collected.lines.size == 1
+        assert collected.lines[0].starts_with?("GET /boom 500 ")
+        assert collected.lines[0].ends_with?("ms")
+
+        cfg.logging = false
+        exchange(port, close_request("GET", "/boom"))
+        assert collected.lines.size == 1
+        cfg.logger = previous
       end
 
       it "keeps other connections open when one request panics" do

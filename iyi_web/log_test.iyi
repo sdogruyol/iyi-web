@@ -1,21 +1,75 @@
-# Request logging must not swallow the route's body or status.
+# Request logging must not swallow the route's body or status, and writes
+# through whichever `Logger` it was given.
 module iyi_web/log_test
 
-import iyi_web/log::{LogHandler}
+import iyi_web/log::{LogHandler, Logger}
 import iyi_web/handler::{chain}
+import iyi_web/context::{Context}
 import iyi_web/harness::*
 import iyi_web/spec::*
+import std/time::{Span}
+
+class Collected < Logger
+  property lines : Array(String)
+
+  def initialize
+    @lines = [] of String
+  end
+
+  pub def write(message : String) : Nil
+    @lines << message
+  end
+end
+
+# Replaces the line format: sees the context, never calls `write`.
+class Statuses < Logger
+  property seen : Array(String)
+
+  def initialize
+    @seen = [] of String
+  end
+
+  pub def request(ctx : Context, elapsed : Span) : Nil
+    @seen << ctx.request.path + "=" + ctx.response.status_code.to_s
+  end
+
+  pub def write(message : String) : Nil
+    @seen << "write"
+  end
+end
+
+def logged_routes
+  routes { |r|
+    r.get "/log" do |env|
+      env.response.status_code = 201
+      "logged"
+    end
+  }
+end
 
 describe "LogHandler" do
   it "preserves the route's status and body" do
-    handler = chain([LogHandler.new, routes { |r|
-      r.get "/log" do |env|
-        env.response.status_code = 201
-        "logged"
-      end
-    }])
+    handler = chain([LogHandler.new, logged_routes])
     ctx = dispatch(handler, "GET", "/log")
     assert ctx.response.status_code == 201
     assert ctx.response.body == "logged"
+  end
+
+  it "writes one request line per request through its logger" do
+    collected = Collected.new
+    handler = chain([LogHandler.new(collected), logged_routes])
+    dispatch(handler, "GET", "/log")
+    dispatch(handler, http_request("POST", "/missing", "q=1"))
+    assert collected.lines.size == 2
+    assert collected.lines[0].starts_with?("GET /log 201 ")
+    assert collected.lines[0].ends_with?("ms")
+    assert collected.lines[1].starts_with?("POST /missing 404 ")
+  end
+
+  it "hands a logger that overrides request the finished context" do
+    statuses = Statuses.new
+    handler = chain([LogHandler.new(statuses), logged_routes])
+    dispatch(handler, "GET", "/log")
+    assert statuses.seen == ["/log=201"]
   end
 end

@@ -27,7 +27,6 @@ import iyi_web/request::{Request, ParseError, Incoming, parse_incoming}
 import iyi_web/response::{Response}
 import iyi_web/config::{Config}
 import iyi_web/http_date::*
-import iyi_web/log::{request_log_line}
 
 pub class Server
   @handler : Handler
@@ -227,7 +226,7 @@ pub class Server
     end
     ctx.response.headers["Connection"] = "close"
     if @config.logging
-      puts request_log_line(request.method, request.path, 500, Time.monotonic - started)
+      @config.logger.request(ctx, Time.monotonic - started)
     end
     write_raw(client, ctx.response.to_http(wire_version(request), !HTTP.same_name?(request.method, "HEAD")))
   end

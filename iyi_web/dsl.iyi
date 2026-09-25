@@ -14,7 +14,7 @@ import iyi_web/context::{Context}
 import iyi_web/router::{Router, RouteHandler}
 import iyi_web/handler::{Handler, chain}
 import iyi_web/config::*
-import iyi_web/log::{LogHandler}
+import iyi_web/log::{LogHandler, Logger}
 import iyi_web/server::{Server}
 import iyi_web/static::{StaticHandler}
 import iyi_web/path::{PathHandler}
@@ -155,6 +155,17 @@ pub def logging(status : Bool) : Nil
   config.logging = status
 end
 
+# Replaces the logger request lines and `log` messages are written to.
+pub def logger(value : Logger) : Nil
+  config.logger = value
+end
+
+# Writes *message* through the configured logger; nothing with `logging false`.
+pub def log(message : String) : Nil
+  cfg = config
+  cfg.logger.write(message) if cfg.logging
+end
+
 pub def serve_static(status : Bool) : Nil
   config.serve_static = status
 end
@@ -239,7 +250,7 @@ end
 pub def handler_chain : Handler
   cfg = config
   handlers = [] of Handler
-  handlers << LogHandler.new if cfg.logging
+  handlers << LogHandler.new(cfg.logger) if cfg.logging
   if cfg.serve_static
     handlers << StaticHandler.new(cfg.public_folder, cfg.static_dir_index, cfg.static_dir_listing, cfg.static_gzip, cfg.max_ranges, cfg.static_headers)
   end

@@ -1,21 +1,53 @@
 # Request logging. One line per request, after the handler has run, so the
 # status is the one that was actually sent.
+#
+# Where the lines go is a `Logger`: `config.logger` (`logger MyLogger.new`
+# in the DSL) is the one `LogHandler`, the server's line for a request whose
+# handler panicked, and the DSL's `log` all write through. `StdoutLogger`
+# is the default. `std/log` is not used directly: its lines carry a
+# timestamp and a severity this format does not have, and a `Logger` that
+# forwards to `Log.info` is two lines for an application that wants them.
 module iyi_web/log
 
 import iyi_web/handler::{Handler}
 import iyi_web/context::{Context}
 import std/time::{Time, Span}
 
-pub class LogHandler < Handler
-  pub def call(ctx : Context) : Nil
-    started = Time.monotonic
-    call_next(ctx)
-    puts request_log_line(ctx.request.method, ctx.request.path, ctx.response.status_code, Time.monotonic - started)
+pub abstract class Logger
+  # One finished request. *ctx* carries the status that was sent; the
+  # default writes `request_log_line` through `write`.
+  #
+  # Qualified: iyi 0.15.0 does not find a module's own function from a
+  # method a subclass inherits.
+  pub def request(ctx : Context, elapsed : Span) : Nil
+    write(IyiWeb::Log.request_log_line(ctx.request.method, ctx.request.path, ctx.response.status_code, elapsed))
+  end
+
+  # One line of text, without its newline.
+  pub abstract def write(message : String) : Nil
+end
+
+pub class StdoutLogger < Logger
+  pub def write(message : String) : Nil
+    puts message
   end
 end
 
-# The one line format, shared with the server's own line for a request
-# whose handler panicked before `LogHandler` could write it.
+pub class LogHandler < Handler
+  @logger : Logger
+
+  def initialize(@logger : Logger = StdoutLogger.new)
+    super()
+  end
+
+  pub def call(ctx : Context) : Nil
+    started = Time.monotonic
+    call_next(ctx)
+    @logger.request(ctx, Time.monotonic - started)
+  end
+end
+
+# The one line format: `GET /users 200 1.234ms`.
 pub def request_log_line(method : String, path : String, status : Int32, elapsed : Span) : String
   method + " " + path + " " + status.to_s + " " + elapsed.total_milliseconds.to_s + "ms"
 end
