@@ -6,6 +6,12 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The README installs iyi-web with `iyi get github.com/sdogruyol/iyi-web`,
+  released in iyi 0.15.0, and imports it by its full path; `--as web` is the
+  short name the README's examples use.
+
 ## [0.1.1] - 2026-09-25
 
 Requires iyi 0.15.0 or later. The exported surface is v0.1.0's, line for

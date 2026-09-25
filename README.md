@@ -39,36 +39,61 @@ a route returns is checked when the program compiles.
 
 ## Requirements
 
-[iyi](https://iyi-lang.com) 0.15.0 or later: the `as` short name on an
-`iyi.mod` requirement, and `import X::{...}` - one line for a module and the
+[iyi](https://iyi-lang.com) 0.15.0 or later: `iyi get`, the `as` short name on
+an `iyi.mod` requirement, and `import X::{...}` - one line for a module and the
 names it brings into scope - arrived in 0.15.0.
 
 ## Installation
 
-iyi-web is an iyi module. Add it to your project's `iyi.mod` under the short
-name `web`:
+iyi-web is an iyi module. Add it to your project's `iyi.mod`:
 
 ```sh
-iyi get github.com/sdogruyol/iyi-web --as web
+iyi get github.com/sdogruyol/iyi-web
 ```
 
 This fetches the latest release, records it in `iyi.sum` and writes one line to
 `iyi.mod`:
 
 ```
+require github.com/sdogruyol/iyi-web v0.1.1
+```
+
+Files then name iyi-web's modules by their full path. One `import` line loads
+a module and brings its names into scope:
+
+```iyi
+import github.com/sdogruyol/iyi-web/iyi_web/dsl::*
+```
+
+### A short name
+
+The examples in this README write the path once, in `iyi.mod`, under the short
+name `web`. Pass `--as web` when adding iyi-web, or run the same command in a
+project that already requires it:
+
+```sh
+iyi get github.com/sdogruyol/iyi-web --as web
+```
+
+or add ` as web` to the `require` line by hand:
+
+```
 require github.com/sdogruyol/iyi-web v0.1.1 as web
 ```
 
-Files then name iyi-web's modules as `web/iyi_web/...`. One `import` line loads
-a module and brings its names into scope:
+`web/iyi_web/...` then means `github.com/sdogruyol/iyi-web/iyi_web/...`:
 
 ```iyi
 import web/iyi_web/dsl::*
 import web/iyi_web/router::{Router}
 ```
 
-`iyi get -u` moves to the latest release, and
-`iyi get github.com/sdogruyol/iyi-web@v0.1.1` to a given one.
+### Versions
+
+`iyi get -u` moves to the latest release and
+`iyi get github.com/sdogruyol/iyi-web@v0.1.1` to a given one; both keep the
+short name. `iyi get -u --check` says whether a newer release exists without
+changing anything.
 
 iyi reads `iyi.mod` from the directory of the file being built, so keep the
 entry file, and every `*_test.iyi` that uses iyi-web, beside it. Modules of
