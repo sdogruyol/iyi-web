@@ -3,7 +3,6 @@
 module iyi_web/token
 
 import std/random::{Random}
-import std/time::{Time}
 
 # *count* random bytes as `2 * count` lower-case hex digits.
 pub def random_hex(count : Int32) : String
@@ -13,11 +12,9 @@ end
 # `File.exists?` is an open for reading, so it answers whether the device
 # can be read. wasm32 has no such path to ask about.
 #
-# The fallback seeds `std/random` itself: its unseeded `Random.new` opens
-# `/dev/urandom` through a `File` that `std/file` shadows, so it does not
-# build in a program that also imports `std/file`, as this framework does.
-# The clocks and a fresh heap address are the seed, the same material
-# `std/random` falls back to where there is no device.
+# Where there is no `/dev/urandom` - Windows, wasm32 - the bytes come from
+# `std/random` seeded by `Random.new`, which reads the platform's own
+# entropy (`RtlGenRandom` on Windows; the clocks on wasm32, which has none).
 private def random_bytes(count : Int32) : String
   {% if !flag?(:wasm32) %}
     if File.exists?("/dev/urandom")
@@ -29,8 +26,7 @@ private def random_bytes(count : Int32) : String
     end
   {% end %}
 
-  seed = Time.utc.to_unix.to_u64 ^ Time.monotonic.total_nanoseconds.to_u64 ^ Pointer(UInt8).malloc(1_u64).address
-  rng = Random.new(seed)
+  rng = Random.new
   String.new(count) do |target|
     index = 0
     while index < count
