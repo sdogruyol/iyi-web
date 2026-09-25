@@ -20,6 +20,7 @@ pub def phrase(code : Int32) : String
   when 415 then "Unsupported Media Type"
   when 418 then "I'm a teapot"
   when 422 then "Unprocessable Content"
+  when 426 then "Upgrade Required"
   when 429 then "Too Many Requests"
   when 502 then "Bad Gateway"
   else          HTTP.reason_for(code)

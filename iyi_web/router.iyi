@@ -13,6 +13,8 @@ import iyi_web/radix::{Tree, Match}
 import iyi_web/handler::{Handler}
 import iyi_web/status::*
 import iyi_web/event_stream::{EventStream}
+import iyi_web/websocket::{WebSocket}
+import iyi_web/config::{Config, config}
 
 alias HandlerProc = Context -> String
 
@@ -36,6 +38,20 @@ pub struct Route
   end
 end
 
+# A `ws` route: the path as declared, prefixes included, and its block.
+pub struct SocketRoute
+  def initialize(@path : String, @handler : Proc(WebSocket, Context, Nil))
+  end
+
+  pub def path : String
+    @path
+  end
+
+  pub def handler : Proc(WebSocket, Context, Nil)
+    @handler
+  end
+end
+
 private record RouteDefinition,
   method : String,
   path : String,
@@ -51,16 +67,22 @@ private record SubRouter,
   path : String,
   router : Router
 
+private record SocketDefinition,
+  path : String,
+  handler : Proc(WebSocket, Context, Nil)
+
 pub class Router
   @routes : Array(RouteDefinition)
   @filters : Array(FilterDefinition)
   @sub_routers : Array(SubRouter)
+  @sockets : Array(SocketDefinition)
   @error_handlers : Hash(Int32, HandlerProc)
 
   def initialize(@prefix : String = "")
     @routes = [] of RouteDefinition
     @filters = [] of FilterDefinition
     @sub_routers = [] of SubRouter
+    @sockets = [] of SocketDefinition
     @error_handlers = {} of Int32 => HandlerProc
   end
 
@@ -81,6 +103,16 @@ pub class Router
       EventStream.serve(env) { |stream| block.call(stream, env) }
       nil
     end
+  end
+
+  # A WebSocket endpoint. A GET asking to upgrade gets the handshake; once
+  # its 101 is out, the block gets the socket and the context to set the
+  # callbacks, and the connection's task then reads frames until the
+  # socket closes. Before and after filters run for the handshake as for
+  # any GET. See `WebSocket`.
+  pub def ws(path : String, &block : WebSocket, Context -> Nil) : Nil
+    raise "path must start with /" unless path.starts_with?('/')
+    @sockets << SocketDefinition.new(path: path, handler: block)
   end
 
   pub def before(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
@@ -174,6 +206,21 @@ pub class Router
     collected
   end
 
+  pub def ws_routes(base_prefix : String = "") : Array(SocketRoute)
+    full_prefix = join_paths(base_prefix, @prefix)
+    collected = [] of SocketRoute
+
+    @sockets.each do |socket|
+      collected << SocketRoute.new(join_paths(full_prefix, socket.path), socket.handler)
+    end
+
+    @sub_routers.each do |sub|
+      collected.concat(sub.router.ws_routes(join_paths(full_prefix, sub.path)))
+    end
+
+    collected
+  end
+
   pub def filters(base_prefix : String = "") : Array(Tuple(Symbol, String, String, HandlerProc))
     full_prefix = join_paths(base_prefix, @prefix)
     collected = [] of Tuple(Symbol, String, String, HandlerProc)
@@ -208,18 +255,33 @@ end
 # `before_all` filters also run for a request no route matched, before
 # its 404 or 405, so an authentication or logging filter sees it too.
 # Per-method before filters and every after filter run only for a match.
+#
+# A `ws` route takes a request whose `Upgrade` names `websocket`: a GET
+# runs the before filters for GET, then the handshake, which answers 101
+# or refuses with 400, 403 or 426 and closes the connection, then the
+# after filters. A before filter that halts or leaves an error status
+# refuses the upgrade too. Another method is left to an HTTP route that
+# serves it, or is refused with 405. A request that does not ask to
+# upgrade is routed as usual; a GET only a `ws` route serves gets 426
+# with `Upgrade: websocket`.
 pub class RouteHandler < Handler
   @tree : Tree(Route)
   @filters : Array(Tuple(Symbol, String, String, HandlerProc))
   @error_handlers : Hash(Int32, HandlerProc)
   @methods : Array(String)
+  @sockets : Tree(SocketRoute)
+  @config : Config
 
-  def initialize(router : Router)
+  # *settings* supplies the WebSocket origin list and message limit, read
+  # at each handshake.
+  def initialize(router : Router, settings : Config = config)
     super()
     @tree = Tree(Route).new
     @filters = router.filters
     @error_handlers = {} of Int32 => HandlerProc
     @methods = [] of String
+    @sockets = Tree(SocketRoute).new
+    @config = settings
 
     router.error_handlers.each do |code, handler|
       @error_handlers[code] = handler
@@ -235,6 +297,10 @@ pub class RouteHandler < Handler
         seen[route.method] = true
       end
     end
+
+    router.ws_routes.each do |socket|
+      raise "ws #{socket.path} is defined twice" unless @sockets.add(socket.path, socket)
+    end
   end
 
   pub def call(ctx : Context) : Nil
@@ -247,6 +313,12 @@ pub class RouteHandler < Handler
       render_error(ctx, 400)
       drop_head_body(ctx)
       return
+    end
+
+    if WebSocket.upgrade_request?(ctx.request)
+      if socket = @sockets.find(path)
+        return if serve_socket(ctx, socket)
+      end
     end
 
     match = lookup(method, path)
@@ -262,6 +334,12 @@ pub class RouteHandler < Handler
         ctx.response.headers["Allow"] = allowed.join(", ")
         render_error(ctx, 405)
         drop_head_body(ctx)
+        return
+      end
+      if method == "GET" && @sockets.find(path)
+        # RFC 9110 §15.5.22: the path speaks WebSocket and nothing else.
+        ctx.response.headers["Upgrade"] = "websocket"
+        render_error(ctx, 426)
         return
       end
       render_error(ctx, 404)
@@ -351,7 +429,58 @@ pub class RouteHandler < Handler
     if allowed.includes?("GET") && !allowed.includes?("HEAD")
       allowed << "HEAD"
     end
-    allowed
+    # The handshake is a GET, and a `ws` route serves nothing else, so it
+    # adds GET but no HEAD.
+    return allowed if allowed.includes?("GET") || @sockets.find(path).nil?
+    ["GET"] + allowed
+  end
+
+  # An upgrade request on a `ws` route. False when it is not the route's to
+  # answer: a method other than GET that an HTTP route on the path serves.
+  private def serve_socket(ctx : Context, found : Match(SocketRoute)) : Bool
+    method = ctx.request.method
+    path = ctx.request.path
+    unless method == "GET"
+      return false if lookup(method, path)
+      run_filters(ctx, :before, "ALL", path, true)
+      unless ctx.halted?
+        ctx.response.headers["Allow"] = allowed_methods(path).join(", ")
+        refuse_upgrade(ctx, 405)
+      end
+      drop_head_body(ctx)
+      return true
+    end
+
+    socket = found.payload
+    ctx.params.update_url(found.params)
+    ctx.matched("GET", socket.path)
+    run_filters(ctx, :before, "GET", path)
+    return true if ctx.halted?
+    if ctx.response.status_code >= 400
+      # A filter that answered with an error refused the upgrade.
+      if custom = @error_handlers[ctx.response.status_code]?
+        ctx.response.set_body(custom.call(ctx))
+      end
+      ctx.response.headers["Connection"] = "close"
+      return true
+    end
+
+    if status = WebSocket.refusal(ctx.request, @config.websocket_allowed_origins)
+      refuse_upgrade(ctx, status)
+    else
+      WebSocket.accept(ctx, @config.websocket_max_message_size, socket.handler)
+    end
+    run_filters(ctx, :after, "GET", path)
+    true
+  end
+
+  # A refused handshake also closes the connection, so nothing pipelined
+  # behind it is read as the next request: Kemal's guard against
+  # smuggling a request past a proxy that took the upgrade as done.
+  private def refuse_upgrade(ctx : Context, status : Int32) : Nil
+    render_error(ctx, status)
+    ctx.response.headers["Sec-WebSocket-Version"] = "13" if status == 426
+    ctx.response.headers["Connection"] = "close"
   end
 
   # *only_all* limits the run to filters registered for every method: what

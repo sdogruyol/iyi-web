@@ -1,0 +1,810 @@
+# WebSockets: frames byte for byte, the handshake through the router, a
+# session on one end of a loopback connection with a client written here
+# on the other, and a server a raw socket talks to.
+module iyi_web/websocket_test
+
+import std/socket::{IyiSocket}
+import iyi_web/websocket::{WebSocket, Frame, FrameError}
+import iyi_web/router::{Router, RouteHandler}
+import iyi_web/handler::{chain}
+import iyi_web/server::{Server}
+import iyi_web/config::{Config}
+import iyi_web/context::{Context}
+import iyi_web/request::{Request}
+import iyi_web/harness::*
+import iyi_web/spec::*
+
+MASK = "\x37\xfa\x21\x3d"
+
+# The client's end: masked frames out, the server's frames in.
+class Peer
+  @socket : IyiSocket
+  @buffer : String
+
+  def initialize(@socket : IyiSocket, @buffer : String = "")
+  end
+
+  def socket : IyiSocket
+    @socket
+  end
+
+  def send(opcode : Int32, payload : String, fin : Bool = true) : Nil
+    @socket.write(WebSocket.encode_frame(opcode, payload, fin, MASK)).or_panic
+  end
+
+  def write(bytes : String) : Nil
+    @socket.write(bytes).or_panic
+  end
+
+  # The next frame the server sent; nil once the connection has ended.
+  def frame : Frame?
+    loop do
+      case decoded = WebSocket.decode_frame(@buffer, 0, false, 64 * 1024 * 1024)
+      in Frame
+        @buffer = @buffer[decoded.size, @buffer.bytesize - decoded.size]
+        return decoded
+      in FrameError
+        raise "the server sent a bad frame: " + decoded.reason
+      in Int32
+        chunk = @socket.read(65536)
+        return nil unless chunk.is_a?(String)
+        return nil if chunk.empty?
+        @buffer = @buffer + chunk
+      end
+    end
+  end
+
+  # The next frame, which must be there.
+  def expect : Frame
+    got = frame
+    raise "the connection ended" unless got
+    got
+  end
+
+  # The close frame's code and reason, then the end of the connection.
+  def expect_close : Tuple(Int32, String)
+    got = expect
+    raise "expected a close frame, got opcode #{got.opcode}" unless got.opcode == WebSocket::CLOSE
+    raise "the server kept the connection open after its close frame" unless frame.nil?
+    payload = got.payload
+    return {1005, ""} if payload.empty?
+    code = (payload.to_unsafe[0].to_i32 << 8) | payload.to_unsafe[1].to_i32
+    {code, payload[2, payload.bytesize - 2]}
+  end
+end
+
+# What a session's callbacks saw. `watch` echoes every message back.
+class Seen
+  property messages : Array(String)
+  property binaries : Array(String)
+  property pings : Array(String)
+  property pongs : Array(String)
+  property closes : Array(Tuple(Int32, String))
+
+  def initialize
+    @messages = [] of String
+    @binaries = [] of String
+    @pings = [] of String
+    @pongs = [] of String
+    @closes = [] of Tuple(Int32, String)
+  end
+
+  def watch(ws : WebSocket) : Nil
+    ws.on_message do |text|
+      @messages << text
+      ws.send(text)
+    end
+    ws.on_binary do |data|
+      @binaries << data
+      ws.send_binary(data)
+    end
+    ws.on_ping { |payload| @pings << payload }
+    ws.on_pong { |payload| @pongs << payload }
+    ws.on_close { |code, reason| @closes << {code, reason} }
+  end
+end
+
+def connected : Tuple(IyiSocket, IyiSocket)
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  client = IyiSocket.connect("127.0.0.1", listener.local_port).or_panic
+  accepted = listener.accept.or_panic
+  listener.close
+  {accepted, client}
+end
+
+# A session with *setup* on one end of a loopback connection, *script* as
+# the client on the other. Both run to their end.
+def converse(max : Int32, setup : Proc(WebSocket, Nil), &script : Peer -> Nil) : Nil
+  pair = connected
+  peer = Peer.new(pair[1])
+  group do |g|
+    g.spawn do
+      WebSocket.new(pair[0], max).run { |ws| setup.call(ws) }
+      0
+    end
+    g.spawn do
+      script.call(peer)
+      pair[1].close
+      0
+    end
+    0
+  end
+end
+
+def watched(seen : Seen) : Proc(WebSocket, Nil)
+  ->(ws : WebSocket) { seen.watch(ws) }
+end
+
+def upgrade(path : String, method : String = "GET") : Request
+  request = http_request(method, path)
+  request.headers["Upgrade"] = "websocket"
+  request.headers["Connection"] = "keep-alive, Upgrade"
+  request.headers["Sec-WebSocket-Version"] = "13"
+  request.headers["Sec-WebSocket-Key"] = "dGhlIHNhbXBsZSBub25jZQ=="
+  request.headers["Origin"] = "http://localhost"
+  request
+end
+
+def settings(origins : Array(String) = [] of String) : Config
+  cfg = Config.new
+  cfg.websocket_allowed_origins = origins
+  cfg
+end
+
+def uniform?(text : String, byte : UInt8) : Bool
+  bytes = text.to_unsafe
+  index = 0
+  while index < text.bytesize
+    return false unless bytes[index] == byte
+    index = index + 1
+  end
+  true
+end
+
+describe "WebSocket frames" do
+  it "encodes a server frame unmasked with a 7-bit length" do
+    assert WebSocket.encode_frame(WebSocket::TEXT, "Hello") == "\x81\x05Hello"
+    assert WebSocket.encode_frame(WebSocket::PONG, "") == "\x8a\x00"
+  end
+
+  it "masks and unmasks the RFC 6455 §5.7 sample" do
+    wire = "\x81\x85\x37\xfa\x21\x3d\x7f\x9f\x4d\x51\x58"
+    assert WebSocket.encode_frame(WebSocket::TEXT, "Hello", true, MASK) == wire
+    decoded = WebSocket.decode_frame(wire, 0, true, 1024)
+    assert decoded.is_a?(Frame)
+    if decoded.is_a?(Frame)
+      assert decoded.fin
+      assert decoded.opcode == WebSocket::TEXT
+      assert decoded.payload == "Hello"
+      assert decoded.size == 11
+    end
+  end
+
+  it "switches to a 16-bit length at 126 bytes and a 64-bit one at 65536" do
+    assert WebSocket.encode_frame(WebSocket::BINARY, "x" * 125)[0, 2] == "\x82\x7d"
+    assert WebSocket.encode_frame(WebSocket::BINARY, "x" * 126)[0, 4] == "\x82\x7e\x00\x7e"
+    assert WebSocket.encode_frame(WebSocket::BINARY, "x" * 256)[0, 4] == "\x82\x7e\x01\x00"
+    assert WebSocket.encode_frame(WebSocket::BINARY, "x" * 65535)[0, 4] == "\x82\x7e\xff\xff"
+    long = WebSocket.encode_frame(WebSocket::BINARY, "x" * 65536)
+    assert long[0, 10] == "\x82\x7f\x00\x00\x00\x00\x00\x01\x00\x00"
+    assert long.bytesize == 10 + 65536
+
+    [125, 126, 65535, 65536, 70000].each do |size|
+      payload = "y" * size
+      decoded = WebSocket.decode_frame(WebSocket.encode_frame(WebSocket::BINARY, payload, true, MASK), 0, true, 100000)
+      assert decoded.is_a?(Frame)
+      if decoded.is_a?(Frame)
+        assert decoded.payload == payload
+        assert decoded.opcode == WebSocket::BINARY
+      end
+    end
+  end
+
+  it "says how many bytes a frame still needs, from what its header tells" do
+    wire = WebSocket.encode_frame(WebSocket::TEXT, "z" * 300, true, MASK)
+    assert WebSocket.decode_frame("", 0, true, 1024) == 2
+    assert WebSocket.decode_frame(wire[0, 1], 0, true, 1024) == 2
+    assert WebSocket.decode_frame(wire[0, 3], 0, true, 1024) == 4
+    assert WebSocket.decode_frame(wire[0, 4], 0, true, 1024) == 4 + 4 + 300
+    assert WebSocket.decode_frame(wire[0, wire.bytesize - 1], 0, true, 1024) == wire.bytesize
+    assert WebSocket.decode_frame("\x82\xff\x00\x00", 0, true, 1024) == 10
+  end
+
+  it "reads a frame at an offset, the way a buffer holding two is read" do
+    first = WebSocket.encode_frame(WebSocket::TEXT, "one", false, MASK)
+    second = WebSocket.encode_frame(WebSocket::CONTINUATION, "two", true, MASK)
+    both = first + second
+    head = WebSocket.decode_frame(both, 0, true, 1024)
+    assert head.is_a?(Frame)
+    if head.is_a?(Frame)
+      assert !head.fin
+      assert head.opcode == WebSocket::TEXT
+      tail = WebSocket.decode_frame(both, head.size, true, 1024)
+      assert tail.is_a?(Frame)
+      if tail.is_a?(Frame)
+        assert tail.fin
+        assert tail.opcode == WebSocket::CONTINUATION
+        assert tail.payload == "two"
+        assert head.size + tail.size == both.bytesize
+      end
+    end
+  end
+
+  it "refuses what the RFC says to fail a connection over" do
+    refused = [
+      {"\x81\x05Hello", 1002},                              # unmasked client frame
+      {"\xc1\x80" + MASK, 1002},                            # RSV1 without an extension
+      {"\x83\x80" + MASK, 1002},                            # opcode 3 is reserved
+      {"\x09\x80" + MASK, 1002},                            # a ping without FIN
+      {"\x89\xfe\x00\x7e" + MASK, 1002},                    # a ping over 125 bytes
+      {"\x82\xff\x80\x00\x00\x00\x00\x00\x00\x00", 1002},   # 64-bit length with its high bit
+      {"\x82\xfe\x04\x01", 1009},                           # 1025 bytes against a 1024 limit
+    ]
+    refused.each do |pair|
+      decoded = WebSocket.decode_frame(pair[0], 0, true, 1024)
+      assert decoded.is_a?(FrameError)
+      if decoded.is_a?(FrameError)
+        assert decoded.code == pair[1]
+      end
+    end
+    # The limit is exact, and an unmasked frame is a client's to read.
+    assert WebSocket.decode_frame("\x82\xfe\x04\x00", 0, true, 1024) == 4 + 4 + 1024
+    assert WebSocket.decode_frame("\x81\x05Hello", 0, false, 1024).is_a?(Frame)
+  end
+
+  it "writes a close payload and knows which codes a frame may carry" do
+    assert WebSocket.close_payload(1000, "bye") == "\x03\xe8bye"
+    assert WebSocket.close_payload(4000, "") == "\x0f\xa0"
+    assert WebSocket.close_payload(1005, "ignored") == ""
+    [1000, 1001, 1003, 1007, 1011, 1014, 3000, 4999].each { |code| assert WebSocket.valid_close_code?(code) }
+    [0, 999, 1004, 1005, 1006, 1015, 2999, 5000].each { |code| assert !WebSocket.valid_close_code?(code) }
+  end
+end
+
+describe "WebSocket handshake" do
+  it "computes the RFC 6455 sample accept key" do
+    assert WebSocket.accept_key("dGhlIHNhbXBsZSBub25jZQ==") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+  end
+
+  it "answers 101 with the accept key, url params and the GET filters" do
+    router = Router.new
+    router.before_get "/rooms/:room" do |env|
+      env.set("filtered", env.params.url["room"])
+      nil
+    end
+    router.ws "/rooms/:room" do |socket, env|
+    end
+    ctx = dispatch(RouteHandler.new(router, settings), upgrade("/rooms/lobby"))
+    assert ctx.response.status_code == 101
+    assert ctx.response.headers["Upgrade"] == "websocket"
+    assert ctx.response.headers["Connection"] == "Upgrade"
+    assert ctx.response.headers["Sec-WebSocket-Accept"] == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+    assert !ctx.response.upgrade_handler.nil?
+    assert ctx.params.url["room"] == "lobby"
+    assert ctx.get("filtered") == "lobby"
+    assert ctx.route_pattern == "/rooms/:room"
+  end
+
+  it "takes the upgrade over a GET route on the same path, and leaves it a plain GET" do
+    router = Router.new
+    router.get "/chat" do |env|
+      "page"
+    end
+    router.ws "/chat" do |socket, env|
+    end
+    handler = RouteHandler.new(router, settings)
+    assert dispatch(handler, upgrade("/chat")).response.status_code == 101
+    plain = dispatch(handler, "GET", "/chat")
+    assert plain.response.status_code == 200
+    assert plain.response.body == "page"
+    assert plain.response.upgrade_handler.nil?
+  end
+
+  it "does not upgrade a request a before filter halted or left an error status on" do
+    router = Router.new
+    router.before "/private" do |env|
+      env.halt(401, "who are you")
+    end
+    router.before_get "/guarded" do |env|
+      env.response.status_code = 403
+      nil
+    end
+    router.ws "/private" do |socket, env|
+    end
+    router.ws "/guarded" do |socket, env|
+    end
+    router.error 403 do |env|
+      "not for you"
+    end
+    handler = RouteHandler.new(router, settings)
+    halted = dispatch(handler, upgrade("/private"))
+    assert halted.response.status_code == 401
+    assert halted.response.body == "who are you"
+    assert halted.response.upgrade_handler.nil?
+    guarded = dispatch(handler, upgrade("/guarded"))
+    assert guarded.response.status_code == 403
+    assert guarded.response.body == "not for you"
+    assert guarded.response.headers["Connection"] == "close"
+    assert guarded.response.upgrade_handler.nil?
+  end
+
+  it "answers another method 405 unless an HTTP route serves it" do
+    router = Router.new
+    router.ws "/chat" do |socket, env|
+    end
+    router.post "/chat" do |env|
+      "posted"
+    end
+    router.ws "/only" do |socket, env|
+    end
+    handler = RouteHandler.new(router, settings)
+    put = dispatch(handler, upgrade("/chat", "PUT"))
+    assert put.response.status_code == 405
+    assert put.response.headers["Allow"] == "GET, POST"
+    assert put.response.headers["Connection"] == "close"
+    assert dispatch(handler, upgrade("/chat", "POST")).response.body == "posted"
+    only = dispatch(handler, upgrade("/only", "POST"))
+    assert only.response.status_code == 405
+    assert only.response.headers["Allow"] == "GET"
+    assert only.response.upgrade_handler.nil?
+  end
+
+  it "answers a request that does not ask to upgrade 426, and HEAD 405" do
+    router = Router.new
+    router.ws "/socket" do |socket, env|
+    end
+    handler = RouteHandler.new(router, settings)
+    plain = dispatch(handler, "GET", "/socket")
+    assert plain.response.status_code == 426
+    assert plain.response.headers["Upgrade"] == "websocket"
+    head = dispatch(handler, "HEAD", "/socket")
+    assert head.response.status_code == 405
+    assert head.response.headers["Allow"] == "GET"
+    other = upgrade("/socket")
+    other.headers["Upgrade"] = "h2c"
+    assert dispatch(handler, other).response.status_code == 426
+    assert dispatch(handler, "GET", "/elsewhere").response.status_code == 404
+  end
+
+  it "refuses a malformed handshake 400, closing the connection" do
+    router = Router.new
+    router.ws "/ws" do |socket, env|
+    end
+    handler = RouteHandler.new(router, settings)
+
+    no_connection = upgrade("/ws")
+    no_connection.headers["Connection"] = "keep-alive"
+    no_key = upgrade("/ws")
+    no_key.headers.delete("Sec-WebSocket-Key")
+    short_key = upgrade("/ws")
+    short_key.headers["Sec-WebSocket-Key"] = "c2hvcnQ="
+    bad_key = upgrade("/ws")
+    bad_key.headers["Sec-WebSocket-Key"] = "dGhlIHNhbXBsZSBub25jZ!=="
+    old = Request.new("GET", "/ws", "", "HTTP/1.0", upgrade("/ws").headers, "")
+
+    [no_connection, no_key, short_key, bad_key, old].each do |request|
+      ctx = dispatch(handler, request)
+      assert ctx.response.status_code == 400
+      assert ctx.response.headers["Connection"] == "close"
+      assert ctx.response.upgrade_handler.nil?
+    end
+  end
+
+  it "refuses a version other than 13 with 426 naming 13" do
+    router = Router.new
+    router.ws "/ws" do |socket, env|
+    end
+    request = upgrade("/ws")
+    request.headers["Sec-WebSocket-Version"] = "8"
+    ctx = dispatch(RouteHandler.new(router, settings), request)
+    assert ctx.response.status_code == 426
+    assert ctx.response.headers["Sec-WebSocket-Version"] == "13"
+    assert ctx.response.headers["Connection"] == "close"
+  end
+
+  it "checks Origin: same-origin by default, an allowlist, or everything with *" do
+    router = Router.new
+    router.ws "/ws" do |socket, env|
+    end
+    with_origin = ->(origin : String?) {
+      request = upgrade("/ws")
+      request.headers.delete("Origin")
+      if value = origin
+        request.headers["Origin"] = value
+      end
+      request
+    }
+    same = RouteHandler.new(router, settings)
+    assert dispatch(same, with_origin.call("http://localhost")).response.status_code == 101
+    assert dispatch(same, with_origin.call("HTTPS://LOCALHOST:443")).response.status_code == 101
+    assert dispatch(same, with_origin.call("http://localhost:8080")).response.status_code == 403
+    assert dispatch(same, with_origin.call("http://evil.example")).response.status_code == 403
+    assert dispatch(same, with_origin.call("null")).response.status_code == 403
+    missing = dispatch(same, with_origin.call(nil))
+    assert missing.response.status_code == 403
+    assert missing.response.headers["Connection"] == "close"
+
+    listed = RouteHandler.new(router, settings(["https://app.example", "http://localhost:3000", "null"]))
+    assert dispatch(listed, with_origin.call("https://app.example:443")).response.status_code == 101
+    assert dispatch(listed, with_origin.call("http://localhost:3000")).response.status_code == 101
+    assert dispatch(listed, with_origin.call("null")).response.status_code == 101
+    assert dispatch(listed, with_origin.call("http://localhost")).response.status_code == 403
+    assert dispatch(listed, with_origin.call("http://app.example")).response.status_code == 403
+    assert dispatch(listed, with_origin.call(nil)).response.status_code == 403
+
+    open = RouteHandler.new(router, settings(["*"]))
+    assert dispatch(open, with_origin.call(nil)).response.status_code == 101
+    assert dispatch(open, with_origin.call("http://evil.example")).response.status_code == 101
+  end
+
+  it "finds ws routes under a mount's prefix" do
+    inner = Router.new
+    inner.ws "/feed" do |socket, env|
+    end
+    outer = Router.new
+    outer.mount("/api", inner)
+    assert outer.ws_routes.map(&.path) == ["/api/feed"]
+    assert dispatch(RouteHandler.new(outer, settings), upgrade("/api/feed")).response.status_code == 101
+  end
+end
+
+describe "WebSocket session" do
+  it "echoes text and binary, answers a ping with its payload, and hears a pong" do
+    seen = Seen.new
+    converse(1024, watched(seen)) do |peer|
+      peer.send(WebSocket::TEXT, "héllo")
+      echoed = peer.expect
+      assert echoed.opcode == WebSocket::TEXT
+      assert echoed.payload == "héllo"
+      peer.send(WebSocket::BINARY, "\x00\xff\x01")
+      assert peer.expect.payload == "\x00\xff\x01"
+      peer.send(WebSocket::PING, "are you there")
+      pong = peer.expect
+      assert pong.opcode == WebSocket::PONG
+      assert pong.payload == "are you there"
+      peer.send(WebSocket::PONG, "unasked")
+      peer.send(WebSocket::CLOSE, WebSocket.close_payload(1000, ""))
+      assert peer.expect_close == {1000, ""}
+    end
+    assert seen.messages == ["héllo"]
+    assert seen.binaries == ["\x00\xff\x01"]
+    assert seen.pings == ["are you there"]
+    assert seen.pongs == ["unasked"]
+    assert seen.closes == [{1000, ""}]
+  end
+
+  it "puts fragments back together, with a ping between them answered first" do
+    seen = Seen.new
+    converse(1024, watched(seen)) do |peer|
+      peer.send(WebSocket::TEXT, "frag", false)
+      peer.send(WebSocket::CONTINUATION, "men", false)
+      peer.send(WebSocket::PING, "mid")
+      peer.send(WebSocket::CONTINUATION, "ted", true)
+      first = peer.expect
+      assert first.opcode == WebSocket::PONG
+      assert first.payload == "mid"
+      whole = peer.expect
+      assert whole.opcode == WebSocket::TEXT
+      assert whole.payload == "fragmented"
+      peer.send(WebSocket::CLOSE, WebSocket.close_payload(1001, "leaving"))
+      assert peer.expect_close == {1001, ""}
+    end
+    assert seen.messages == ["fragmented"]
+    assert seen.closes == [{1001, "leaving"}]
+  end
+
+  it "closes with 1002 for an unmasked frame and for fragments out of order" do
+    violations = [
+      WebSocket.encode_frame(WebSocket::TEXT, "bare"),
+      WebSocket.encode_frame(WebSocket::CONTINUATION, "orphan", true, MASK),
+      WebSocket.encode_frame(WebSocket::TEXT, "a", false, MASK) + WebSocket.encode_frame(WebSocket::TEXT, "b", true, MASK),
+      WebSocket.encode_frame(WebSocket::CLOSE, "\x03", true, MASK),
+      WebSocket.encode_frame(WebSocket::CLOSE, WebSocket.close_payload(1006, ""), true, MASK),
+    ]
+    violations.each do |bytes|
+      seen = Seen.new
+      converse(1024, watched(seen)) do |peer|
+        peer.write(bytes)
+        assert peer.expect_close[0] == 1002
+      end
+      assert seen.messages.empty?
+      assert seen.closes.size == 1
+      assert seen.closes[0][0] == 1002
+    end
+  end
+
+  it "closes with 1007 for text that is not UTF-8" do
+    seen = Seen.new
+    converse(1024, watched(seen)) do |peer|
+      peer.send(WebSocket::TEXT, "caf\xc3", false)
+      peer.send(WebSocket::CONTINUATION, "\x28", true)
+      assert peer.expect_close[0] == 1007
+    end
+    assert seen.messages.empty?
+    assert seen.closes[0][0] == 1007
+  end
+
+  it "closes with 1009 for a message over the limit, whole or in fragments, but not for a ping" do
+    [
+      WebSocket.encode_frame(WebSocket::TEXT, "x" * 17, true, MASK),
+      WebSocket.encode_frame(WebSocket::TEXT, "x" * 9, false, MASK) + WebSocket.encode_frame(WebSocket::CONTINUATION, "x" * 8, true, MASK),
+    ].each do |bytes|
+      seen = Seen.new
+      converse(16, watched(seen)) do |peer|
+        peer.send(WebSocket::TEXT, "x" * 16)
+        assert peer.expect.payload == "x" * 16
+        peer.send(WebSocket::PING, "p" * 125)
+        assert peer.expect.payload == "p" * 125
+        peer.write(bytes)
+        assert peer.expect_close[0] == 1009
+      end
+      assert seen.messages == ["x" * 16]
+      assert seen.closes[0][0] == 1009
+    end
+  end
+
+  it "closes first when asked, keeps reading until the client answers, and sends nothing after" do
+    seen = Seen.new
+    late = [] of Bool
+    setup = ->(ws : WebSocket) {
+      ws.on_message do |text|
+        ws.close(4000, "done with " + text)
+        late << ws.send("late")
+        late << ws.closed?
+      end
+      ws.on_close { |code, reason| seen.closes << {code, reason} }
+    }
+    converse(1024, setup) do |peer|
+      peer.send(WebSocket::TEXT, "you")
+      closing = peer.expect
+      assert closing.opcode == WebSocket::CLOSE
+      assert closing.payload == WebSocket.close_payload(4000, "done with you")
+      peer.send(WebSocket::CLOSE, WebSocket.close_payload(4000, "ok"))
+      assert peer.frame.nil?
+    end
+    assert late == [false, true]
+    assert seen.closes == [{4000, "ok"}]
+    assert panics? { WebSocket.new(IyiSocket.new(-1)).close(1005) }
+    assert panics? { WebSocket.new(IyiSocket.new(-1)).close(1000, "x" * 124) }
+    assert panics? { WebSocket.new(IyiSocket.new(-1)).ping("x" * 126) }
+  end
+
+  it "reports 1006 when the client goes without a close frame, and a send after that is false" do
+    seen = Seen.new
+    held = [] of WebSocket
+    setup = ->(ws : WebSocket) {
+      held << ws
+      seen.watch(ws)
+    }
+    converse(1024, setup) do |peer|
+      peer.send(WebSocket::TEXT, "bye")
+      assert peer.expect.payload == "bye"
+    end
+    assert seen.closes == [{1006, ""}]
+    assert held[0].closed?
+    assert !held[0].send("anyone?")
+    assert !held[0].ping
+  end
+
+  it "ends the session with 1011 when a callback panics" do
+    setup = ->(ws : WebSocket) {
+      ws.on_message { |text| raise "handler failed on " + text }
+    }
+    converse(1024, setup) do |peer|
+      peer.send(WebSocket::TEXT, "this")
+      assert peer.expect_close[0] == 1011
+    end
+  end
+
+  it "reads a frame that arrived with the handshake before the socket" do
+    seen = Seen.new
+    pair = connected
+    peer = Peer.new(pair[1])
+    group do |g|
+      g.spawn do
+        WebSocket.new(pair[0], 1024).run(WebSocket.encode_frame(WebSocket::TEXT, "early", true, MASK)) { |ws| seen.watch(ws) }
+        0
+      end
+      g.spawn do
+        assert peer.expect.payload == "early"
+        pair[1].close
+        0
+      end
+      0
+    end
+    assert seen.messages == ["early"]
+  end
+
+  it "lets one frame out at a time when several tasks send at once" do
+    size = 1024 * 1024
+    counts = [0, 0, 0]
+    letters = ["a", "b", "c"]
+    setup = ->(ws : WebSocket) {
+      # A block parameter is fresh on every call; a `while` loop's local
+      # would be one variable, shared by every task.
+      group do |w|
+        letters.each do |letter|
+          w.spawn do
+            4.times { ws.send_binary(letter * size) }
+            0
+          end
+        end
+        0
+      end
+      ws.close(1000, "")
+      nil
+    }
+    converse(1024, setup) do |peer|
+      # Reading late fills the socket's buffers, so the senders park.
+      sleep(50)
+      12.times do
+        frame = peer.expect
+        assert frame.opcode == WebSocket::BINARY
+        assert frame.payload.bytesize == size
+        index = 0
+        while index < 3
+          counts[index] = counts[index] + 1 if uniform?(frame.payload, letters[index].to_unsafe[0])
+          index = index + 1
+        end
+      end
+      closing = peer.expect
+      assert closing.opcode == WebSocket::CLOSE
+      peer.send(WebSocket::CLOSE, WebSocket.close_payload(1000, ""))
+    end
+    assert counts == [4, 4, 4]
+  end
+end
+
+# --- Over a server ---
+
+class Room
+  @members : Array(WebSocket)
+
+  def initialize
+    @members = [] of WebSocket
+  end
+
+  def join(socket : WebSocket) : Nil
+    @members << socket
+  end
+
+  def leave(socket : WebSocket) : Nil
+    @members.delete(socket)
+  end
+
+  def size : Int32
+    @members.size
+  end
+
+  def broadcast(text : String) : Int32
+    sent = 0
+    @members.each { |member| sent = sent + 1 if member.send(text) }
+    sent
+  end
+end
+
+ROOM = Room.new
+
+def handshake(path : String, origin : String = "http://example.com") : String
+  "GET #{path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: #{origin}\r\n\r\n"
+end
+
+# The response head, and a peer holding whatever came after it.
+def open_socket(port : Int32, path : String, first : String = "") : Tuple(String, Peer)
+  client = IyiSocket.connect("127.0.0.1", port).or_panic
+  client.write(handshake(path) + first).or_panic
+  buffer = ""
+  loop do
+    ending = buffer.index("\r\n\r\n")
+    if ending
+      return {buffer[0, ending + 4], Peer.new(client, buffer[ending + 4, buffer.bytesize - ending - 4])}
+    end
+    chunk = client.read(4096).or_panic
+    raise "closed before the handshake answered" if chunk.empty?
+    buffer = buffer + chunk
+  end
+end
+
+server_router = Router.new
+server_router.get "/" do |env|
+  "home"
+end
+server_router.ws "/echo" do |socket, env|
+  socket.on_message { |text| socket.send(text) }
+end
+server_router.ws "/room/:name" do |socket, env|
+  name = env.params.url["name"]
+  ROOM.join(socket)
+  socket.on_message { |text| ROOM.broadcast(name + ": " + text) }
+  socket.on_close { |code, reason| ROOM.leave(socket) }
+end
+
+server_config = settings(["http://example.com"])
+server_config.logging = false
+server = Server.new(chain([RouteHandler.new(server_router, server_config)]), server_config)
+port = server.bind("127.0.0.1", 0)
+
+group do |g|
+  g.spawn do
+    describe "WebSocket over a server" do
+      it "upgrades, reads a frame sent with the handshake, echoes, pongs and closes" do
+        opened = open_socket(port, "/echo", WebSocket.encode_frame(WebSocket::TEXT, "pipelined", true, MASK))
+        head = opened[0]
+        peer = opened[1]
+        assert status_line(head) == "HTTP/1.1 101 Switching Protocols"
+        assert http_header(head, "Upgrade") == "websocket"
+        assert http_header(head, "Connection") == "Upgrade"
+        assert http_header(head, "Sec-WebSocket-Accept") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        assert http_header(head, "Content-Length").nil?
+        assert peer.expect.payload == "pipelined"
+        peer.send(WebSocket::TEXT, "second")
+        assert peer.expect.payload == "second"
+        peer.send(WebSocket::PING, "p")
+        assert peer.expect.payload == "p"
+        peer.send(WebSocket::CLOSE, WebSocket.close_payload(1000, ""))
+        assert peer.expect_close == {1000, ""}
+        peer.socket.close
+      end
+
+      it "refuses a foreign Origin with 403 and closes the connection" do
+        client = IyiSocket.connect("127.0.0.1", port).or_panic
+        client.write(handshake("/echo", "http://evil.example")).or_panic
+        answer = ""
+        loop do
+          chunk = client.read(4096).or_panic
+          break if chunk.empty?
+          answer = answer + chunk
+        end
+        client.close
+        assert status_line(answer) == "HTTP/1.1 403 Forbidden"
+        assert http_header(answer, "Connection") == "close"
+      end
+
+      it "broadcasts across connections, and one that left does not stop the rest" do
+        ada = open_socket(port, "/room/ada")[1]
+        bob = open_socket(port, "/room/bob")[1]
+        cem = open_socket(port, "/room/cem")[1]
+        ada.send(WebSocket::TEXT, "hi")
+        assert ada.expect.payload == "ada: hi"
+        assert bob.expect.payload == "ada: hi"
+        assert cem.expect.payload == "ada: hi"
+
+        # Cem's connection drops without a close frame: its socket stays in
+        # the room until the server notices, and a send to it answers false.
+        cem.socket.close
+        bob.send(WebSocket::TEXT, "still here")
+        assert ada.expect.payload == "bob: still here"
+        assert bob.expect.payload == "bob: still here"
+
+        ada.send(WebSocket::CLOSE, WebSocket.close_payload(1000, ""))
+        assert ada.expect_close == {1000, ""}
+        ada.socket.close
+        bob.send(WebSocket::TEXT, "alone")
+        assert bob.expect.payload == "bob: alone"
+        bob.send(WebSocket::CLOSE, WebSocket.close_payload(1000, ""))
+        assert bob.expect_close == {1000, ""}
+        bob.socket.close
+
+        home = IyiSocket.connect("127.0.0.1", port).or_panic
+        home.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").or_panic
+        answer = ""
+        loop do
+          chunk = home.read(4096).or_panic
+          break if chunk.empty?
+          answer = answer + chunk
+        end
+        home.close
+        assert http_body(answer) == "home"
+      end
+    end
+
+    server.close
+    0
+  end
+
+  g.spawn do
+    server.listen
+    0
+  end
+end

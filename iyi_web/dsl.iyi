@@ -21,6 +21,7 @@ import iyi_web/static::{StaticHandler}
 import iyi_web/path::{PathHandler}
 import iyi_web/compress::{CompressHandler}
 import iyi_web/event_stream::{EventStream}
+import iyi_web/websocket::{WebSocket}
 import iyi_web/cli::{CLIParser, cli_parser}
 import iyi_web/templates
 
@@ -92,6 +93,11 @@ end
 # A GET route answering with server-sent events; see `EventStream`.
 pub def sse(path : String, &block : EventStream, Context -> Nil) : Nil
   APP.sse(path, &block)
+end
+
+# A WebSocket endpoint; see `Router#ws` and `WebSocket`.
+pub def ws(path : String, &block : WebSocket, Context -> Nil) : Nil
+  APP.ws(path, &block)
 end
 
 pub def error(status_code : Int32, &block : Context -> B) : Nil forall B : IntoBody
@@ -264,7 +270,7 @@ pub def handler_chain : Handler
   end
   cfg.custom_handlers.each { |handler| handlers << handler }
   cfg.positioned_handlers.each { |entry| handlers = insert_at(handlers, entry[0], entry[1]) }
-  handlers << RouteHandler.new(app)
+  handlers << RouteHandler.new(app, cfg)
   chain(handlers)
 end
 

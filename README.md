@@ -30,6 +30,7 @@ a route returns is checked when the program compiles.
 - Composable routers with `mount` and `namespace`
 - Middleware for every request or for a path prefix
 - Streaming responses and server-sent events
+- WebSockets, with an `Origin` check and sends from any fiber
 - Static files with `ETag`, `304 Not Modified`, gzip and byte ranges, streamed
   from disk
 - File downloads, cookies, redirects and early responses with `halt`
@@ -444,6 +445,74 @@ lines and flushes; `comment` sends a keep-alive line clients ignore. An event
 name or id containing a line break panics. The stream ends when the block
 returns. A browser reads it with `new EventSource("/clock")`.
 
+### WebSockets
+
+```iyi
+import web/iyi_web/dsl::*
+import web/iyi_web/websocket::{WebSocket}
+
+class Room
+  @members : Array(WebSocket)
+
+  def initialize
+    @members = [] of WebSocket
+  end
+
+  def join(socket : WebSocket) : Nil
+    @members << socket
+  end
+
+  def leave(socket : WebSocket) : Nil
+    @members.delete(socket)
+  end
+
+  def broadcast(text : String) : Nil
+    @members.each { |member| member.send(text) }
+  end
+end
+
+ROOM = Room.new
+
+ws "/chat/:name" do |socket, env|
+  name = env.params.url["name"]
+  ROOM.join(socket)
+  socket.on_message { |text| ROOM.broadcast(name + ": " + text) }
+  socket.on_close { |code, reason| ROOM.leave(socket) }
+end
+```
+
+`ws` registers a WebSocket endpoint (RFC 6455); `Router#ws` does the same on a
+router. A `GET` with `Upgrade: websocket` runs the `before` filters for `GET`,
+then gets `101 Switching Protocols`. The block then receives the socket and the
+context and sets the callbacks, and the connection's fiber reads frames until
+the socket closes. The connection carries no more HTTP requests and has no read
+timeout.
+
+- Callbacks: `on_message` (text), `on_binary` (the bytes as a `String`),
+  `on_ping`, `on_pong` and `on_close(code, reason)`.
+- Sending: `send(text)`, `send_binary(bytes)`, `ping`, `pong` and
+  `close(code = 1000, reason = "")`. Each returns `false` once the socket is
+  closed or its client has gone, and affects nothing else. Any fiber may send,
+  as a broadcast from another connection does; frames never interleave.
+- A ping is answered with a pong, and fragments arrive as one message. Text that
+  is not UTF-8 closes the connection with `1007`, an unmasked or malformed frame
+  with `1002`, a message over `websocket_max_message_size` with `1009`, and a
+  callback that panics with `1011`. `on_close` gets `1006` when the client left
+  without a close frame.
+- Another method gets `405` unless an HTTP route serves it. A missing
+  `Connection: Upgrade`, HTTP/1.0 or a bad `Sec-WebSocket-Key` gets `400`, an
+  `Origin` that is not allowed `403`, and a `Sec-WebSocket-Version` other than
+  13 gets `426` with `Sec-WebSocket-Version: 13`. A refused handshake closes
+  the connection.
+- A `GET` without `Upgrade: websocket` goes to the HTTP route on the same path,
+  or gets `426 Upgrade Required` when there is none.
+
+`Origin` is checked against `websocket_allowed_origins`. Empty, the default,
+means same-origin: the `Origin` has to name the request's `Host`. A request
+without `Origin`, which most clients outside a browser send, is refused unless
+the list holds `"*"`. A browser connects with
+`new WebSocket("ws://localhost:3000/chat/ada")`.
+
 ## Filters
 
 ```iyi
@@ -731,6 +800,8 @@ config.max_request_body_size = 1024 * 1024
 | `write_timeout` | `60` | |
 | `idle_timeout` | `75` | |
 | `unix_socket` | `nil` | |
+| `websocket_allowed_origins` | `[] of String` (same-origin) | |
+| `websocket_max_message_size` | `8 * 1024 * 1024` | |
 | `app_name` | `"iyi-web"` | |
 
 - `max_keepalive_requests` caps the requests served on one connection before
@@ -740,6 +811,9 @@ config.max_request_body_size = 1024 * 1024
   connection is closed.
 - `max_ranges` is the most ranges one `Range` header may ask for; `0` turns
   range requests off.
+- `websocket_allowed_origins` lists origins such as `"https://example.com"`;
+  `"*"` admits every request and `"null"` a sandboxed page.
+- `websocket_max_message_size` counts a fragmented message whole.
 - `app_name` and `env` appear in the line printed at startup. With `env` set
   to `test`, `run` binds the port without serving requests.
 - `powered_by true` adds `X-Powered-By: iyi-web` to every response.
@@ -873,7 +947,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 
 | Module | Provides |
 |---|---|
-| `web/iyi_web/dsl` | Routes, filters, `error`, `mount`, `use`, `sse`, `render`, `run` and the setting shorthands |
+| `web/iyi_web/dsl` | Routes, filters, `error`, `mount`, `use`, `sse`, `ws`, `render`, `run` and the setting shorthands |
 | `web/iyi_web/router` | `Router`, `RouteHandler` |
 | `web/iyi_web/context` | `Context` |
 | `web/iyi_web/request` | `Request` |
@@ -887,6 +961,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/config` | `Config`, `config` |
 | `web/iyi_web/cli` | `CLIParser` |
 | `web/iyi_web/event_stream` | `EventStream` |
+| `web/iyi_web/websocket` | `WebSocket`, `Frame`, `FrameError` |
 | `web/iyi_web/templates` | `render`, `content_for`, `yield_content` |
 | `web/iyi_web/compress` | `CompressHandler` and the `Accept-Encoding` helpers |
 | `web/iyi_web/range` | `Range` header parsing and `206` responses |

@@ -44,6 +44,8 @@ pub class Config
   @write_timeout : Int32?
   @idle_timeout : Int32?
   @unix_socket : String?
+  @websocket_allowed_origins : Array(String)
+  @websocket_max_message_size : Int32
 
   def initialize
     @app_name = "iyi-web"
@@ -79,6 +81,8 @@ pub class Config
     @write_timeout = 60
     @idle_timeout = 75
     @unix_socket = nil
+    @websocket_allowed_origins = [] of String
+    @websocket_max_message_size = 8 * 1024 * 1024
   end
 
   pub def app_name : String
@@ -322,6 +326,30 @@ pub class Config
   pub def static_headers=(hook : StaticHeadersHook) : StaticHeadersHook
     @static_headers = hook
     hook
+  end
+
+  # Which `Origin`s may open a WebSocket, written `"https://example.com"`
+  # or `"http://localhost:3000"`. Empty, the default, is same-origin: the
+  # `Origin` must name the request's `Host`. A request without `Origin`
+  # is refused unless the list holds `"*"`, which admits everything;
+  # `"null"` admits the opaque origin a sandboxed page sends. A refused
+  # handshake gets 403.
+  pub def websocket_allowed_origins : Array(String)
+    @websocket_allowed_origins
+  end
+
+  pub def websocket_allowed_origins=(value : Array(String)) : Array(String)
+    @websocket_allowed_origins = value
+  end
+
+  # The largest WebSocket message a client may send, in bytes, fragments
+  # put together; a larger one closes the connection with 1009.
+  pub def websocket_max_message_size : Int32
+    @websocket_max_message_size
+  end
+
+  pub def websocket_max_message_size=(value : Int32) : Int32
+    @websocket_max_message_size = value
   end
 
   pub def development? : Bool

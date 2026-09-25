@@ -9,6 +9,7 @@
 # closes. Headers changed after the first `flush` are not sent.
 module iyi_web/response
 
+import std/socket::{IyiSocket}
 import iyi_web/headers::{Headers}
 import iyi_web/status::*
 
@@ -24,6 +25,7 @@ pub class Response
   @head : Bool
   @headers_sent : Bool
   @chunked : Bool
+  @upgrade : Proc(IyiSocket, String, Nil)?
 
   def initialize
     @status_code = 200
@@ -37,6 +39,7 @@ pub class Response
     @head = false
     @headers_sent = false
     @chunked = false
+    @upgrade = nil
   end
 
   pub def status_code : Int32
@@ -93,6 +96,7 @@ pub class Response
     @body = ""
     @closed = false
     @content_type = "text/html; charset=utf-8"
+    @upgrade = nil
   end
 
   # True once `flush` has sent the status line and headers.
@@ -159,6 +163,18 @@ pub class Response
     reason = phrase(@status_code)
     payload = include_body && !no_entity ? @body : ""
     version + " " + @status_code.to_s + " " + reason + "\r\n" + @headers.to_s + "\r\n" + payload
+  end
+
+  # Takes the connection over once this response - a 101 - is out. The
+  # server writes the status line and headers, then calls *block* with the
+  # socket and whatever the client sent after the request, and the
+  # connection carries no more HTTP. How a WebSocket starts.
+  pub def upgrade(&block : IyiSocket, String -> Nil) : Nil
+    @upgrade = block
+  end
+
+  pub def upgrade_handler : Proc(IyiSocket, String, Nil)?
+    @upgrade
   end
 
   private def no_entity? : Bool

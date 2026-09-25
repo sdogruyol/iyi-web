@@ -285,7 +285,7 @@ pub class Server
       in Tuple(Request, String, Bool)
         leftover = it[1]
         keepalive = wants_keepalive?(it[2], requests)
-        return unless dispatch(client, it[0], keepalive, exchange)
+        return unless dispatch(client, it[0], leftover, keepalive, exchange)
         requests = requests + 1
       end
     end
@@ -299,8 +299,10 @@ pub class Server
   end
 
   # Runs the chain for one request and writes its response. True when the
-  # connection may carry another request.
-  private def dispatch(client : IyiSocket, request : Request, keepalive : Bool, exchange : Exchange) : Bool
+  # connection may carry another request. *leftover* is what the client
+  # sent after this request, which a connection taken over (a WebSocket)
+  # reads first.
+  private def dispatch(client : IyiSocket, request : Request, leftover : String, keepalive : Bool, exchange : Exchange) : Bool
     @in_flight = @in_flight + 1
     defer leave
     ctx = Context.for(request)
@@ -313,6 +315,9 @@ pub class Server
     ctx.response.attach(->(bytes : String) { write_raw(client, bytes) }, wire_version(request), keepalive, head)
     stamp(ctx)
     @handler.call(ctx)
+    if upgrade = ctx.response.upgrade_handler
+      return take_over(client, ctx, leftover, exchange, upgrade) if ctx.response.status_code == 101
+    end
     if conn = ctx.response.headers["connection"]?
       keepalive = false if conn.downcase == "close"
     end
@@ -334,6 +339,20 @@ pub class Server
 
   private def leave : Nil
     @in_flight = @in_flight - 1
+  end
+
+  # A 101 hands the connection to whoever asked for it once the status line
+  # and headers are out, and the connection carries no more HTTP. The read
+  # timeout was for a request arriving; an upgraded connection waits on
+  # its own terms. A panic from here on has no response to become.
+  private def take_over(client : IyiSocket, ctx : Context, leftover : String, exchange : Exchange, upgrade : Proc(IyiSocket, String, Nil)) : Bool
+    exchange.writing = true
+    write_raw(client, ctx.response.to_http(wire_version(ctx.request), false))
+    exchange.writing = false
+    exchange.context = nil
+    client.read_timeout_ms = nil
+    upgrade.call(client, leftover)
+    false
   end
 
   private def stamp(ctx : Context) : Nil
