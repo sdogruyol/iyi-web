@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    env:
+      # The oldest iyi this release supports (README, Requirements).
+      IYI_VERSION: 0.15.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install iyi
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/iyilang/iyi/master/install.sh | IYI_PREFIX="$HOME/.iyi" sh
+          echo "$HOME/.iyi/bin" >> "$GITHUB_PATH"
+
+      - run: iyi version
+
+      - name: Test
+        run: iyi test iyi_web
+
+      - name: Build the examples
+        run: |
+          for example in examples/*.iyi; do
+            case "$example" in *_test.iyi) continue ;; esac
+            echo "building $example"
+            iyi build "$example" -o "$RUNNER_TEMP/example"
+          done
