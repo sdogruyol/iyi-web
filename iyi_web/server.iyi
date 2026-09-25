@@ -212,7 +212,8 @@ pub class Server
       prepare_500(ctx)
       page_failed = isolated { body = page.call(ctx) }
       unless page_failed
-        ctx.response.set_body(body)
+        # A page written with `env.json` or `env.text` answers nil.
+        ctx.response.set_body(body) unless body.empty?
         rendered = true
       end
     end

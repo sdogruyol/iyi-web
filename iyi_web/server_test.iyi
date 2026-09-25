@@ -95,6 +95,10 @@ router.get "/boom-twice" do |env|
   raise "handler failed" if env.request.path == "/boom-twice"
   "unreachable"
 end
+router.get "/boom-json" do |env|
+  raise "handler failed" if env.request.path == "/boom-json"
+  "unreachable"
+end
 router.sse "/events" do |stream, env|
   stream.send("one", event: "tick")
   stream.send("two", event: "tick")
@@ -111,7 +115,13 @@ router.post "/upload" do |env|
 end
 router.error 500 do |env|
   raise "page failed" if env.request.path == "/boom-twice"
-  "sorry: " + env.request.path
+  if env.request.path == "/boom-json"
+    # Written by the helper; the block's own answer is empty.
+    env.json({"error" => "sorry"})
+    ""
+  else
+    "sorry: " + env.request.path
+  end
 end
 
 cfg = config
@@ -281,6 +291,13 @@ group do |g|
         assert status_line(boom) == "HTTP/1.1 500 Internal Server Error"
         assert http_header(boom, "Connection") == "close"
         assert http_body(boom) == "sorry: /boom"
+      end
+
+      it "sends the error 500 page a helper wrote" do
+        boom = exchange(port, close_request("GET", "/boom-json"))
+        assert status_line(boom) == "HTTP/1.1 500 Internal Server Error"
+        assert http_header(boom, "Content-Type") == "application/json; charset=utf-8"
+        assert http_body(boom) == "{\"error\":\"sorry\"}"
       end
 
       it "falls back to the built-in 500 page when the error page panics" do

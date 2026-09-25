@@ -628,6 +628,52 @@ describe "Router" do
       assert ctx.response.status_code == 401
       assert ctx.response.body == "login"
     end
+
+    it "keeps a page an error handler writes with a helper, in place of the route's body" do
+      handler = routes do |r|
+        r.get "/gone" do |env|
+          env.response.status_code = 410
+          "route body"
+        end
+        r.before "/locked" do |env|
+          env.response.status_code = 423
+        end
+        r.get "/locked" do |env|
+          "open"
+        end
+        r.error 404 do |env|
+          env.text("no such page")
+        end
+        r.error 410 do |env|
+          env.json({"error" => "gone"})
+        end
+        r.error 423 do |env|
+          env.html("<p>locked</p>")
+        end
+      end
+      missing = dispatch(handler, "GET", "/nope")
+      assert missing.response.status_code == 404
+      assert missing.response.body == "no such page"
+      assert missing.response.content_type == "text/plain; charset=utf-8"
+      gone = dispatch(handler, "GET", "/gone")
+      assert gone.response.status_code == 410
+      assert gone.response.body == "{\"error\":\"gone\"}"
+      locked = dispatch(handler, "GET", "/locked")
+      assert locked.response.body == "<p>locked</p>"
+    end
+
+    it "sends an empty page when an error handler answers nil and writes nothing" do
+      handler = routes do |r|
+        r.get "/gone" do |env|
+          env.response.status_code = 410
+          "route body"
+        end
+        r.error 410 do |env|
+          nil
+        end
+      end
+      assert dispatch(handler, "GET", "/gone").response.body == ""
+    end
   end
 
   describe "namespace and mount" do

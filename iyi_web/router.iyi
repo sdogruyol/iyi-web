@@ -283,7 +283,7 @@ pub class RouteHandler < Handler
     # gets that page, and the route does not run.
     if ctx.response.status_code >= 400
       if custom = @error_handlers[ctx.response.status_code]?
-        ctx.response.set_body(custom.call(ctx))
+        render_page(ctx, custom)
         drop_head_body(ctx)
         return
       end
@@ -317,7 +317,7 @@ pub class RouteHandler < Handler
 
     if custom = @error_handlers[ctx.response.status_code]?
       if ctx.response.status_code >= 400
-        ctx.response.set_body(custom.call(ctx))
+        render_page(ctx, custom)
       end
     end
 
@@ -373,10 +373,19 @@ pub class RouteHandler < Handler
   private def render_error(ctx : Context, status : Int32) : Nil
     ctx.response.status_code = status
     if handler = @error_handlers[status]?
-      ctx.response.set_body(handler.call(ctx))
+      render_page(ctx, handler)
     else
       ctx.response.content_type = "text/html; charset=utf-8"
       ctx.response.set_body(status.to_s + " " + phrase(status))
     end
+  end
+
+  # An error page answers its body, or writes it with a helper such as
+  # `env.json` and answers nil. What the response held before - a route's
+  # own body, a halt's message - is not the page, so it goes first.
+  private def render_page(ctx : Context, page : HandlerProc) : Nil
+    ctx.response.set_body("")
+    body = page.call(ctx)
+    ctx.response.set_body(body) unless body.empty?
   end
 end
