@@ -993,6 +993,7 @@ iyi run examples/json_api.iyi -- -p 8080
 | `routers.iyi` | `Router`, `mount`, `namespace`, router filters and error pages |
 | `middleware.iyi` | A custom `Handler` with `only` and `exclude`, CORS, gzip and static files from `examples/public/` |
 | `streaming_and_sse.iyi` | `flush`, chunked responses and server-sent events |
+| `websocket_chat.iyi` | A chat room over `ws`, broadcasting to every member |
 | `cookies_and_context.iyi` | Cookies, redirects and `env.set` / `env.get` |
 | `testing.iyi` | Routes in their own module, tested in-process by `testing_test.iyi` |
 

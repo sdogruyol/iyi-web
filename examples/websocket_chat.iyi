@@ -1,0 +1,89 @@
+# A chat room over WebSockets: every message a member sends goes to every
+# member. Run from the repository root with
+# `iyi run examples/websocket_chat.iyi` and open http://localhost:3000 in
+# two browser tabs.
+module examples/websocket_chat
+
+import iyi_web/dsl::*
+import iyi_web/websocket::{WebSocket}
+
+PAGE = <<-HTML
+  <form id="join"><input id="name" placeholder="name" required><button>Join</button></form>
+  <form id="say" hidden><input id="text" autocomplete="off"><button>Send</button></form>
+  <ul id="log"></ul>
+  <script>
+    let socket;
+    const log = (line) => {
+      const item = document.createElement("li");
+      item.textContent = line;
+      document.getElementById("log").append(item);
+    };
+    document.getElementById("join").onsubmit = (event) => {
+      event.preventDefault();
+      const name = encodeURIComponent(document.getElementById("name").value);
+      socket = new WebSocket("ws://" + location.host + "/chat/" + name);
+      socket.onmessage = (message) => log(message.data);
+      socket.onclose = (close) => log("closed: " + close.code);
+      event.target.hidden = true;
+      document.getElementById("say").hidden = false;
+    };
+    document.getElementById("say").onsubmit = (event) => {
+      event.preventDefault();
+      socket.send(document.getElementById("text").value);
+      document.getElementById("text").value = "";
+    };
+  </script>
+  HTML
+
+# The members of the room. Every connection's fiber reaches the same room,
+# and any fiber may send to any socket: `send` never interleaves frames.
+class Room
+  @members : Array(WebSocket)
+
+  def initialize
+    @members = [] of WebSocket
+  end
+
+  def join(socket : WebSocket) : Nil
+    @members << socket
+  end
+
+  def leave(socket : WebSocket) : Nil
+    @members.delete(socket)
+  end
+
+  # A member who has gone answers false and is skipped; `on_close` takes
+  # them out of the room.
+  def broadcast(text : String) : Nil
+    @members.each { |member| member.send(text) }
+  end
+end
+
+ROOM = Room.new
+
+get "/" do |env|
+  PAGE
+end
+
+# The block sets the callbacks and returns; the connection's fiber then
+# reads frames and calls them until the socket closes. The browser's
+# `Origin` must be this server's own, which `websocket_allowed_origins`
+# can widen.
+ws "/chat/:name" do |socket, env|
+  name = env.params.url["name"]
+  ROOM.join(socket)
+  ROOM.broadcast(name + " joined")
+  socket.on_message do |text|
+    if text == "/quit"
+      socket.close(1000, "bye " + name)
+    else
+      ROOM.broadcast(name + ": " + text)
+    end
+  end
+  socket.on_close do |code, reason|
+    ROOM.leave(socket)
+    ROOM.broadcast(name + " left")
+  end
+end
+
+run
