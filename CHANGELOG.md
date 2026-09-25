@@ -6,16 +6,19 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-25
+
+Requires iyi 0.15.0 or later. The exported surface is v0.1.0's, line for
+line (`iyi mod release` compared them).
+
 ### Changed
 
 - Written in iyi 0.15.0's one keyword: `import X::{a}` and `import X::*`
-  where `import X` + `using X` were, produced by `iyi fix .`. Requires iyi
-  0.15.0 or later, which refuses `using`.
-
+  where `import X` + `using X` were, produced by `iyi fix .`. iyi 0.15.0
+  refuses `using`, so v0.1.0 does not build on it.
 - iyi-web is installed as an `iyi.mod` requirement instead of copying
   `iyi_web/` into `lib/`: `iyi get github.com/sdogruyol/iyi-web --as web`, then
-  `using web/iyi_web/dsl`. The README's examples name modules this way, with one
-  `using` line and no `import`. Requires iyi newer than 0.14.1.
+  `import web/iyi_web/dsl::*`. The README's examples name modules this way.
 
 ## [0.1.0] - 2026-09-24
 
@@ -65,5 +68,6 @@ The first release. Requires iyi 0.14.1 or later.
   `Content-Length` is read, before the body is buffered.
 - Static file paths with a `..` segment or a NUL byte are refused.
 
-[Unreleased]: https://github.com/sdogruyol/iyi-web/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/sdogruyol/iyi-web/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/sdogruyol/iyi-web/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/sdogruyol/iyi-web/releases/tag/v0.1.0

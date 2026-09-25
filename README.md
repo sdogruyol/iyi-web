@@ -56,7 +56,7 @@ This fetches the latest release, records it in `iyi.sum` and writes one line to
 `iyi.mod`:
 
 ```
-require github.com/sdogruyol/iyi-web v0.1.0 as web
+require github.com/sdogruyol/iyi-web v0.1.1 as web
 ```
 
 Files then name iyi-web's modules as `web/iyi_web/...`. One `import` line loads
@@ -68,7 +68,7 @@ import web/iyi_web/router::{Router}
 ```
 
 `iyi get -u` moves to the latest release, and
-`iyi get github.com/sdogruyol/iyi-web@v0.1.0` to a given one.
+`iyi get github.com/sdogruyol/iyi-web@v0.1.1` to a given one.
 
 iyi reads `iyi.mod` from the directory of the file being built, so keep the
 entry file, and every `*_test.iyi` that uses iyi-web, beside it. Modules of
