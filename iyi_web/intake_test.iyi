@@ -1,0 +1,137 @@
+# Requests taken off a connection a few bytes at a time. Each wire is fed
+# in several read sizes, since where a read ends is the client's choice.
+module iyi_web/intake_test
+
+import iyi_web/intake::{Intake, TooLarge}
+import iyi_web/request::{Request, ParseError}
+import iyi_web/spec::*
+
+STEPS = [1, 2, 3, 7, 64, 4096]
+
+# Feeds *wire* to an intake *step* bytes at a time, as reads would bring it,
+# and answers the first thing `take` gives back.
+def feed(wire : String, step : Int32, max_body : Int32 = 1024) : Tuple(Request, String, Bool) | ParseError | TooLarge | Nil
+  intake = Intake.new("", max_body)
+  at = 0
+  while at < wire.bytesize
+    size = step < wire.bytesize - at ? step : wire.bytesize - at
+    intake.append(wire[at, size])
+    at = at + size
+    if taken = intake.take
+      return taken
+    end
+  end
+  nil
+end
+
+def taken(wire : String, step : Int32, max_body : Int32 = 1024) : Tuple(Request, String, Bool)
+  case got = feed(wire, step, max_body)
+  in Tuple(Request, String, Bool) then got
+  in ParseError                   then raise "refused: #{got.message}"
+  in TooLarge                     then raise "too large"
+  in Nil                          then raise "incomplete"
+  end
+end
+
+def refused?(wire : String, step : Int32, max_body : Int32 = 1024) : Bool
+  feed(wire, step, max_body).is_a?(ParseError)
+end
+
+def too_large?(wire : String, step : Int32, max_body : Int32 = 1024) : Bool
+  feed(wire, step, max_body).is_a?(TooLarge)
+end
+
+NEXT = "GET /next HTTP/1.1\r\nHost: x\r\n\r\n"
+
+describe "Intake" do
+  it "takes a request with no body as soon as its head is in, leaving the next one" do
+    STEPS.each do |step|
+      got = taken("GET /a?b=c HTTP/1.1\r\nHost: x\r\n\r\n" + NEXT, step)
+      assert got[0].method == "GET"
+      assert got[0].path == "/a"
+      assert got[0].body == ""
+      # A read may have brought part of the next request; what it brought is kept.
+      assert NEXT.starts_with?(got[1])
+    end
+  end
+
+  it "waits for Content-Length bytes and leaves what follows them" do
+    STEPS.each do |step|
+      got = taken("POST /e HTTP/1.1\r\nContent-Length: 11\r\n\r\nhello world" + NEXT, step)
+      assert got[0].body == "hello world"
+      assert NEXT.starts_with?(got[1])
+    end
+    assert feed("POST /e HTTP/1.1\r\nContent-Length: 11\r\n\r\nhello worl", 4096).nil?
+  end
+
+  it "decodes a chunked body with extensions and trailers" do
+    wire = "POST /c HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5;name=v\r\nhello\r\n 1 \r\n \r\nA\r\n0123456789\r\n0\r\nX-Sum: 1\r\n\r\n"
+    STEPS.each do |step|
+      got = taken(wire + NEXT, step)
+      assert got[0].body == "hello 0123456789"
+      assert got[0].headers["transfer-encoding"]? == "chunked"
+      assert NEXT.starts_with?(got[1])
+    end
+    assert feed(wire[0, wire.bytesize - 2], 4096).nil?
+  end
+
+  it "refuses a malformed chunked body" do
+    head = "POST /c HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+    STEPS.each do |step|
+      assert refused?(head + "zz\r\nhello\r\n0\r\n\r\n", step)
+      assert refused?(head + "\r\n0\r\n\r\n", step)
+      assert refused?(head + "5\r\nhelloXX0\r\n\r\n", step)
+      assert refused?(head + "123456789\r\n", step)
+    end
+  end
+
+  it "answers TooLarge before the body arrives" do
+    assert too_large?("POST /e HTTP/1.1\r\nContent-Length: 1025\r\n\r\n", 4096)
+    assert taken("POST /e HTTP/1.1\r\nContent-Length: 4\r\n\r\nabcd", 4096, 4)[0].body == "abcd"
+    chunked = "POST /c HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2\r\nde\r\n"
+    STEPS.each do |step|
+      # The second chunk's size line passes the bound; nothing ends the body yet.
+      assert too_large?(chunked, step, 4)
+      assert taken(chunked + "0\r\n\r\n", step, 5)[0].body == "abcde"
+    end
+  end
+
+  it "refuses framing it cannot read one way" do
+    STEPS.each do |step|
+      assert refused?("POST /e HTTP/1.1\r\nContent-Length: 3\r\ncontent-length: 4\r\n\r\nabcd", step)
+      assert refused?("POST /e HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", step)
+      assert refused?("POST /e HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n", step)
+      assert refused?("POST /e HTTP/1.1\r\nContent-Length: abc\r\n\r\n", step)
+    end
+    same = taken("POST /e HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabc", 4096)
+    assert same[0].body == "abc"
+  end
+
+  it "refuses a head that never ends" do
+    wire = "GET / HTTP/1.1\r\nX-Filler: " + "a" * 1048576
+    assert refused?(wire, 65536)
+    assert feed(wire[0, 65536], 65536).nil?
+  end
+
+  it "asks for a body the client holds back for 100 Continue, once" do
+    intake = Intake.new("", 1024)
+    intake.append("POST /e HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 3\r\n\r\n")
+    assert intake.take.nil?
+    assert intake.continue_due?
+    assert !intake.continue_due?
+    intake.append("abc")
+    assert intake.take.is_a?(Tuple(Request, String, Bool))
+
+    old = Intake.new("POST /e HTTP/1.0\r\nExpect: 100-continue\r\nContent-Length: 3\r\n\r\n", 1024)
+    assert old.take.nil?
+    assert !old.continue_due?
+
+    empty = Intake.new("POST /e HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 0\r\n\r\n", 1024)
+    assert empty.take.is_a?(Tuple(Request, String, Bool))
+    assert !empty.continue_due?
+
+    refused = Intake.new("POST /e HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 2000\r\n\r\n", 1024)
+    assert refused.take.is_a?(TooLarge)
+    assert !refused.continue_due?
+  end
+end

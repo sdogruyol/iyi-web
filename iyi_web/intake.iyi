@@ -1,0 +1,333 @@
+# A request's bytes as they come off a connection, parsed once they are
+# all there.
+#
+# Parsing the whole buffer again after every read, and growing it by
+# concatenation, made a body cost the square of its size: an 8 MB upload
+# took 1.3 s of the server's time, and 64 MB 18.5 s. The bytes are kept in
+# a buffer that grows by doubling instead, the head's end is searched for
+# only in what is new, and `std/http`'s parser runs once the request is
+# whole: when `Content-Length` bytes have followed the head, or when a
+# chunked body's last chunk has arrived. A chunked body is decoded here as
+# it arrives, since `std/http` decodes one by concatenating its chunks.
+#
+# The framing is read from the head the way `std/http` reads it, and what
+# it cannot agree on is refused rather than guessed at: two
+# `Content-Length`s that differ, or more than one `Transfer-Encoding`.
+module iyi_web/intake
+
+import std/http::{HTTP}
+import iyi_web/request::{Request, ParseError, parse_incoming, with_body}
+
+# `std/http`'s bound on a request's head.
+MAX_HEAD = 1048576
+
+# A chunk-size line, extensions included, or a trailer line.
+MAX_CHUNK_LINE = 4096
+
+SIZE_LINE  = 0
+CHUNK_DATA = 1
+CHUNK_END  = 2
+TRAILERS   = 3
+
+# The body is larger than the server takes; the answer is `413`.
+pub struct TooLarge
+end
+
+pub class Intake
+  @bytes : ByteBuffer
+  @body : ByteBuffer
+  @max_body : Int32
+  @searched : Int32
+  @head_end : Int32
+  @need : Int32
+  @chunked : Bool
+  @scan : Int32
+  @state : Int32
+  @remaining : Int32
+  @continue : Bool
+
+  # *leftover* is what the connection's last request left unread.
+  def initialize(leftover : String, @max_body : Int32)
+    @bytes = ByteBuffer.new(leftover.bytesize < 4096 ? 4096 : leftover.bytesize)
+    @body = ByteBuffer.new(64)
+    @searched = 0
+    @head_end = -1
+    @need = -1
+    @chunked = false
+    @scan = 0
+    @state = SIZE_LINE
+    @remaining = 0
+    @continue = false
+    append(leftover)
+  end
+
+  pub def append(chunk : String) : Nil
+    @bytes.append(chunk.to_unsafe, chunk.bytesize)
+  end
+
+  # No byte of a request has arrived.
+  pub def empty? : Bool
+    @bytes.size == 0
+  end
+
+  # True once, when the head asked for `100 Continue` and has been read
+  # without being refused: the client waits for it before sending the
+  # body (curl waits a second for any body over a megabyte).
+  pub def continue_due? : Bool
+    return false unless @continue
+    @continue = false
+    true
+  end
+
+  # The request with what follows it and whether the client asked to
+  # close, a refusal, or nil when more has to arrive.
+  pub def take : Tuple(Request, String, Bool) | ParseError | TooLarge | Nil
+    if @head_end < 0
+      unless find_head_end
+        return ParseError.new("request headers past #{MAX_HEAD} bytes") if @bytes.size > MAX_HEAD
+        return nil
+      end
+      refused = read_framing
+      return refused if refused
+    end
+    @chunked ? take_chunked : take_sized
+  end
+
+  private def take_sized : Tuple(Request, String, Bool) | ParseError | TooLarge | Nil
+    return nil if @bytes.size < @need
+    text = @bytes.to_s(0, @bytes.size)
+    incoming = parse_incoming(text)
+    if req = incoming.request
+      return TooLarge.new if req.body.bytesize > @max_body
+      return {req, text[incoming.consumed, text.bytesize - incoming.consumed], incoming.close}
+    end
+    if reason = incoming.error
+      return ParseError.new(reason)
+    end
+    # The parser wants more than the framing said: let it decide from here.
+    @need = @bytes.size + 1
+    nil
+  end
+
+  private def take_chunked : Tuple(Request, String, Bool) | ParseError | TooLarge | Nil
+    case ended = decode_chunks
+    in Nil
+      nil
+    in ParseError
+      ended
+    in TooLarge
+      ended
+    in Int32
+      # The head is parsed with an empty chunked body after it, so the
+      # parser checks it as it would any; the body is the one decoded here.
+      incoming = parse_incoming(@bytes.to_s(0, @head_end + 4) + "0\r\n\r\n")
+      if req = incoming.request
+        return {with_body(req, @body.to_s(0, @body.size)), @bytes.to_s(ended, @bytes.size - ended), incoming.close}
+      end
+      ParseError.new(incoming.error || "incomplete request")
+    end
+  end
+
+  # Looks for the blank line that ends the head in what arrived since the
+  # last look; true once it is there.
+  private def find_head_end : Bool
+    p = @bytes.pointer
+    n = @bytes.size
+    i = @searched > 3 ? @searched - 3 : 0
+    while i + 3 < n
+      if p[i] == 13_u8 && p[i + 1] == 10_u8 && p[i + 2] == 13_u8 && p[i + 3] == 10_u8
+        @head_end = i
+        return true
+      end
+      i = i + 1
+    end
+    @searched = n
+    false
+  end
+
+  private def read_framing : ParseError | TooLarge | Nil
+    body_start = @head_end + 4
+    lines = HTTP.split_crlf(@bytes.to_s(0, @head_end))
+    lengths = [] of String
+    encodings = [] of String
+    expects = false
+    index = 1
+    while index < lines.size
+      line = lines[index]
+      index = index + 1
+      colon = line.index(':')
+      next unless colon
+      name = line[0, colon]
+      value = HTTP.trim(line[colon + 1, line.bytesize - colon - 1])
+      lengths << value if HTTP.same_name?(name, "Content-Length")
+      encodings << value if HTTP.same_name?(name, "Transfer-Encoding")
+      expects = true if HTTP.same_name?(name, "Expect") && HTTP.same_name?(value, "100-continue")
+    end
+    # An HTTP/1.0 client does not know the interim answer.
+    expects = false unless lines.size > 0 && lines[0].ends_with?(" HTTP/1.1")
+
+    return ParseError.new("more than one Transfer-Encoding") if encodings.size > 1
+    if encodings.size == 1
+      if HTTP.same_name?(encodings[0], "chunked")
+        @chunked = true
+        @scan = body_start
+        @continue = expects
+      else
+        # Not chunked: the parser refuses it.
+        @need = body_start
+      end
+      return nil
+    end
+
+    @need = body_start
+    return nil if lengths.empty?
+    lengths.each do |other|
+      return ParseError.new("Content-Length given twice, differently") unless other == lengths[0]
+    end
+    declared = lengths[0].to_i64?
+    # Not a length: the parser refuses it.
+    return nil unless declared && declared >= 0
+    return TooLarge.new if declared > @max_body.to_i64
+    @need = body_start + declared.to_i32
+    @continue = expects && declared > 0
+    nil
+  end
+
+  # Decodes what has arrived of a chunked body into `@body`: the index just
+  # past the body's end once it has all arrived, nil until then.
+  private def decode_chunks : Int32 | ParseError | TooLarge | Nil
+    p = @bytes.pointer
+    n = @bytes.size
+    while @scan < n
+      if @state == SIZE_LINE
+        line_end = find_crlf(@scan)
+        unless line_end
+          return ParseError.new("chunk size line too long") if n - @scan > MAX_CHUNK_LINE
+          return nil
+        end
+        size = chunk_size(@scan, line_end)
+        return ParseError.new("not a chunk size") if size < 0
+        return TooLarge.new if @body.size.to_i64 + size > @max_body.to_i64
+        @scan = line_end + 2
+        if size == 0
+          @state = TRAILERS
+        else
+          @remaining = size.to_i32
+          @state = CHUNK_DATA
+        end
+      elsif @state == CHUNK_DATA
+        take = n - @scan
+        take = @remaining if @remaining < take
+        @body.append(p + @scan, take)
+        @scan = @scan + take
+        @remaining = @remaining - take
+        @state = CHUNK_END if @remaining == 0
+      elsif @state == CHUNK_END
+        return nil if n - @scan < 2
+        return ParseError.new("a chunk is not followed by CRLF") unless p[@scan] == 13_u8 && p[@scan + 1] == 10_u8
+        @scan = @scan + 2
+        @state = SIZE_LINE
+      else
+        line_end = find_crlf(@scan)
+        unless line_end
+          return ParseError.new("trailer line too long") if n - @scan > MAX_CHUNK_LINE
+          return nil
+        end
+        return line_end + 2 if line_end == @scan
+        @scan = line_end + 2
+      end
+    end
+    nil
+  end
+
+  # The chunk size written between *from* and *to*, without its
+  # extensions and blanks; -1 when it is not hexadecimal. Eight digits at
+  # most, which is more than any body the server takes.
+  private def chunk_size(from : Int32, to : Int32) : Int64
+    p = @bytes.pointer
+    last = from
+    while last < to && p[last] != 59_u8
+      last = last + 1
+    end
+    first = from
+    while first < last && (p[first] == 32_u8 || p[first] == 9_u8)
+      first = first + 1
+    end
+    while last > first && (p[last - 1] == 32_u8 || p[last - 1] == 9_u8)
+      last = last - 1
+    end
+    return -1_i64 if last == first || last - first > 8
+    value = 0_i64
+    i = first
+    while i < last
+      byte = p[i]
+      digit = if byte >= 48_u8 && byte <= 57_u8
+                byte.to_i64 - 48_i64
+              elsif byte >= 97_u8 && byte <= 102_u8
+                byte.to_i64 - 87_i64
+              elsif byte >= 65_u8 && byte <= 70_u8
+                byte.to_i64 - 55_i64
+              else
+                -1_i64
+              end
+      return -1_i64 if digit < 0
+      value = value * 16_i64 + digit
+      i = i + 1
+    end
+    value
+  end
+
+  private def find_crlf(from : Int32) : Int32?
+    p = @bytes.pointer
+    n = @bytes.size
+    i = from
+    while i + 1 < n
+      return i if p[i] == 13_u8 && p[i + 1] == 10_u8
+      i = i + 1
+    end
+    nil
+  end
+end
+
+# Bytes that grow by doubling, so appending n bytes costs O(n) in all.
+class ByteBuffer
+  @pointer : Pointer(UInt8)
+  @capacity : Int32
+  @size : Int32
+
+  def initialize(capacity : Int32)
+    @capacity = capacity < 16 ? 16 : capacity
+    @pointer = Pointer(UInt8).malloc(@capacity.to_u64)
+    @size = 0
+  end
+
+  def pointer : Pointer(UInt8)
+    @pointer
+  end
+
+  def size : Int32
+    @size
+  end
+
+  def append(bytes : Pointer(UInt8), count : Int32) : Nil
+    return if count <= 0
+    needed = @size + count
+    if needed > @capacity
+      grown = @capacity * 2
+      while grown < needed
+        grown = grown * 2
+      end
+      @pointer = @pointer.realloc(grown.to_u64)
+      @capacity = grown
+    end
+    (@pointer + @size).copy_from(bytes, count)
+    @size = needed
+  end
+
+  def to_s(from : Int32, count : Int32) : String
+    source = @pointer + from
+    String.new(count) do |target|
+      target.copy_from(source, count)
+    end
+  end
+end

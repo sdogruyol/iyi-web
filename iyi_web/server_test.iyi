@@ -173,6 +173,28 @@ group do |g|
         assert http_body(bulky) == payload
       end
 
+      it "answers Expect: 100-continue before the body, then the request" do
+        client = IyiSocket.connect("127.0.0.1", port).or_panic
+        client.write(close_request("POST", "/echo", "Expect: 100-continue\r\nContent-Length: 5\r\n")).or_panic
+        interim = ""
+        while interim.bytesize < 25
+          chunk = client.read(25 - interim.bytesize).or_panic
+          break if chunk.empty?
+          interim = interim + chunk
+        end
+        assert interim == "HTTP/1.1 100 Continue\r\n\r\n"
+        client.write("hello").or_panic
+        final = read_frame(client)
+        client.close
+        assert status_line(final) == "HTTP/1.1 200 OK"
+        assert http_body(final) == "hello"
+      end
+
+      it "decodes a chunked POST body" do
+        chunked = exchange(port, close_request("POST", "/echo", "Transfer-Encoding: chunked\r\n") + "3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n")
+        assert http_body(chunked) == "abcde"
+      end
+
       it "parses a form body" do
         form = exchange(port, close_request("POST", "/form", "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 8\r\n") + "name=iyi")
         assert http_body(form) == "iyi"

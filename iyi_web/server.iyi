@@ -39,7 +39,8 @@ import std/html::{HTML}
 import std/time::{Time, Span}
 import iyi_web/handler::{Handler}
 import iyi_web/context::{Context}
-import iyi_web/request::{Request, ParseError, Incoming, parse_incoming}
+import iyi_web/request::{Request, ParseError}
+import iyi_web/intake::{Intake, TooLarge}
 import iyi_web/response::{Response}
 import iyi_web/config::{Config}
 import iyi_web/http_date::*
@@ -387,8 +388,8 @@ pub class Server
   end
 
   # A body over `max_request_body_size` is refused as soon as its
-  # `Content-Length` is read, before the body itself is buffered; a chunked
-  # body is measured once it has arrived.
+  # `Content-Length` is read, before the body itself is buffered, and a
+  # chunked one as soon as its chunks pass it (`Intake`).
   #
   # A request has `read_timeout` to arrive whole, counted from its first
   # byte - from the accept, for a connection's *first* request - and one
@@ -398,23 +399,20 @@ pub class Server
   # request, and a new one only the request it has already sent.
   private def read_request(conn : Connection, leftover : String, first : Bool) : Tuple(Request, String, Bool) | ParseError | TooLarge | TimedOut | Closed
     client = conn.socket
-    buffer = leftover
+    intake = Intake.new(leftover, @config.max_request_body_size)
     limit = milliseconds(@config.read_timeout)
     since = first ? conn.accepted : Time.monotonic
     loop do
-      incoming = parse_incoming(buffer)
-      if req = incoming.request
-        return TooLarge.new if req.body.bytesize > @config.max_request_body_size
-        leftover_after = buffer[incoming.consumed, buffer.bytesize - incoming.consumed]
-        return {req, leftover_after, incoming.close}
+      if taken = intake.take
+        return taken
       end
-      if reason = incoming.error
-        return ParseError.new(reason)
-      end
-      return TooLarge.new if declared_too_large?(buffer)
 
       return Closed.new if client.closed?
-      waiting = buffer.empty?
+      if intake.continue_due?
+        # The client holds the body back until it is asked for it.
+        return Closed.new unless client.write("HTTP/1.1 100 Continue\r\n\r\n").is_a?(Int32)
+      end
+      waiting = intake.empty?
       wait = limit
       if waiting && !first
         return Closed.new if @draining
@@ -442,7 +440,7 @@ pub class Server
         return Closed.new if chunk.empty? && waiting
         return ParseError.new("connection closed mid-headers") if chunk.empty?
         since = Time.monotonic if waiting && !first
-        buffer = buffer + chunk
+        intake.append(chunk)
       end
     end
   end
@@ -450,23 +448,6 @@ pub class Server
   private def elapsed_ms(since : Span) : Int64
     gone = Time.monotonic - since
     gone.total_seconds_i64 * 1000_i64 + (gone.nanoseconds // 1000000).to_i64
-  end
-
-  private def declared_too_large?(buffer : String) : Bool
-    head_end = HTTP.find_headers_end(buffer)
-    return false unless head_end
-    lines = HTTP.split_crlf(buffer[0, head_end])
-    index = 1
-    while index < lines.size
-      line = lines[index]
-      colon = line.index(':')
-      if colon && line[0, colon].strip.downcase == "content-length"
-        declared = line[colon + 1, line.bytesize - colon - 1].strip.to_i64?
-        return declared ? declared > @config.max_request_body_size.to_i64 : false
-      end
-      index = index + 1
-    end
-    false
   end
 
   private def write_error(client : IyiSocket, status : Int32, body : String) : Nil
@@ -492,9 +473,6 @@ pub class Server
 end
 
 pub struct Closed
-end
-
-pub struct TooLarge
 end
 
 pub struct TimedOut
