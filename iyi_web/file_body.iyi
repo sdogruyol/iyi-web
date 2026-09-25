@@ -1,0 +1,118 @@
+# A file as a response body, read from where it lies rather than loaded
+# whole: the static handler and `send_file` both answer through here.
+#
+# A body of up to `FILE_CHUNK_SIZE` bytes is read at once and buffered like
+# any other response, so after filters and `CompressHandler` still see it.
+# A larger one - the whole file, one range of it, or several ranges as
+# `multipart/byteranges` - is streamed: `Content-Length` is set to the
+# exact length, the head goes out through `Response#flush`, and then each
+# span is read after a seek to where it starts and flushed a chunk at a
+# time. A download costs one chunk of memory, whatever the file's size.
+# A response not attached to a connection (the test harness) keeps what
+# is flushed as its body.
+#
+# A HEAD gets the same `Content-Length` and no body, and the file is not
+# opened.
+#
+# The length is the file's size when it was looked at. A file removed
+# before it is opened, or cut short while it is read, cannot keep that
+# promise, so the send panics: before anything was flushed that is a 500,
+# after it the server ends the connection instead of letting the client
+# take a short body for a whole one. A file that grows is sent up to the
+# length promised.
+module iyi_web/file_body
+
+import std/file::{File}
+import iyi_web/response::{Response}
+import iyi_web/range::*
+
+# The most bytes read from a file, and written to the connection, at once.
+pub FILE_CHUNK_SIZE = 65536
+
+# Answers *ranges* (what `parse_ranges` made of the request's `Range`
+# header, or nil) for the file at *path*, of *size* bytes and media type
+# *content_type*: 206 with the requested bytes, 416, or the whole file.
+# The status of a whole-file answer is left as the caller set it.
+pub def respond_file(response : Response, path : String, size : Int64, ranges : Array(Tuple(Int64, Int64)) | Unsatisfiable | Nil, content_type : String, head : Bool) : Nil
+  case ranges
+  in Unsatisfiable
+    response.status_code = 416
+    response.headers["Content-Range"] = unsatisfied_range(size)
+    response.set_body("")
+  in Array(Tuple(Int64, Int64))
+    response.status_code = 206
+    spans = [] of Tuple(String, Int64, Int64)
+    if it.size == 1
+      first = it[0][0]
+      last = it[0][1]
+      response.content_type = content_type
+      response.headers["Content-Range"] = content_range(first, last, size)
+      spans << {"", first, last - first + 1_i64}
+      send_spans(response, path, spans, "", head)
+    else
+      boundary = byteranges_boundary
+      response.content_type = "multipart/byteranges; boundary=" + boundary
+      # Each part after the first opens with the CRLF that ends the one
+      # before it, and so does the closing delimiter.
+      index = 0
+      while index < it.size
+        first = it[index][0]
+        last = it[index][1]
+        separator = index == 0 ? "" : "\r\n"
+        spans << {separator + byteranges_part_head(first, last, size, content_type, boundary), first, last - first + 1_i64}
+        index = index + 1
+      end
+      send_spans(response, path, spans, "\r\n" + byteranges_tail(boundary), head)
+    end
+  in Nil
+    response.content_type = content_type
+    send_spans(response, path, [{"", 0_i64, size}], "", head)
+  end
+end
+
+# Sends each span's text and then *length* bytes of the file from *first*,
+# and *trailer* after the last span.
+private def send_spans(response : Response, path : String, spans : Array(Tuple(String, Int64, Int64)), trailer : String, head : Bool) : Nil
+  total = trailer.bytesize.to_i64
+  index = 0
+  while index < spans.size
+    total = total + spans[index][0].bytesize.to_i64 + spans[index][2]
+    index = index + 1
+  end
+
+  response.set_body("")
+  if head
+    response.headers["Content-Length"] = total.to_s
+    return
+  end
+
+  streamed = total > FILE_CHUNK_SIZE.to_i64
+  file = File.open(path, "r", FILE_CHUNK_SIZE)
+  defer file.close
+  if streamed
+    response.headers["Content-Length"] = total.to_s
+    response.flush
+  end
+  index = 0
+  while index < spans.size
+    span = spans[index]
+    response.print(span[0])
+    copy_span(response, file, path, span[1], span[2], streamed)
+    index = index + 1
+  end
+  response.print(trailer)
+  response.flush if streamed
+end
+
+private def copy_span(response : Response, file : IyiIO, path : String, first : Int64, length : Int64, streamed : Bool) : Nil
+  file.seek(first)
+  remaining = length
+  while remaining > 0_i64
+    want = remaining < FILE_CHUNK_SIZE.to_i64 ? remaining.to_i32 : FILE_CHUNK_SIZE
+    chunk = file.read_bytes(want)
+    raise "#{path} ended #{remaining} bytes short of the #{length} being sent from #{first}" if chunk.empty?
+    response.print(chunk)
+    response.flush if streamed
+    remaining = remaining - chunk.bytesize.to_i64
+  end
+end

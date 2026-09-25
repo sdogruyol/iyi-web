@@ -2,6 +2,7 @@
 # is a string bag a middleware can write for a later handler.
 module iyi_web/context_test
 
+import std/file::{File}
 import std/time::{Time}
 import iyi_web/context::{Context}
 import iyi_web/harness::*
@@ -9,6 +10,21 @@ import iyi_web/spec::*
 
 def env : Context
   Context.for(http_request("GET", "/"))
+end
+
+# *size* bytes of numbered lines, so every offset holds different text.
+def numbered(size : Int32) : String
+  lines = [] of String
+  total = 0
+  index = 0
+  while total < size
+    digits = index.to_s
+    line = "0" * (7 - digits.bytesize) + digits + "\n"
+    lines << line
+    total = total + line.bytesize
+    index = index + 1
+  end
+  lines.join[0, size]
 end
 
 describe "Context" do
@@ -163,11 +179,83 @@ describe "Context helpers" do
     assert ctx.response.headers["x-content-type-options"] == "nosniff"
   end
 
-  it "send_file of a missing path is a halted 404" do
+  it "send_file of a missing path or a directory is a halted 404" do
     ctx = env
     ctx.send_file(__DIR__ + "/fixtures/no-such.txt")
     assert ctx.response.status_code == 404
     assert ctx.halted?
+
+    folder = env
+    folder.send_file(__DIR__ + "/fixtures")
+    assert folder.response.status_code == 404
+  end
+
+  it "send_file sends a file larger than one chunk whole, from a range and from a suffix" do
+    File.tempfile("iyi-web-send-", ".txt") do |path|
+      content = numbered(200000)
+      File.write(path, content)
+
+      whole = env
+      whole.send_file(path)
+      assert whole.response.status_code == 200
+      assert whole.response.headers["content-length"] == "200000"
+      assert whole.response.body == content
+
+      ranged = http_request("GET", "/")
+      ranged.headers["Range"] = "bytes=65530-140000"
+      part = Context.for(ranged)
+      part.send_file(path)
+      assert part.response.status_code == 206
+      assert part.response.headers["content-range"] == "bytes 65530-140000/200000"
+      assert part.response.body == content[65530, 74471]
+
+      suffixed = http_request("GET", "/")
+      suffixed.headers["Range"] = "bytes=-100000"
+      last = Context.for(suffixed)
+      last.send_file(path)
+      assert last.response.status_code == 206
+      assert last.response.headers["content-range"] == "bytes 100000-199999/200000"
+      assert last.response.body == content[100000, 100000]
+    end
+  end
+
+  it "send_file answers HEAD with the file's length and no body" do
+    File.tempfile("iyi-web-head-", ".txt") do |path|
+      File.write(path, numbered(200000))
+      headed = Context.for(http_request("HEAD", "/"))
+      headed.send_file(path)
+      assert headed.response.status_code == 200
+      assert headed.response.body == ""
+      assert headed.response.headers["content-length"] == "200000"
+      assert headed.response.content_type == "text/plain; charset=utf-8"
+    end
+  end
+
+  it "send_data sends bytes from memory, typed by the filename, with ranges" do
+    named = env
+    named.send_data("0123456789", filename: "digits.txt")
+    assert named.response.body == "0123456789"
+    assert named.response.content_type == "text/plain; charset=utf-8"
+    assert named.response.headers["content-disposition"] == "attachment; filename=\"digits.txt\""
+    assert named.response.headers["accept-ranges"] == "bytes"
+
+    bare = env
+    bare.send_data("\u0000\u0001")
+    assert bare.response.content_type == "application/octet-stream"
+    assert !bare.response.headers.has_key?("Content-Disposition")
+
+    typed = env
+    typed.send_data("{}", mime_type: "application/json", filename: "x.txt", disposition: "inline")
+    assert typed.response.content_type == "application/json"
+    assert typed.response.headers["content-disposition"] == "inline; filename=\"x.txt\""
+
+    ranged = http_request("GET", "/")
+    ranged.headers["Range"] = "bytes=2-4"
+    part = Context.for(ranged)
+    part.send_data("0123456789")
+    assert part.response.status_code == 206
+    assert part.response.body == "234"
+    assert part.response.headers["content-range"] == "bytes 2-4/10"
   end
 
   it "json writes a String as is and serialises anything else" do

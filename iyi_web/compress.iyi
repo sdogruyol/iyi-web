@@ -24,6 +24,13 @@ import iyi_web/context::{Context}
 # Below this many bytes the framing a coding adds costs more than it saves.
 pub COMPRESS_MIN_SIZE = 860
 
+# The largest file the static handler compresses. `std/compress` encodes a
+# whole String in one pass, so a compressed file is read into memory with
+# its encoded copy beside it; 1 MiB bounds that to a few MiB a request and
+# about 10-30 ms of work, and covers the stylesheets, scripts and JSON that
+# gain most. A larger file is sent as it is, streamed from disk.
+pub COMPRESS_MAX_SIZE = 1048576
+
 # The codings this module can produce, most preferred first: the order
 # breaks ties between codings the client likes equally.
 CONTENT_CODINGS = ["gzip", "deflate"]

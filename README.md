@@ -30,7 +30,8 @@ a route returns is checked when the program compiles.
 - Composable routers with `mount` and `namespace`
 - Middleware for every request or for a path prefix
 - Streaming responses and server-sent events
-- Static files with `ETag`, `304 Not Modified`, gzip and byte ranges
+- Static files with `ETag`, `304 Not Modified`, gzip and byte ranges, streamed
+  from disk
 - File downloads, cookies, redirects and early responses with `halt`
 - Response compression, CORS and HTML form method override
 - Templates with layouts, compiled into the program
@@ -390,13 +391,24 @@ decoded when read, so any string round-trips. `delete_cookie` needs the same
 get "/download/report" do |env|
   env.send_file("reports/latest.pdf", filename: "report.pdf")
 end
+
+get "/download/note" do |env|
+  env.send_data("Generated for you\n", filename: "note.txt")
+end
 ```
 
 The content type follows the file extension unless `mime_type:` is given.
 `filename:` marks the response as a download; `disposition: "inline"` shows
 it instead. Non-ASCII names are encoded for every browser. A `Range` request
-gets `206 Partial Content` or `416`. A missing file responds with `404`. The
-file is read into memory in full.
+gets `206 Partial Content` or `416`. A missing file responds with `404`.
+`send_data` sends bytes held in memory the same way, typed by `filename:`.
+
+`send_file` reads the file as it sends it. A file or range larger than 64 KiB
+(`FILE_CHUNK_SIZE`) goes out in 64 KiB chunks behind its exact
+`Content-Length`, so a download costs 64 KiB of memory whatever its size;
+headers set after `send_file` are not sent for it. A `HEAD` request is
+answered from the file's size without reading it. A file cut short while it
+is being sent ends the connection, so the client sees the body as incomplete.
 
 ### Streaming
 
@@ -627,8 +639,9 @@ routing, so a file takes precedence over a route with the same path:
 - The content type follows the extension. `ETag` and `Last-Modified` are
   sent, and a matching `If-None-Match` or `If-Modified-Since` gets
   `304 Not Modified`.
-- A textual file of 860 bytes or more is sent gzip- or deflate-compressed to
-  a client that accepts it, and a `Range` request gets `206` or `416`.
+- A textual file of 860 bytes to 1 MiB is sent gzip- or deflate-compressed to
+  a client that accepts it. Any other file is read from disk as it is sent,
+  like `send_file`, and a `Range` request gets `206` or `416`.
 - A directory serves its `index.html`, after redirecting to the path with a
   trailing slash. Paths containing `..` are never served.
 
@@ -818,8 +831,6 @@ IYI_WEB_ENV=production ./app -p 8080
   nginx, Caddy or HAProxy; it can reach the server over a unix socket
   (`unix_socket`). Keep `idle_timeout` above the proxy's own keep-alive
   timeout, so that the proxy is the one to close an idle connection.
-- Static files and `send_file` read whole files into memory. Serve large files
-  from the proxy or a CDN.
 - A client that disconnects while its response is being written ends that
   request only; iyi's socket layer reports it as a panic line on standard
   error.
@@ -879,6 +890,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/templates` | `render`, `content_for`, `yield_content` |
 | `web/iyi_web/compress` | `CompressHandler` and the `Accept-Encoding` helpers |
 | `web/iyi_web/range` | `Range` header parsing and `206` responses |
+| `web/iyi_web/file_body` | `respond_file`, `FILE_CHUNK_SIZE`: a file sent from disk, whole or by range |
 | `web/iyi_web/cors` | `CORSHandler` |
 | `web/iyi_web/override` | `OverrideMethodHandler` |
 | `web/iyi_web/static` | `StaticHandler` |

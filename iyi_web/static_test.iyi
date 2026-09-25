@@ -6,6 +6,7 @@ module iyi_web/static_test
 import std/file::{File}
 import std/compress::{Gzip}
 import iyi_web/static::{StaticHandler}
+import iyi_web/compress::{COMPRESS_MAX_SIZE}
 import iyi_web/handler::{chain}
 import iyi_web/context::{Context}
 import iyi_web/harness::*
@@ -14,11 +15,30 @@ import iyi_web/spec::*
 ROOT = __DIR__ + "/fixtures"
 
 def static_app
-  chain([StaticHandler.new(ROOT), routes { |r|
+  static_app_at(ROOT)
+end
+
+def static_app_at(root : String)
+  chain([StaticHandler.new(root), routes { |r|
     r.get "/fallback" do |env|
       "from-route"
     end
   }])
+end
+
+# *size* bytes of numbered lines, so every offset holds different text.
+def numbered(size : Int32) : String
+  lines = [] of String
+  total = 0
+  index = 0
+  while total < size
+    digits = index.to_s
+    line = "0" * (7 - digits.bytesize) + digits + "\n"
+    lines << line
+    total = total + line.bytesize
+    index = index + 1
+  end
+  lines.join[0, size]
 end
 
 describe "StaticHandler" do
@@ -161,6 +181,67 @@ describe "StaticHandler" do
     assert plain.response.headers["content-encoding"]?.nil?
     assert plain.response.headers["vary"] == "Accept-Encoding"
     assert plain.response.body == File.read(ROOT + "/large.txt")
+  end
+
+  it "sends a file larger than one chunk whole, by range, for HEAD and as a 304" do
+    File.tempfile("iyi-web-static-", ".bin") do |path|
+      content = numbered(200000)
+      File.write(path, content)
+      app = static_app_at(File.dirname(path))
+      url = "/" + File.basename(path)
+
+      whole = dispatch(app, "GET", url)
+      assert whole.response.status_code == 200
+      assert whole.response.headers["content-length"] == "200000"
+      assert whole.response.body == content
+
+      headed = dispatch(app, "HEAD", url)
+      assert headed.response.status_code == 200
+      assert headed.response.body == ""
+      assert headed.response.headers["content-length"] == "200000"
+      assert headed.response.headers["etag"] == whole.response.headers["etag"]
+      assert headed.response.headers["last-modified"] == whole.response.headers["last-modified"]
+      assert headed.response.headers["accept-ranges"] == "bytes"
+
+      ranged = http_request("GET", url)
+      ranged.headers["Range"] = "bytes=100000-"
+      part = dispatch(app, ranged)
+      assert part.response.status_code == 206
+      assert part.response.headers["content-range"] == "bytes 100000-199999/200000"
+      assert part.response.body == content[100000, 100000]
+
+      cached = http_request("GET", url)
+      cached.headers["If-None-Match"] = whole.response.headers["etag"]
+      unchanged = dispatch(app, cached)
+      assert unchanged.response.status_code == 304
+      assert unchanged.response.body == ""
+    end
+  end
+
+  it "compresses a textual file of up to COMPRESS_MAX_SIZE bytes and sends a larger one as it is" do
+    File.tempfile("iyi-web-static-", ".txt") do |path|
+      content = numbered(COMPRESS_MAX_SIZE + 1)
+      File.write(path, content[0, COMPRESS_MAX_SIZE])
+      app = static_app_at(File.dirname(path))
+      url = "/" + File.basename(path)
+
+      at_limit = http_request("GET", url)
+      at_limit.headers["Accept-Encoding"] = "gzip"
+      packed = dispatch(app, at_limit)
+      assert packed.response.headers["content-encoding"] == "gzip"
+      assert packed.response.headers["vary"] == "Accept-Encoding"
+      assert Gzip.decompress(packed.response.body) == content[0, COMPRESS_MAX_SIZE]
+
+      File.write(path, content)
+      over = http_request("GET", url)
+      over.headers["Accept-Encoding"] = "gzip"
+      plain = dispatch(app, over)
+      assert plain.response.headers["content-encoding"]?.nil?
+      assert plain.response.headers["vary"]?.nil?
+      assert !plain.response.headers["etag"].ends_with?("-gzip\"")
+      assert plain.response.headers["content-length"] == (COMPRESS_MAX_SIZE + 1).to_s
+      assert plain.response.body == content
+    end
   end
 
   it "calls the headers hook with the served file" do

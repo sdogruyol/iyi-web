@@ -7,19 +7,24 @@ import iyi_web/spec::*
 import std/text
 
 # The pairs a header selects, or a panic when it did not select any.
-def pairs(header : String, size : Int32, max_ranges : Int32 = 16) : Array(Tuple(Int32, Int32))
+def wide_pairs(header : String, size : Int64, max_ranges : Int32 = 16) : Array(Tuple(Int64, Int64))
   case parse_ranges(header, size, max_ranges)
-  in Array(Tuple(Int32, Int32)) then it
+  in Array(Tuple(Int64, Int64)) then it
   in Unsatisfiable              then raise "unsatisfiable: #{header}"
   in Nil                        then raise "ignored: #{header}"
   end
 end
 
-def ignored?(header : String, size : Int32, max_ranges : Int32 = 16) : Bool
+# The same for the small sizes most examples use, compared as Int32 literals.
+def pairs(header : String, size : Int64, max_ranges : Int32 = 16) : Array(Tuple(Int32, Int32))
+  wide_pairs(header, size, max_ranges).map { |pair| {pair[0].to_i32, pair[1].to_i32} }
+end
+
+def ignored?(header : String, size : Int64, max_ranges : Int32 = 16) : Bool
   parse_ranges(header, size, max_ranges).nil?
 end
 
-def unsatisfiable?(header : String, size : Int32, max_ranges : Int32 = 16) : Bool
+def unsatisfiable?(header : String, size : Int64, max_ranges : Int32 = 16) : Bool
   parse_ranges(header, size, max_ranges).is_a?(Unsatisfiable)
 end
 
@@ -108,21 +113,35 @@ describe "parse_ranges" do
   it "ignores every header when no ranges are allowed" do
     assert ignored?("bytes=0-0", 10, 0)
   end
+
+  it "reads positions past 2 GiB for a file that large" do
+    size = 5000000000_i64
+    assert wide_pairs("bytes=-10", size) == [{4999999990_i64, 4999999999_i64}]
+    assert wide_pairs("bytes=3000000000-3000000009", size) == [{3000000000_i64, 3000000009_i64}]
+    assert unsatisfiable?("bytes=5000000000-", size)
+    assert content_range(3000000000_i64, 3000000009_i64, size) == "bytes 3000000000-3000000009/5000000000"
+  end
+
+  it "saturates a position too large for Int64" do
+    assert pairs("bytes=0-99999999999999999999999999", 10) == [{0, 9}]
+    assert pairs("bytes=-99999999999999999999999999", 10) == [{0, 9}]
+    assert unsatisfiable?("bytes=99999999999999999999999999-", 10)
+  end
 end
 
 describe "Unsatisfiable" do
   it "is an error value" do
-    assert parse_ranges("bytes=50-", 10, 16).or(nil).nil?
+    assert parse_ranges("bytes=50-", 10_i64, 16).or(nil).nil?
   end
 end
 
 describe "content_range" do
   it "names the part and the full length" do
-    assert content_range(0, 4, 10) == "bytes 0-4/10"
+    assert content_range(0_i64, 4_i64, 10_i64) == "bytes 0-4/10"
   end
 
   it "names only the length for a 416" do
-    assert unsatisfied_range(10) == "bytes */10"
+    assert unsatisfied_range(10_i64) == "bytes */10"
   end
 end
 
@@ -147,7 +166,7 @@ end
 describe "byteranges_body" do
   it "frames each part and closes the envelope" do
     body = "0123456789"
-    ranges = pairs("bytes=0-2,7-", body.bytesize)
+    ranges = pairs("bytes=0-2,7-", body.bytesize.to_i64)
     payload = byteranges_body(body, ranges, "text/plain", "b0und")
 
     assert payload.ends_with?("\r\n--b0und--\r\n")

@@ -2,10 +2,12 @@
 #
 # Every file carries `ETag` (weak, from its modification time) and
 # `Last-Modified`, and a matching `If-None-Match` or `If-Modified-Since`
-# gets a 304. A textual file of `COMPRESS_MIN_SIZE` bytes or more is sent
-# gzip- or deflate-encoded when the client accepts it. A GET with `Range`
-# gets 206 or 416. A `..` segment or a NUL byte is refused, so a request
-# cannot walk out of the folder.
+# gets a 304. A textual file of `COMPRESS_MIN_SIZE` to `COMPRESS_MAX_SIZE`
+# bytes is sent gzip- or deflate-encoded when the client accepts it. A GET
+# with `Range` gets 206 or 416. Anything not compressed is read from disk as
+# it is sent (`iyi_web/file_body`), so a large file or a range of one costs
+# a chunk of memory and a HEAD does not open the file. A `..` segment or a
+# NUL byte is refused, so a request cannot walk out of the folder.
 #
 # A directory serves its `index.html` (`dir_index`) or an HTML listing of
 # its entries (`dir_listing`); a directory path without a trailing slash
@@ -23,8 +25,9 @@ import iyi_web/handler::{Handler}
 import iyi_web/context::{Context}
 import iyi_web/config::{StaticHeadersHook}
 import iyi_web/http_date::*
-import iyi_web/compress::{COMPRESS_MIN_SIZE, select_content_coding, compressible_type?, encode_body, append_vary, etag_with_coding}
+import iyi_web/compress::{COMPRESS_MIN_SIZE, COMPRESS_MAX_SIZE, select_content_coding, compressible_type?, encode_body, append_vary, etag_with_coding}
 import iyi_web/range::*
+import iyi_web/file_body::{respond_file}
 
 pub class StaticHandler < Handler
   @root : String
@@ -82,7 +85,7 @@ pub class StaticHandler < Handler
   private def serve_file(ctx : Context, path : String, info : File::Info) : Nil
     headers = ctx.response.headers
     type = mime_type_of(path)
-    size = info.size.to_i32
+    size = info.size
     etag = "W/\"" + info.modification_time.to_s + "\""
     headers["Last-Modified"] = http_date(Time.from_unix(info.modification_time))
     headers["X-Content-Type-Options"] = "nosniff"
@@ -92,9 +95,10 @@ pub class StaticHandler < Handler
     ranged = range_header ? parse_ranges(range_header, size, @max_ranges) : nil
 
     # A range is always sent identity-encoded; the full body may be
-    # compressed. Either way the ETag names what this request receives.
+    # compressed. Either way the ETag names what this request receives. A
+    # file too large to compress has one representation, so no `Vary`.
     coding = nil
-    if @gzip && compressible_type?(type) && size >= COMPRESS_MIN_SIZE
+    if @gzip && compressible_type?(type) && size >= COMPRESS_MIN_SIZE.to_i64 && size <= COMPRESS_MAX_SIZE.to_i64
       append_vary(headers, "Accept-Encoding")
       if ranged.nil?
         if accept = ctx.request.headers["Accept-Encoding"]?
@@ -115,15 +119,15 @@ pub class StaticHandler < Handler
       hook.call(ctx, path, info)
     end
 
-    body = File.read(path)
     ctx.response.content_type = type
-    return if respond_ranged(ctx.response, range_header, body, type, @max_ranges)
-
     if encoding = coding
-      body = encode_body(body, encoding)
+      # The encoded length is only known once the file is encoded, so a
+      # HEAD reads it too; COMPRESS_MAX_SIZE bounds what that costs.
       headers["Content-Encoding"] = encoding
+      send_body(ctx, encode_body(File.read(path), encoding))
+      return
     end
-    send_body(ctx, body)
+    respond_file(ctx.response, path, size, ranged, type, ctx.request.method == "HEAD")
   end
 
   # `If-None-Match` wins when present (weak comparison, `*` matches any);
