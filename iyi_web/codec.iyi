@@ -3,7 +3,8 @@
 #
 # `std/uri` panics on a `%` that is not two hex digits; a request path
 # is not a place to 400 over `%GG`, so the decoder lives here. Query
-# tables are last-wins `Hash`, which is what `env.params` is.
+# tables are last-wins `Hash`, which is what `env.params` is; the pairs
+# they are built from keep every value, in order.
 module iyi_web/codec
 
 import std/text
@@ -105,7 +106,15 @@ end
 # `?flag=` is a present flag with an empty string, not an absent one.
 pub def parse_query(text : String) : Hash(String, String)
   table = {} of String => String
-  return table if text.empty?
+  parse_query_pairs(text).each { |pair| table[pair[0]] = pair[1] }
+  table
+end
+
+# Every name/value pair of a query or form body, decoded, in the order
+# sent: `tag=a&tag=b` is two pairs. Pairs with an empty name are dropped.
+pub def parse_query_pairs(text : String) : Array(Tuple(String, String))
+  pairs = [] of Tuple(String, String)
+  return pairs if text.empty?
 
   text.split('&').each do |pair|
     next if pair.empty?
@@ -113,13 +122,13 @@ pub def parse_query(text : String) : Hash(String, String)
     if eq
       name = decode_form(pair[0, eq])
       value = decode_form(pair[eq + 1, pair.bytesize - eq - 1])
-      table[name] = value unless name.empty?
+      pairs << {name, value} unless name.empty?
     else
       name = decode_form(pair)
-      table[name] = "" unless name.empty?
+      pairs << {name, ""} unless name.empty?
     end
   end
-  table
+  pairs
 end
 
 pub def extension_of(path : String) : String

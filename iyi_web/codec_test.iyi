@@ -72,6 +72,25 @@ describe "parse_query" do
   end
 end
 
+describe "parse_query_pairs" do
+  it "keeps every pair in the order sent" do
+    pairs = parse_query_pairs("tag=a&x=1&tag=b&tag=")
+    assert pairs.size == 4
+    assert pairs[0] == {"tag", "a"}
+    assert pairs[1] == {"x", "1"}
+    assert pairs[2] == {"tag", "b"}
+    assert pairs[3] == {"tag", ""}
+  end
+
+  it "decodes bracketed names and drops empty names and pairs" do
+    pairs = parse_query_pairs("tag%5B%5D=a&&=x&tag[]=b+c")
+    assert pairs.size == 2
+    assert pairs[0] == {"tag[]", "a"}
+    assert pairs[1] == {"tag[]", "b c"}
+    assert parse_query_pairs("").empty?
+  end
+end
+
 describe "join_paths" do
   it "joins and strips extra slashes" do
     assert join_paths("/api", "/users") == "/api/users"

@@ -116,6 +116,54 @@ describe "Params" do
     assert !File.exists?(path)
   end
 
+  it "keeps every value of a repeated query name in order, and the last in query" do
+    req = Request.new("GET", "/", "tag=a&other=x&tag=b&tag=c", "HTTP/1.1", Headers.new, "")
+    params = Params.from(req, {} of String => String)
+    assert params.query_all("tag") == ["a", "b", "c"]
+    assert params.query_all("other") == ["x"]
+    assert params.query["tag"] == "c"
+    assert params["tag"] == "c"
+    assert params.query_all("missing").empty?
+    assert params.body_all("tag").empty?
+  end
+
+  it "matches a bracketed name as sent" do
+    req = Request.new("GET", "/", "tag[]=a&tag%5B%5D=b&tag=c", "HTTP/1.1", Headers.new, "")
+    params = Params.from(req, {} of String => String)
+    assert params.query_all("tag[]") == ["a", "b"]
+    assert params.query_all("tag") == ["c"]
+    assert params.query["tag[]"] == "b"
+  end
+
+  it "keeps every value of a repeated form field, apart from the query's" do
+    headers = Headers.new
+    headers["Content-Type"] = "application/x-www-form-urlencoded"
+    req = Request.new("POST", "/", "tag=q", "HTTP/1.1", headers, "tag=a&ids[]=1&tag=b&ids[]=2")
+    params = Params.from(req, {} of String => String)
+    assert params.body_all("tag") == ["a", "b"]
+    assert params.body_all("ids[]") == ["1", "2"]
+    assert params.body["tag"] == "b"
+    assert params.query_all("tag") == ["q"]
+  end
+
+  it "keeps every value of a repeated multipart text field" do
+    body = "--XyZ\r\nContent-Disposition: form-data; name=\"tag\"\r\n\r\na\r\n" +
+           "--XyZ\r\nContent-Disposition: form-data; name=\"tag[]\"\r\n\r\nx\r\n" +
+           "--XyZ\r\nContent-Disposition: form-data; name=\"tag\"\r\n\r\nb\r\n" +
+           "--XyZ\r\nContent-Disposition: form-data; name=\"tag[]\"\r\n\r\ny\r\n" +
+           "--XyZ--\r\n"
+    params = Params.from(typed("multipart/form-data; boundary=XyZ", body), {} of String => String)
+    assert params.body_all("tag") == ["a", "b"]
+    assert params.body_all("tag[]") == ["x", "y"]
+    assert params.body["tag"] == "b"
+  end
+
+  it "gives one value per key for tables passed in directly" do
+    params = Params.new({} of String => String, {"q" => "one"}, {"f" => "two"})
+    assert params.query_all("q") == ["one"]
+    assert params.body_all("f") == ["two"]
+  end
+
   it "reports a multipart body it cannot read" do
     missing = Params.from(typed("multipart/form-data", upload_body), {} of String => String)
     assert missing.body_error == 400

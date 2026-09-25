@@ -1,6 +1,8 @@
 # URL, query, form and JSON params, each their own table, and a combined
 # lookup that prefers the most specific: url, then query, then body.
-# `env.params.url["id"]` without Crystal's `HTTP::Params`.
+# `env.params.url["id"]` without Crystal's `HTTP::Params`. The tables keep
+# the last value of a repeated name; `query_all` and `body_all` keep them
+# all, in order.
 #
 # A JSON body (`application/json`, or any `application/*+json`) and a
 # `multipart/form-data` body are parsed once, on first use. The router
@@ -20,6 +22,8 @@ pub class Params
   @url : Hash(String, String)
   @query : Hash(String, String)
   @body : Hash(String, String)
+  @query_pairs : Array(Tuple(String, String))
+  @body_pairs : Array(Tuple(String, String))
   @raw_body : String
   @media_type : String
   @content_type : String
@@ -32,7 +36,11 @@ pub class Params
   @max_files : Int32
   @max_field_size : Int32
 
-  def initialize(@url : Hash(String, String), @query : Hash(String, String), @body : Hash(String, String), @raw_body : String = "", @media_type : String = "", @content_type : String = "")
+  # *query_pairs* and *body_pairs* are every value in the order sent; left
+  # out, each is the table's one value per key.
+  def initialize(@url : Hash(String, String), @query : Hash(String, String), @body : Hash(String, String), @raw_body : String = "", @media_type : String = "", @content_type : String = "", query_pairs : Array(Tuple(String, String))? = nil, body_pairs : Array(Tuple(String, String))? = nil)
+    @query_pairs = query_pairs || pairs_of(@query)
+    @body_pairs = body_pairs || pairs_of(@body)
     @json = {} of String => Any
     @json_state = 0
     @files = {} of String => FileUpload
@@ -48,9 +56,9 @@ pub class Params
   end
 
   def self.from(request : Request, url : Hash(String, String)) : Params
-    query = parse_query(request.query_string)
+    query = parse_query_pairs(request.query_string)
     body = parse_body(request)
-    Params.new(url, query, body, request.body, request.content_type.downcase, request.headers["content-type"]? || "")
+    Params.new(url, table_of(query), table_of(body), request.body, request.content_type.downcase, request.headers["content-type"]? || "", query, body)
   end
 
   pub def url : Hash(String, String)
@@ -61,11 +69,25 @@ pub class Params
     @query
   end
 
+  # Every value sent for *key* in the query string, in order; empty when
+  # there is none. `?tag=a&tag=b` gives `["a", "b"]` where `query["tag"]`
+  # is `"b"`. A name is matched as sent: `tag[]` is not `tag`.
+  pub def query_all(key : String) : Array(String)
+    values_of(@query_pairs, key)
+  end
+
   # Form fields: an `application/x-www-form-urlencoded` body, or the text
   # parts of a `multipart/form-data` one.
   pub def body : Hash(String, String)
     parse_multipart_body
     @body
+  end
+
+  # Every value of the form field *key*, in order; empty when there is none.
+  # Covers the same fields as `body`.
+  pub def body_all(key : String) : Array(String)
+    parse_multipart_body
+    values_of(@body_pairs, key)
   end
 
   # The request body as it arrived, whatever its type.
@@ -166,7 +188,10 @@ pub class Params
     in MultipartError
       @body_state = result.status
     in Multipart
-      result.fields.each { |field| @body[field[0]] = field[1] }
+      result.fields.each do |field|
+        @body[field[0]] = field[1]
+        @body_pairs << field
+      end
       result.files.each { |upload| keep(upload) }
     end
   end
@@ -191,13 +216,32 @@ private def json_media_type?(type : String) : Bool
   type.starts_with?("application/") && type.ends_with?("+json")
 end
 
-private def parse_body(request : Request) : Hash(String, String)
-  return {} of String => String if request.body.empty?
+private def parse_body(request : Request) : Array(Tuple(String, String))
+  return [] of Tuple(String, String) if request.body.empty?
 
   type = request.content_type.downcase
   if type == "application/x-www-form-urlencoded"
-    parse_query(request.body)
+    parse_query_pairs(request.body)
   else
-    {} of String => String
+    [] of Tuple(String, String)
   end
+end
+
+# Last wins, as in `parse_query`.
+private def table_of(pairs : Array(Tuple(String, String))) : Hash(String, String)
+  table = {} of String => String
+  pairs.each { |pair| table[pair[0]] = pair[1] }
+  table
+end
+
+private def pairs_of(table : Hash(String, String)) : Array(Tuple(String, String))
+  pairs = [] of Tuple(String, String)
+  table.each { |name, value| pairs << {name, value} }
+  pairs
+end
+
+private def values_of(pairs : Array(Tuple(String, String)), key : String) : Array(String)
+  values = [] of String
+  pairs.each { |pair| values << pair[1] if pair[0] == key }
+  values
 end

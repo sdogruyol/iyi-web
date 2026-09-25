@@ -218,6 +218,19 @@ values; `env.params["name"]?` searches them in that order. Indexing without
 `?` panics when the key is missing, so use `[]?` for optional values.
 `env.params.raw_body` is the body as it arrived.
 
+A name sent more than once keeps its last value in the tables.
+`env.params.query_all("tag")` and `env.params.body_all("tag")` return every
+value, in the order sent, and an empty array when there is none; `body_all`
+covers form and multipart text fields alike. A name is matched as sent, so
+`?tag[]=a&tag[]=b` is `query_all("tag[]")`:
+
+```iyi
+get "/posts" do |env|
+  tags = env.params.query_all("tag")   # ?tag=iyi&tag=web => ["iyi", "web"]
+  "Tagged " + tags.join(", ")
+end
+```
+
 A JSON object's members are in `env.params.json`, a `Hash(String, JSON::Any)`;
 a top-level array is under the key `"_json"`. A request that declares JSON
 and sends something that does not parse gets `400 Bad Request` before the
