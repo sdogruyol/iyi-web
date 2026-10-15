@@ -13,6 +13,10 @@
 # The framing is read from the head the way `std/http` reads it, and what
 # it cannot agree on is refused rather than guessed at: two
 # `Content-Length`s that differ, or more than one `Transfer-Encoding`.
+# Empty lines before the request line are skipped, as `std/http` skips
+# them (RFC 9112 §2.2); counted as the head, a request led by one ended
+# there, and was then buffered whole and parsed again after every read.
+#
 # A head is held to Crystal's bounds, which Kemal serves under: 8 KiB of
 # request line, answered 414, and 16 KiB of fields after it, answered
 # 431. `std/http` takes a megabyte, and a megabyte of short fields kept
@@ -54,6 +58,7 @@ pub class Intake
   @body : ByteBuffer
   @max_body : Int32
   @searched : Int32
+  @start : Int32
   @line_end : Int32
   @head_end : Int32
   @need : Int32
@@ -68,6 +73,7 @@ pub class Intake
     @bytes = ByteBuffer.new(leftover.bytesize < 4096 ? 4096 : leftover.bytesize)
     @body = ByteBuffer.new(64)
     @searched = 0
+    @start = 0
     @line_end = -1
     @head_end = -1
     @need = -1
@@ -90,6 +96,7 @@ pub class Intake
     @body.clear
     @max_body = max_body
     @searched = 0
+    @start = 0
     @line_end = -1
     @head_end = -1
     @need = -1
@@ -119,6 +126,7 @@ pub class Intake
   # close, a refusal, or nil when more has to arrive.
   pub def take : Tuple(Request, String, Bool) | ParseError | TooLarge | HeadTooLarge | Nil
     if @head_end < 0
+      skip_empty_lines
       found = find_head_end
       if refused = oversized_head(found ? @head_end : @bytes.size)
         return refused
@@ -130,11 +138,23 @@ pub class Intake
     @chunked ? take_chunked : take_sized
   end
 
+  # Steps past the CRLFs a client may send before its request line. They
+  # count towards the request line's bound, so a stream of them is
+  # refused as a request line that never ends would be.
+  private def skip_empty_lines : Nil
+    p = @bytes.pointer
+    n = @bytes.size
+    while @start + 1 < n && p[@start] == 13_u8 && p[@start + 1] == 10_u8
+      @start = @start + 2
+    end
+  end
+
   # 414 or 431 when what has arrived of the head, up to *head_end*,
-  # already passes a bound; nil while it is within them.
+  # already passes a bound; nil while it is within them. The request
+  # line is measured from the first byte, empty lines before it included.
   private def oversized_head(head_end : Int32) : HeadTooLarge?
     if @line_end < 0
-      if found = find_crlf(0)
+      if found = find_crlf(@start)
         @line_end = found
       else
         return nil unless head_end > MAX_REQUEST_LINE
@@ -157,9 +177,11 @@ pub class Intake
     if reason = incoming.error
       return ParseError.new(reason)
     end
-    # The parser wants more than the framing said: let it decide from here.
-    @need = @bytes.size + 1
-    nil
+    # The framing read from the head said the request is all here, and the
+    # parser wants more: the two disagree, and a request read two ways is
+    # refused. Waiting on instead buffered without bound and parsed the
+    # whole buffer again after every read.
+    ParseError.new("request framing the parser reads differently")
   end
 
   private def take_chunked : Tuple(Request, String, Bool) | ParseError | TooLarge | Nil
@@ -182,11 +204,12 @@ pub class Intake
   end
 
   # Looks for the blank line that ends the head in what arrived since the
-  # last look; true once it is there.
+  # last look, from the request line on; true once it is there.
   private def find_head_end : Bool
     p = @bytes.pointer
     n = @bytes.size
     i = @searched > 3 ? @searched - 3 : 0
+    i = @start if i < @start
     while i + 3 < n
       if p[i] == 13_u8 && p[i + 1] == 10_u8 && p[i + 2] == 13_u8 && p[i + 3] == 10_u8
         @head_end = i
@@ -200,7 +223,7 @@ pub class Intake
 
   private def read_framing : ParseError | TooLarge | Nil
     body_start = @head_end + 4
-    lines = HTTP.split_crlf(@bytes.to_s(0, @head_end))
+    lines = HTTP.split_crlf(@bytes.to_s(@start, @head_end - @start))
     lengths = [] of String
     encodings = [] of String
     expects = false
@@ -234,12 +257,15 @@ pub class Intake
 
     @need = body_start
     return nil if lengths.empty?
-    lengths.each do |other|
-      return ParseError.new("Content-Length given twice, differently") unless other == lengths[0]
+    # Each line read as `std/http` reads it: `5, 5` is one length, and
+    # `+5` none. Lines that name different lengths are refused.
+    declared = -1_i64
+    lengths.each do |line|
+      length = HTTP.content_length(line)
+      return ParseError.new("Content-Length is not a number") unless length
+      return ParseError.new("Content-Length given twice, differently") if declared >= 0 && length != declared
+      declared = length
     end
-    declared = lengths[0].to_i64?
-    # Not a length: the parser refuses it.
-    return nil unless declared && declared >= 0
     return TooLarge.new if declared > @max_body.to_i64
     @need = body_start + declared.to_i32
     @continue = expects && declared > 0

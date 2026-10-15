@@ -99,6 +99,12 @@ All notable changes to iyi-web are recorded here. The format follows
   panic.
 - A file cut short while it is being sent ends the connection, instead of
   sending fewer bytes than its `Content-Length`.
+- A request led by empty lines (`\r\n`) was taken to end at them, then
+  buffered whole, past `max_request_body_size`, and parsed again after
+  every read. They are skipped, as `std/http` skips them, and
+  `Content-Length: 5, 5` is read as one length, as `std/http` reads it,
+  instead of buffering on. A request whose framing the two still read
+  differently is refused with `400`.
 
 ### Security
 

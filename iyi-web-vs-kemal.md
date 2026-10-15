@@ -153,6 +153,9 @@ Found later and fixed:
   built in quadratic time: 90,000 short fields stalled every client for
   4.7 s. The request line is held to 8 KiB (414) and the fields to 16 KiB
   (431), Crystal's bounds, and the table is built in linear time.
+- **Leading empty lines:** a request led by `\r\n` was buffered whole,
+  past the body limit, and parsed again after every read; they are
+  skipped as `std/http` skips them.
 
 ### Closed gaps
 
