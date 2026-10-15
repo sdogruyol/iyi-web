@@ -7,7 +7,9 @@
 # with `Range` gets 206 or 416. Anything not compressed is read from disk as
 # it is sent (`iyi_web/file_body`), so a large file or a range of one costs
 # a chunk of memory and a HEAD does not open the file. A `..` segment or a
-# NUL byte is refused, so a request cannot walk out of the folder.
+# NUL byte is refused, so a request cannot walk out of the folder; on
+# Windows so is any `\` or `:`, which the file system reads as a separator,
+# a drive or a stream.
 #
 # A directory serves its `index.html` (`dir_index`) or an HTML listing of
 # its entries (`dir_listing`); a directory path without a trailing slash
@@ -46,7 +48,7 @@ pub class StaticHandler < Handler
 
     relative = ctx.request.path
     return call_next(ctx) if relative.empty? || !relative.starts_with?('/')
-    return call_next(ctx) if contains_dotdot?(relative) || relative.includes?("\u0000")
+    return call_next(ctx) if escapes_root?(relative)
 
     path = join_paths(@root, relative)
     info = File.info?(path)
@@ -171,7 +173,15 @@ pub class StaticHandler < Handler
   end
 end
 
-private def contains_dotdot?(path : String) : Bool
+# Whether the decoded request path could name something outside the
+# folder. On Windows `\` separates as `/` does, so `/..%5C..%5Cx` walks out
+# unless it is split on too; a `:` names a drive (`C:`) or an alternate
+# stream (`a.txt::$DATA`), neither of which a URL path means.
+private def escapes_root?(path : String) : Bool
+  return true if path.includes?("\u0000")
+  if {{ flag?(:win32) }}
+    return true if path.includes?("\\") || path.includes?(":")
+  end
   path.split('/').any? { |part| part == ".." }
 end
 

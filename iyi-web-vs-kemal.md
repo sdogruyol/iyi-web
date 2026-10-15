@@ -146,6 +146,9 @@ Found later and fixed:
   now 0.24 s). `Expect: 100-continue` is answered.
 - **Error pages written with a helper** (`env.json` in an `error` block) were
   sent empty.
+- **Static files on Windows:** `%5C` decodes to `\`, a separator to
+  Windows, so `/..%5C..%5Cfile` walked out of the public folder; `\` and
+  `:` are now refused there.
 
 ### Closed gaps
 

@@ -106,6 +106,10 @@ All notable changes to iyi-web are recorded here. The format follows
   `Transfer-Encoding`, are refused with `400` rather than read one way by
   iyi-web and another by a proxy. A chunked body over
   `max_request_body_size` gets `413` as soon as its chunks pass it.
+- Static files on Windows: `\` (`%5C`) is a separator to the file system,
+  so `GET /..%5C..%5Csecret.txt` walked out of the public folder and was
+  served. A path with `\` or `:` (a drive, an alternate stream such as
+  `a.txt::$DATA`) is not served on Windows.
 - Where there is no `/dev/urandom` (Windows), multipart boundaries and upload
   directory names come from `Random.new`, which reads `RtlGenRandom`, rather
   than from the clocks.
