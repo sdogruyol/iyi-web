@@ -30,8 +30,11 @@ pub class Request
   # `std/http`'s request as this type: path percent-decoded, query left
   # encoded, headers in the case-insensitive table a handler writes.
   def self.from_http(method : String, path : String, query : String?, headers : Hash(String, String), body : String, version : String = "HTTP/1.1") : Request
+    # `std/http` has already merged the lines of one name, whatever their
+    # case, so every name here is new: `add` appends, where `[]=` looked
+    # for it first and made the table cost the square of its size.
     table = Headers.new
-    headers.each { |name, value| table[name] = value }
+    headers.each { |name, value| table.add(name, value) }
 
     raw = path == "*" || path.empty? ? "/" : path
     decoded = decode_path(raw)
