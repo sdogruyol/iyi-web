@@ -130,6 +130,10 @@ All notable changes to iyi-web are recorded here. The format follows
   its header when it would pass what the message has left. Empty
   continuation frames, which the limit never counted, grew the server's
   memory without bound.
+- WebSockets: no data frame is written after the close frame. A send
+  already waiting for the write lock could get it after `close` and write
+  its frame behind the close frame (RFC 6455 §5.5.1); it now returns
+  `false`.
 - Where there is no `/dev/urandom` (Windows), multipart boundaries and upload
   directory names come from `Random.new`, which reads `RtlGenRandom`, rather
   than from the clocks.

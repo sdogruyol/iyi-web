@@ -579,6 +579,42 @@ describe "WebSocket session" do
     assert seen.closes[0][0] == 1009
   end
 
+  it "writes no data frame after the close frame, even for a send that waited on the lock first" do
+    sent = [] of Bool
+    setup = ->(ws : WebSocket) {
+      group do |w|
+        # The big frame holds the lock while the client does not read, and
+        # the sends park on it. Putting the lock back wakes them, but the
+        # task that put it back runs on and takes it again for `close`
+        # before they do: they find the lock free only after the close
+        # frame went out, and must write nothing then.
+        w.spawn do
+          ws.send_binary("a" * (4 * 1024 * 1024))
+          ws.close(1000, "")
+          0
+        end
+        ["one", "two", "three"].each do |word|
+          w.spawn do
+            sent << ws.send(word)
+            0
+          end
+        end
+        0
+      end
+      nil
+    }
+    converse(1024, setup) do |peer|
+      # Reading late fills the socket's buffers, so the big frame parks.
+      sleep(50)
+      assert peer.expect.opcode == WebSocket::BINARY
+      closing = peer.expect
+      assert closing.opcode == WebSocket::CLOSE
+      peer.send(WebSocket::CLOSE, WebSocket.close_payload(1000, ""))
+      assert peer.frame.nil?
+    end
+    assert sent == [false, false, false]
+  end
+
   it "closes first when asked, keeps reading until the client answers, and sends nothing after" do
     seen = Seen.new
     late = [] of Bool

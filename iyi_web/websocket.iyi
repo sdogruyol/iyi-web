@@ -79,6 +79,7 @@ pub class WebSocket
   @offset : Int32
   @lock : Channel(Int32)
   @close_sent : Bool
+  @close_written : Bool
   @gone : Bool
   @finished : Bool
   @fragment_opcode : Int32
@@ -97,6 +98,7 @@ pub class WebSocket
     @lock = Channel(Int32).new(1)
     @lock.put_now(0)
     @close_sent = false
+    @close_written = false
     @gone = false
     @finished = false
     @fragment_opcode = 0
@@ -563,10 +565,16 @@ pub class WebSocket
     end
   end
 
+  # *@close_sent* is set before the lock is taken, so `close` refuses a
+  # second call and `transmit` turns away a send that starts after it. A
+  # send that started before may already be waiting for the lock, and the
+  # lock does not hand itself out in the order it was asked for, so that
+  # send could get it after the close frame went out; `write_frame` checks
+  # *@close_written* under the lock, which only the close frame sets.
   private def send_close(code : Int32, reason : String) : Nil
     return if @close_sent
     @close_sent = true
-    write_frame(WebSocket.encode_frame(CLOSE, WebSocket.close_payload(code, reason)))
+    write_frame(WebSocket.encode_frame(CLOSE, WebSocket.close_payload(code, reason)), true)
   end
 
   private def transmit(opcode : Int32, payload : String) : Bool
@@ -574,13 +582,15 @@ pub class WebSocket
     write_frame(WebSocket.encode_frame(opcode, payload))
   end
 
-  # One frame at a time, whichever task is writing. A write that fails
-  # marks the client gone, so later sends answer false at once.
-  private def write_frame(frame : String) : Bool
-    return false if @gone
+  # One frame at a time, whichever task is writing, and none after the
+  # close frame (§5.5.1). A write that fails marks the client gone, so
+  # later sends answer false at once.
+  private def write_frame(frame : String, close : Bool = false) : Bool
+    return false if @gone || @close_written
     return false unless @lock.receive.is_a?(Int32)
     written = false
-    unless @gone || @socket.closed?
+    unless @close_written || @gone || @socket.closed?
+      @close_written = close
       case @socket.write(frame)
       in Int32
         written = true
