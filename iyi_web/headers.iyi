@@ -11,17 +11,19 @@
 module iyi_web/headers
 
 pub class Headers
-  @pairs : Array(Tuple(String, String))
+  # Name as written, name compared, value. The compared form is kept so a
+  # lookup does not allocate a downcased copy of every field it walks.
+  @pairs : Array(Tuple(String, String, String))
 
   def initialize
-    @pairs = [] of Tuple(String, String)
+    @pairs = [] of Tuple(String, String, String)
   end
 
   pub def []?(name : String) : String?
     key = name.downcase
     found = nil
     @pairs.each do |pair|
-      found = pair[1] if pair[0].downcase == key
+      found = pair[2] if pair[1] == key
     end
     found
   end
@@ -35,19 +37,19 @@ pub class Headers
     key = name.downcase
     index = 0
     while index < @pairs.size
-      if @pairs[index][0].downcase == key
-        @pairs[index] = {name, value}
+      if @pairs[index][1] == key
+        @pairs[index] = {name, key, value}
         return value
       end
       index = index + 1
     end
-    @pairs << {name, value}
+    @pairs << {name, key, value}
     value
   end
 
   pub def add(name : String, value : String) : Nil
     check(name, value)
-    @pairs << {name, value}
+    @pairs << {name, name.downcase, value}
   end
 
   pub def has_key?(name : String) : Bool
@@ -55,12 +57,12 @@ pub class Headers
   end
 
   pub def each(& : String, String -> Nil) : Nil
-    @pairs.each { |pair| yield pair[0], pair[1] }
+    @pairs.each { |pair| yield pair[0], pair[2] }
   end
 
   pub def to_s : String
     parts = [] of String
-    @pairs.each { |pair| parts << pair[0] + ": " + pair[1] + "\r\n" }
+    @pairs.each { |pair| parts << pair[0] + ": " + pair[2] + "\r\n" }
     parts.join
   end
 
@@ -70,9 +72,9 @@ pub class Headers
 
   pub def delete(name : String) : Nil
     key = name.downcase
-    kept = [] of Tuple(String, String)
+    kept = [] of Tuple(String, String, String)
     @pairs.each do |pair|
-      kept << pair unless pair[0].downcase == key
+      kept << pair unless pair[1] == key
     end
     @pairs = kept
   end

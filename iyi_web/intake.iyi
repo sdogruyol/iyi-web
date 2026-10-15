@@ -65,6 +65,23 @@ pub class Intake
     @bytes.append(chunk.to_unsafe, chunk.bytesize)
   end
 
+  # The same buffers, for the connection's next request. The previous
+  # request already copied out the strings it kept.
+  pub def reset(leftover : String, max_body : Int32) : Nil
+    @bytes.clear
+    @body.clear
+    @max_body = max_body
+    @searched = 0
+    @head_end = -1
+    @need = -1
+    @chunked = false
+    @scan = 0
+    @state = SIZE_LINE
+    @remaining = 0
+    @continue = false
+    append(leftover)
+  end
+
   # No byte of a request has arrived.
   pub def empty? : Bool
     @bytes.size == 0
@@ -307,6 +324,10 @@ class ByteBuffer
 
   def size : Int32
     @size
+  end
+
+  def clear : Nil
+    @size = 0
   end
 
   def append(bytes : Pointer(UInt8), count : Int32) : Nil

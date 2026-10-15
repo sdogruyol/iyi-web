@@ -59,6 +59,8 @@ pub class Server
   @cut : Bool
   @listening : Bool
   @stopped : Channel(Int32)
+  @date_at : Int64
+  @date_value : String
 
   # *error_pages* are the application's `error` handlers; the one for 500
   # renders the page a panicking request gets.
@@ -73,6 +75,8 @@ pub class Server
     @cut = false
     @listening = false
     @stopped = Channel(Int32).new
+    @date_at = -1_i64
+    @date_value = ""
   end
 
   pub def bind(host : String, port : Int32) : Int32
@@ -193,9 +197,18 @@ pub class Server
     end
     # A task parked waiting for a request wakes to `Cancelled`, which ends
     # its connection; one that has any of a request goes on to answer it.
+    # Cancel before the close. The close alone drops the descriptor while
+    # the read is still registered: on Windows that registration outlives
+    # the handle, the next socket reuses it, and the new read panics
+    # "two fibers reading one fd".
     conn = @first_connection
     while conn
-      conn.socket.close if conn.idle
+      if conn.idle
+        if running = conn.task_group
+          running.cancel_children
+        end
+        conn.socket.close
+      end
       conn = conn.following
     end
     cut_off if timeout <= 0
@@ -254,7 +267,7 @@ pub class Server
   # keeps it, for a cut-off to cancel.
   private def isolated(conn : Connection? = nil, &block : -> Nil) : Panicked?
     outcome = group do |g|
-      conn.group = g if conn
+      conn.task_group = g if conn
       task = g.spawn do
         block.call
         0
@@ -360,8 +373,20 @@ pub class Server
       ctx.response.headers["X-Powered-By"] = "iyi-web"
     end
     unless ctx.response.headers.has_key?("Date")
-      ctx.response.headers["Date"] = http_date(Time.utc)
+      ctx.response.headers["Date"] = cached_date
     end
+  end
+
+  # HTTP-date is whole seconds. Formatting one per request showed up under
+  # load; the same second is the same text.
+  private def cached_date : String
+    now = Time.utc
+    second = now.to_unix
+    if second != @date_at
+      @date_at = second
+      @date_value = http_date(now)
+    end
+    @date_value
   end
 
   # The handler panicked before its response went out. The response is
@@ -426,7 +451,7 @@ pub class Server
   # request, and a new one only the request it has already sent.
   private def read_request(conn : Connection, leftover : String, first : Bool) : Tuple(Request, String, Bool) | ParseError | TooLarge | TimedOut | Closed
     client = conn.socket
-    intake = Intake.new(leftover, @config.max_request_body_size)
+    intake = conn.reader(leftover, @config.max_request_body_size)
     limit = milliseconds(@config.read_timeout)
     since = first ? conn.accepted : Time.monotonic
     loop do
@@ -527,22 +552,37 @@ class Connection
   getter socket : IyiSocket
   getter accepted : Span
   property idle : Bool
-  property group : IyiGroup?
+  property task_group : IyiGroup?
   property previous : Connection?
   property following : Connection?
+  @reader : Intake?
 
   def initialize(@socket : IyiSocket)
     @accepted = Time.monotonic
     @idle = false
-    @group = nil
+    @task_group = nil
     @previous = nil
     @following = nil
+    @reader = nil
+  end
+
+  # One intake for the life of the connection: its buffers stay, and the
+  # next request refills them instead of allocating another.
+  def reader(leftover : String, max_body : Int32) : Intake
+    if current = @reader
+      current.reset(leftover, max_body)
+      current
+    else
+      created = Intake.new(leftover, max_body)
+      @reader = created
+      created
+    end
   end
 
   # Cancels the task and closes the socket, which wakes a read or a write
   # parked on it.
   def cut : Nil
-    if running = @group
+    if running = @task_group
       running.cancel_children
     end
     @socket.close
