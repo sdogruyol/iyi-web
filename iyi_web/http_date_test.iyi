@@ -28,4 +28,22 @@ describe "http_date" do
     assert parse_http_date("Sun, 06 Foo 1994 08:49:37 GMT").nil?
     assert parse_http_date("").nil?
   end
+
+  it "ignores a date no calendar has rather than panicking" do
+    assert parse_http_date("Sat, 31 Feb 2026 00:00:00 GMT").nil?
+    assert parse_http_date("Thu, 29 Feb 2025 00:00:00 GMT").nil?
+    assert parse_http_date("Sun, 06 Nov 1994 24:00:00 GMT").nil?
+    assert parse_http_date("Sun, 06 Nov 1994 -1:00:00 GMT").nil?
+    assert parse_http_date("Sun, 06 Nov 1994 08:+9:37 GMT").nil?
+    assert parse_http_date("Sun, 6 Nov 1994 08:49:37 GMT").nil?
+    assert !parse_http_date("Thu, 29 Feb 2024 00:00:00 GMT").nil?
+  end
+
+  it "reads a leap second as the second before it" do
+    if at = parse_http_date("Wed, 31 Dec 2016 23:59:60 GMT")
+      assert at.to_unix == Time.utc(2016, 12, 31, 23, 59, 59).to_unix
+    else
+      assert false
+    end
+  end
 end

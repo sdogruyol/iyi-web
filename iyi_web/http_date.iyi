@@ -10,20 +10,41 @@ pub def http_date(time : Time) : String
 end
 
 # `Sun, 06 Nov 1994 08:49:37 GMT` as a Time, or nil for anything else.
+# Every field is checked before `Time.utc` sees it, which panics on a day
+# the month does not have: `31 Feb` in an `If-Modified-Since` was a 500,
+# where RFC 9110 §13.1.3 has an invalid date ignored. A leap second, which
+# the grammar allows, is read as the second before it.
 pub def parse_http_date(text : String) : Time?
   parts = text.strip.split(' ')
   return nil unless parts.size == 6 && parts[5] == "GMT" && parts[0].ends_with?(",")
-  day = parts[1].to_i?
+  day = fixed_digits(parts[1], 2)
   month = month_number(parts[2])
-  year = parts[3].to_i?
+  year = fixed_digits(parts[3], 4)
   clock = parts[4].split(':')
   return nil unless day && month && year && clock.size == 3
-  hour = clock[0].to_i?
-  minute = clock[1].to_i?
-  second = clock[2].to_i?
+  hour = fixed_digits(clock[0], 2)
+  minute = fixed_digits(clock[1], 2)
+  second = fixed_digits(clock[2], 2)
   return nil unless hour && minute && second
-  return nil unless day >= 1 && day <= 31 && hour <= 23 && minute <= 59 && second <= 60
-  Time.utc(year, month, day, hour, minute, second)
+  return nil unless day >= 1 && day <= Time.days_in_month(year, month)
+  return nil unless hour <= 23 && minute <= 59 && second <= 60
+  Time.utc(year, month, day, hour, minute, second == 60 ? 59 : second)
+end
+
+# *text* as a number when it is exactly *width* ASCII digits; no sign, no
+# blank.
+private def fixed_digits(text : String, width : Int32) : Int32?
+  return nil unless text.bytesize == width
+  p = text.to_unsafe
+  value = 0
+  index = 0
+  while index < width
+    byte = p[index]
+    return nil unless byte >= 48_u8 && byte <= 57_u8
+    value = value * 10 + (byte - 48_u8).to_i32
+    index = index + 1
+  end
+  value
 end
 
 private def month_number(name : String) : Int32?

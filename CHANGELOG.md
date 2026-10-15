@@ -99,6 +99,10 @@ All notable changes to iyi-web are recorded here. The format follows
   panic.
 - A file cut short while it is being sent ends the connection, instead of
   sending fewer bytes than its `Content-Length`.
+- An `If-Modified-Since` naming a day its month does not have
+  (`31 Feb`), an hour past 23 or a signed field panicked and was answered
+  `500`; it is ignored, as RFC 9110 asks. A leap second (`:60`) is read
+  as `:59`.
 - A request led by empty lines (`\r\n`) was taken to end at them, then
   buffered whole, past `max_request_body_size`, and parsed again after
   every read. They are skipped, as `std/http` skips them, and

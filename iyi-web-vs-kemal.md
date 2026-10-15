@@ -156,6 +156,8 @@ Found later and fixed:
 - **Leading empty lines:** a request led by `\r\n` was buffered whole,
   past the body limit, and parsed again after every read; they are
   skipped as `std/http` skips them.
+- **`If-Modified-Since`:** an impossible date (`31 Feb`) was a 500; it is
+  ignored.
 
 ### Closed gaps
 
