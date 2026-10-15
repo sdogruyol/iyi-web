@@ -110,6 +110,11 @@ All notable changes to iyi-web are recorded here. The format follows
   so `GET /..%5C..%5Csecret.txt` walked out of the public folder and was
   served. A path with `\` or `:` (a drive, an alternate stream such as
   `a.txt::$DATA`) is not served on Windows.
+- A request's head is held to 8 KiB of request line (`414`) and 16 KiB of
+  fields (`431`), Crystal's bounds. It could be a megabyte, and the header
+  table was built in time the square of the field count: one request of
+  90,000 short fields kept the server busy for 4.7 s, and every other
+  client waited. The table is built in linear time too.
 - Where there is no `/dev/urandom` (Windows), multipart boundaries and upload
   directory names come from `Random.new`, which reads `RtlGenRandom`, rather
   than from the clocks.

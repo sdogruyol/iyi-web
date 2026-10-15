@@ -149,6 +149,10 @@ Found later and fixed:
 - **Static files on Windows:** `%5C` decodes to `\`, a separator to
   Windows, so `/..%5C..%5Cfile` walked out of the public folder; `\` and
   `:` are now refused there.
+- **Head size:** a head could be a megabyte, and its header table was
+  built in quadratic time: 90,000 short fields stalled every client for
+  4.7 s. The request line is held to 8 KiB (414) and the fields to 16 KiB
+  (431), Crystal's bounds, and the table is built in linear time.
 
 ### Closed gaps
 

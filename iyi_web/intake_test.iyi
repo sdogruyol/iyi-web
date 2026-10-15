@@ -2,7 +2,7 @@
 # in several read sizes, since where a read ends is the client's choice.
 module iyi_web/intake_test
 
-import iyi_web/intake::{Intake, TooLarge}
+import iyi_web/intake::{Intake, TooLarge, HeadTooLarge}
 import iyi_web/request::{Request, ParseError}
 import iyi_web/spec::*
 
@@ -10,7 +10,7 @@ STEPS = [1, 2, 3, 7, 64, 4096]
 
 # Feeds *wire* to an intake *step* bytes at a time, as reads would bring it,
 # and answers the first thing `take` gives back.
-def feed(wire : String, step : Int32, max_body : Int32 = 1024) : Tuple(Request, String, Bool) | ParseError | TooLarge | Nil
+def feed(wire : String, step : Int32, max_body : Int32 = 1024) : Tuple(Request, String, Bool) | ParseError | TooLarge | HeadTooLarge | Nil
   intake = Intake.new("", max_body)
   at = 0
   while at < wire.bytesize
@@ -29,6 +29,7 @@ def taken(wire : String, step : Int32, max_body : Int32 = 1024) : Tuple(Request,
   in Tuple(Request, String, Bool) then got
   in ParseError                   then raise "refused: #{got.message}"
   in TooLarge                     then raise "too large"
+  in HeadTooLarge                 then raise "head too large: #{got.status}"
   in Nil                          then raise "incomplete"
   end
 end
@@ -39,6 +40,12 @@ end
 
 def too_large?(wire : String, step : Int32, max_body : Int32 = 1024) : Bool
   feed(wire, step, max_body).is_a?(TooLarge)
+end
+
+# The status a head past its bounds is answered with, or nil.
+def head_refusal(wire : String, step : Int32) : Int32?
+  got = feed(wire, step)
+  got.is_a?(HeadTooLarge) ? got.status : nil
 end
 
 NEXT = "GET /next HTTP/1.1\r\nHost: x\r\n\r\n"
@@ -108,9 +115,22 @@ describe "Intake" do
   end
 
   it "refuses a head that never ends" do
-    wire = "GET / HTTP/1.1\r\nX-Filler: " + "a" * 1048576
-    assert refused?(wire, 65536)
-    assert feed(wire[0, 65536], 65536).nil?
+    wire = "GET / HTTP/1.1\r\nHost: x\r\nX-Filler: " + "a" * 1048576
+    assert head_refusal(wire, 65536) == 431
+    assert feed(wire[0, 8192], 8192).nil?
+  end
+
+  it "holds the request line to 8 KiB and the fields to 16 KiB" do
+    long_target = "GET /" + "a" * 8192 + " HTTP/1.1\r\nHost: x\r\n\r\n"
+    many_fields = "GET / HTTP/1.1\r\nHost: x\r\n" + "X-A: b\r\n" * 2400 + "\r\n"
+    [7, 4096, 65536].each do |step|
+      assert head_refusal(long_target, step) == 414
+      assert head_refusal(many_fields, step) == 431
+      # A line that never ends is refused once it passes the bound.
+      assert head_refusal("GET /" + "a" * 9000, step) == 414
+    end
+    fits = "GET / HTTP/1.1\r\nHost: x\r\n" + "X-A: b\r\n" * 2000 + "\r\n"
+    assert (taken(fits, 4096)[0].headers["x-a"]? || "").starts_with?("b, b")
   end
 
   it "asks for a body the client holds back for 100 Continue, once" do

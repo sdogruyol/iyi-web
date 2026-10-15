@@ -809,6 +809,9 @@ config.max_request_body_size = 1024 * 1024
 - A request whose body is larger than `max_request_body_size` bytes gets
   `413 Content Too Large`, as soon as its `Content-Length` is read, and its
   connection is closed.
+- A request line longer than 8 KiB gets `414 URI Too Long`, and header
+  fields past 16 KiB `431 Request Header Fields Too Large`, the bounds
+  Crystal's server holds Kemal to. Neither is a setting.
 - `max_ranges` is the most ranges one `Range` header may ask for; `0` turns
   range requests off.
 - `websocket_allowed_origins` lists origins such as `"https://example.com"`;

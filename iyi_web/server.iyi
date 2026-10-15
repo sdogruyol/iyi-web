@@ -40,7 +40,7 @@ import std/time::{Time, Span}
 import iyi_web/handler::{Handler}
 import iyi_web/context::{Context}
 import iyi_web/request::{Request, ParseError}
-import iyi_web/intake::{Intake, TooLarge}
+import iyi_web/intake::{Intake, TooLarge, HeadTooLarge}
 import iyi_web/response::{Response}
 import iyi_web/config::{Config}
 import iyi_web/http_date::*
@@ -292,6 +292,9 @@ pub class Server
       in TooLarge
         write_error(client, 413, "Content Too Large")
         return
+      in HeadTooLarge
+        write_error(client, it.status, it.reason)
+        return
       in TimedOut
         write_error(client, 408, "Request Timeout")
         return
@@ -449,7 +452,7 @@ pub class Server
   # for that first byte; a connection that sent nothing is just `Closed`.
   # While the server drains, a keep-alive connection takes no further
   # request, and a new one only the request it has already sent.
-  private def read_request(conn : Connection, leftover : String, first : Bool) : Tuple(Request, String, Bool) | ParseError | TooLarge | TimedOut | Closed
+  private def read_request(conn : Connection, leftover : String, first : Bool) : Tuple(Request, String, Bool) | ParseError | TooLarge | HeadTooLarge | TimedOut | Closed
     client = conn.socket
     intake = conn.reader(leftover, @config.max_request_body_size)
     limit = milliseconds(@config.read_timeout)

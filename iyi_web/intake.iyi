@@ -13,13 +13,19 @@
 # The framing is read from the head the way `std/http` reads it, and what
 # it cannot agree on is refused rather than guessed at: two
 # `Content-Length`s that differ, or more than one `Transfer-Encoding`.
+# A head is held to Crystal's bounds, which Kemal serves under: 8 KiB of
+# request line, answered 414, and 16 KiB of fields after it, answered
+# 431. `std/http` takes a megabyte, and a megabyte of short fields kept
+# the one thread busy for seconds while every other client waited.
 module iyi_web/intake
 
 import std/http::{HTTP}
 import iyi_web/request::{Request, ParseError, parse_incoming, with_body}
 
-# `std/http`'s bound on a request's head.
-MAX_HEAD = 1048576
+# The request line, and the fields after it (Crystal's
+# `HTTP::MAX_REQUEST_LINE_SIZE` and `HTTP::MAX_HEADERS_SIZE`).
+MAX_REQUEST_LINE =  8192
+MAX_HEADERS      = 16384
 
 # A chunk-size line, extensions included, or a trailer line.
 MAX_CHUNK_LINE = 4096
@@ -33,11 +39,22 @@ TRAILERS   = 3
 pub struct TooLarge
 end
 
+# The request line or the fields are past their bound; *status* is 414 or
+# 431.
+pub struct HeadTooLarge
+  getter status : Int32
+  getter reason : String
+
+  def initialize(@status : Int32, @reason : String)
+  end
+end
+
 pub class Intake
   @bytes : ByteBuffer
   @body : ByteBuffer
   @max_body : Int32
   @searched : Int32
+  @line_end : Int32
   @head_end : Int32
   @need : Int32
   @chunked : Bool
@@ -51,6 +68,7 @@ pub class Intake
     @bytes = ByteBuffer.new(leftover.bytesize < 4096 ? 4096 : leftover.bytesize)
     @body = ByteBuffer.new(64)
     @searched = 0
+    @line_end = -1
     @head_end = -1
     @need = -1
     @chunked = false
@@ -72,6 +90,7 @@ pub class Intake
     @body.clear
     @max_body = max_body
     @searched = 0
+    @line_end = -1
     @head_end = -1
     @need = -1
     @chunked = false
@@ -98,16 +117,33 @@ pub class Intake
 
   # The request with what follows it and whether the client asked to
   # close, a refusal, or nil when more has to arrive.
-  pub def take : Tuple(Request, String, Bool) | ParseError | TooLarge | Nil
+  pub def take : Tuple(Request, String, Bool) | ParseError | TooLarge | HeadTooLarge | Nil
     if @head_end < 0
-      unless find_head_end
-        return ParseError.new("request headers past #{MAX_HEAD} bytes") if @bytes.size > MAX_HEAD
-        return nil
+      found = find_head_end
+      if refused = oversized_head(found ? @head_end : @bytes.size)
+        return refused
       end
+      return nil unless found
       refused = read_framing
       return refused if refused
     end
     @chunked ? take_chunked : take_sized
+  end
+
+  # 414 or 431 when what has arrived of the head, up to *head_end*,
+  # already passes a bound; nil while it is within them.
+  private def oversized_head(head_end : Int32) : HeadTooLarge?
+    if @line_end < 0
+      if found = find_crlf(0)
+        @line_end = found
+      else
+        return nil unless head_end > MAX_REQUEST_LINE
+        return HeadTooLarge.new(414, "URI Too Long")
+      end
+    end
+    return HeadTooLarge.new(414, "URI Too Long") if @line_end > MAX_REQUEST_LINE
+    return HeadTooLarge.new(431, "Request Header Fields Too Large") if head_end - (@line_end + 2) > MAX_HEADERS
+    nil
   end
 
   private def take_sized : Tuple(Request, String, Bool) | ParseError | TooLarge | Nil
