@@ -125,6 +125,11 @@ All notable changes to iyi-web are recorded here. The format follows
   table was built in time the square of the field count: one request of
   90,000 short fields kept the server busy for 4.7 s, and every other
   client waited. The table is built in linear time too.
+- WebSockets: a fragmented message is held in one buffer counted against
+  `websocket_max_message_size`, and a continuation frame is refused from
+  its header when it would pass what the message has left. Empty
+  continuation frames, which the limit never counted, grew the server's
+  memory without bound.
 - Where there is no `/dev/urandom` (Windows), multipart boundaries and upload
   directory names come from `Random.new`, which reads `RtlGenRandom`, rather
   than from the clocks.

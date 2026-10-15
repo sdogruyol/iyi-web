@@ -158,6 +158,7 @@ Found later and fixed:
   skipped as `std/http` skips them.
 - **`If-Modified-Since`:** an impossible date (`31 Feb`) was a 500; it is
   ignored.
+- **WebSocket:** empty continuation frames grew memory without bound.
 
 ### Closed gaps
 

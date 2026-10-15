@@ -543,6 +543,42 @@ describe "WebSocket session" do
     end
   end
 
+  it "holds a message's fragments to the limit however many empty ones come" do
+    empties = WebSocket.encode_frame(WebSocket::CONTINUATION, "", false, MASK) * 20000
+    seen = Seen.new
+    converse(16, watched(seen)) do |peer|
+      # Empty pieces add nothing, so a message that fills the limit exactly
+      # still goes through after twenty thousand of them.
+      peer.send(WebSocket::TEXT, "x", false)
+      peer.write(empties)
+      peer.send(WebSocket::CONTINUATION, "y" * 15, false)
+      peer.write(empties)
+      peer.send(WebSocket::CONTINUATION, "", true)
+      assert peer.expect.payload == "x" + "y" * 15
+      # One byte past it, after as many again, is still 1009.
+      peer.send(WebSocket::BINARY, "x", false)
+      peer.write(empties)
+      peer.send(WebSocket::CONTINUATION, "y" * 16, false)
+      assert peer.expect_close[0] == 1009
+    end
+    assert seen.messages == ["x" + "y" * 15]
+    assert seen.binaries.empty?
+    assert seen.closes[0][0] == 1009
+  end
+
+  it "refuses a continuation frame over what the message has left from its header" do
+    seen = Seen.new
+    converse(16, watched(seen)) do |peer|
+      peer.send(WebSocket::TEXT, "x" * 10, false)
+      # Seven bytes when six are left: the header alone is enough to refuse
+      # it, and the payload never comes.
+      peer.write(WebSocket.encode_frame(WebSocket::CONTINUATION, "y" * 7, true, MASK)[0, 6])
+      assert peer.expect_close[0] == 1009
+    end
+    assert seen.messages.empty?
+    assert seen.closes[0][0] == 1009
+  end
+
   it "closes first when asked, keeps reading until the client answers, and sends nothing after" do
     seen = Seen.new
     late = [] of Bool

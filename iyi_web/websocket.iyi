@@ -82,8 +82,7 @@ pub class WebSocket
   @gone : Bool
   @finished : Bool
   @fragment_opcode : Int32
-  @fragments : Array(String)
-  @fragment_size : Int32
+  @fragments : String::Builder
   @on_message : Proc(String, Nil)?
   @on_binary : Proc(String, Nil)?
   @on_ping : Proc(String, Nil)?
@@ -101,8 +100,7 @@ pub class WebSocket
     @gone = false
     @finished = false
     @fragment_opcode = 0
-    @fragments = [] of String
-    @fragment_size = 0
+    @fragments = String::Builder.new
     @on_message = nil
     @on_binary = nil
     @on_ping = nil
@@ -438,10 +436,13 @@ pub class WebSocket
   end
 
   # The next whole frame, reading as much as it takes. A connection that
-  # ends first answers 1006.
+  # ends first answers 1006. Inside a fragmented message a frame may only
+  # carry what the message has left of the limit, so one over it is refused
+  # from its header rather than read whole beside the fragments held.
   private def next_frame : Frame | FrameError
+    budget = @max_message_size - @fragments.bytesize
     loop do
-      case decoded = WebSocket.decode_frame(@buffer, @offset, true, @max_message_size)
+      case decoded = WebSocket.decode_frame(@buffer, @offset, true, budget)
       in Frame
         @offset = @offset + decoded.size
         return decoded
@@ -478,25 +479,29 @@ pub class WebSocket
     nil
   end
 
+  # A fragmented message's pieces go into one buffer as they come. Its
+  # size is what the limit is held to, and an empty piece adds nothing to
+  # it, so a client that sends continuation frames without end costs no
+  # more than the limit: kept as a list, every empty piece was one more
+  # entry the limit never saw.
   private def receive(frame : Frame) : Nil
     opcode = frame.opcode
     if opcode == TEXT || opcode == BINARY
       return fail(1002, "expected a continuation frame") unless @fragment_opcode == 0
       return deliver(opcode, frame.payload) if frame.fin
       @fragment_opcode = opcode
-      @fragments = [frame.payload]
-      @fragment_size = frame.payload.bytesize
+      @fragments << frame.payload
     elsif opcode == CONTINUATION
       return fail(1002, "continuation frame without a message") if @fragment_opcode == 0
-      @fragment_size = @fragment_size + frame.payload.bytesize
-      return fail(1009, "message too big") if @fragment_size > @max_message_size
+      if @fragments.bytesize.to_i64 + frame.payload.bytesize.to_i64 > @max_message_size.to_i64
+        return fail(1009, "message too big")
+      end
       @fragments << frame.payload
       return unless frame.fin
-      whole = @fragments.join
+      whole = @fragments.to_s
       kind = @fragment_opcode
       @fragment_opcode = 0
-      @fragments = [] of String
-      @fragment_size = 0
+      @fragments = String::Builder.new
       deliver(kind, whole)
     elsif opcode == CLOSE
       closing(frame.payload)
