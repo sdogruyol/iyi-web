@@ -179,7 +179,10 @@ describe "FileUpload#delete" do
     upload = form.files[0]
     dir = File.dirname(upload.path)
     assert File.exists?(upload.path)
-    assert (File.info(dir).permissions.to_i & 0o777) == 0o700
+    # Windows has no POSIX mode bits to check.
+    unless {{ flag?(:win32) }}
+      assert (File.info(dir).permissions.to_i & 0o777) == 0o700
+    end
     upload.delete
     assert !File.exists?(upload.path)
     assert !Dir.exists?(dir)
