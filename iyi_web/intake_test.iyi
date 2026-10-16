@@ -3,7 +3,7 @@
 module iyi_web/intake_test
 
 import iyi_web/intake::{Intake, TooLarge, HeadTooLarge}
-import iyi_web/request::{Request, ParseError}
+import iyi_web/request::{Request, ParseError, parse_incoming}
 import iyi_web/spec::*
 
 STEPS = [1, 2, 3, 7, 64, 4096]
@@ -150,8 +150,15 @@ describe "Intake" do
   end
 
   it "reads a repeated length on one line as std/http does" do
+    one_line = "POST /e HTTP/1.1\r\nHost: x\r\nContent-Length: 3, 3\r\n\r\nabc"
+    # `std/http` reads `3, 3` as 3 from iyi 0.16.1 on, and refused it before.
+    std_takes = !parse_incoming(one_line).request.nil?
     STEPS.each do |step|
-      assert taken("POST /e HTTP/1.1\r\nHost: x\r\nContent-Length: 3, 3\r\n\r\nabc" + NEXT, step)[0].body == "abc"
+      if std_takes
+        assert taken(one_line + NEXT, step)[0].body == "abc"
+      else
+        assert refused?(one_line + NEXT, step)
+      end
       assert too_large?("POST /e HTTP/1.1\r\nHost: x\r\nContent-Length: 1025, 1025\r\n\r\n", step)
       assert refused?("POST /e HTTP/1.1\r\nHost: x\r\nContent-Length: 3, 4\r\n\r\nabcd", step)
       assert refused?("POST /e HTTP/1.1\r\nHost: x\r\nContent-Length: +3\r\n\r\nabc", step)
