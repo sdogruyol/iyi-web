@@ -109,6 +109,10 @@ All notable changes to iyi-web are recorded here. The format follows
   `Content-Length: 5, 5` is read as one length, as `std/http` reads it,
   instead of buffering on. A request whose framing the two still read
   differently is refused with `400`.
+- `render`, `content_for` and `yield_content` from `import iyi_web/dsl::*`
+  did not build on iyi 0.17.0, which refuses `IyiWeb::Templates` in a file
+  that does not import it. `iyi_web/dsl` re-exports `iyi_web/templates`
+  with `pub import`.
 
 ### Security
 

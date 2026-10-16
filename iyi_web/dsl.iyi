@@ -23,10 +23,13 @@ import iyi_web/compress::{CompressHandler}
 import iyi_web/event_stream::{EventStream}
 import iyi_web/websocket::{WebSocket}
 import iyi_web/cli::{CLIParser, cli_parser}
-import iyi_web/templates
+pub import iyi_web/templates
 
 # Templates from `iyi_web/templates`, so `import iyi_web/dsl::*` is enough. A
-# template path is relative to the file that calls `render`.
+# template path is relative to the file that calls `render`. The import is
+# `pub` because `render` expands in the caller's file, which names
+# `IyiWeb::Templates` there: iyi 0.17.0 refuses a module the file reaches
+# only through another file's import.
 pub macro render(filename)
   ::IyiWeb::Templates.render({{ filename }})
 end
