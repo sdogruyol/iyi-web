@@ -1,0 +1,3 @@
+# LF in every checkout: fixtures and templates are compared byte for byte,
+# and Git for Windows converts to CRLF by default.
+* text=auto eol=lf
