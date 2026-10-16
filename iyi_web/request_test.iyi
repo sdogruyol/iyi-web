@@ -83,12 +83,19 @@ describe "parse_head" do
     assert_error("GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: nope")
   end
 
-  it "keeps the last value of a duplicate header" do
-    assert parsed("GET / HTTP/1.1\r\nHost: first\r\nHost: second").host == "second"
+  it "never reads the first of two Host lines" do
+    # `std/http` refuses two from iyi 0.16.1 on (RFC 9112 §3.2), and kept
+    # the last before.
+    case parse_head("GET / HTTP/1.1\r\nHost: first\r\nHost: second")
+    in ParseError
+    in Request
+      assert it.host == "second"
+    end
   end
 
   it "leaves missing Host and Content-Type empty" do
-    req = parsed("GET / HTTP/1.1")
+    # HTTP/1.0: an HTTP/1.1 request without Host is refused from iyi 0.16.1 on.
+    req = parsed("GET / HTTP/1.0")
     assert req.host == ""
     assert req.content_type == ""
   end
