@@ -341,8 +341,9 @@ describe "Server addresses" do
     server.bind_unix(path)
     serve(server) do |running|
       # `File.exists?` opens the path, which a socket refuses; stat does not.
+      # Windows lists an AF_UNIX socket as a regular file.
       listed = File.info?(path)
-      assert listed ? listed.type.socket? : false
+      assert listed ? (listed.type.socket? || {{ flag?(:win32) }}) : false
       client = IyiSocket.connect_unix(path).or_panic
       client.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").or_panic
       answer = read_all(client)
