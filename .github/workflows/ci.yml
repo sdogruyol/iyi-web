@@ -7,17 +7,42 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    name: test (${{ matrix.os }}, iyi ${{ matrix.iyi }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+        # The oldest iyi this release supports (README, Requirements), and
+        # the latest, whose std/http and import rules have moved on.
+        iyi: ["0.15.0", latest]
+        # Windows on the latest only.
+        exclude:
+          - os: windows-2025
+            iyi: "0.15.0"
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     env:
-      # The oldest iyi this release supports (README, Requirements).
-      IYI_VERSION: 0.15.0
+      # Empty installs the latest release.
+      IYI_VERSION: ${{ matrix.iyi != 'latest' && matrix.iyi || '' }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install iyi
+        if: runner.os != 'Windows'
         run: |
           curl -fsSL https://raw.githubusercontent.com/iyilang/iyi/master/install.sh | IYI_PREFIX="$HOME/.iyi" sh
           echo "$HOME/.iyi/bin" >> "$GITHUB_PATH"
+
+      # iyi links through the Visual C++ build tools, which the runner has.
+      - name: Install iyi
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:IYI_PREFIX = Join-Path $env:RUNNER_TEMP 'iyi'
+          irm https://raw.githubusercontent.com/iyilang/iyi/master/install.ps1 | iex
+          Join-Path $env:IYI_PREFIX 'bin' | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
       - run: iyi version
 

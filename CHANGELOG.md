@@ -56,7 +56,8 @@ All notable changes to iyi-web are recorded here. The format follows
   cookies and the request store, and in-process testing, listed in the
   README's new Examples section.
 - CI on GitHub Actions: the tests, the examples' test and a build of every
-  example, on the released iyi 0.15.0.
+  example, on Linux with iyi 0.15.0 and the latest iyi, and on Windows with
+  the latest.
 
 ### Changed
 
