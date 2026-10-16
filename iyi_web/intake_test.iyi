@@ -129,8 +129,10 @@ describe "Intake" do
       # A line that never ends is refused once it passes the bound.
       assert head_refusal("GET /" + "a" * 9000, step) == 414
     end
-    fits = "GET / HTTP/1.1\r\nHost: x\r\n" + "X-A: b\r\n" * 2000 + "\r\n"
-    assert (taken(fits, 4096)[0].headers["x-a"]? || "").starts_with?("b, b")
+    # Within the bounds, read to the last field. Repeated lines are joined
+    # by `std/http` from iyi 0.16.1 on, and the last one kept before it.
+    fits = "GET / HTTP/1.1\r\nHost: x\r\n" + "X-A: b\r\n" * 2000 + "X-Last: z\r\n\r\n"
+    assert taken(fits, 4096)[0].headers["x-last"]? == "z"
   end
 
   it "skips empty lines before the request line, and keeps the body limit" do
