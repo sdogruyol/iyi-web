@@ -6,6 +6,12 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-16
+
+Requires iyi 0.15.0 or later. Five exports are gone (`iyi mod release`):
+`parse_ranges`, `content_range` and `unsatisfied_range` take `Int64`, and
+`TooLarge` moved from `iyi_web/server` to `iyi_web/intake`.
+
 ### Added
 
 - WebSockets: `ws "/path" do |socket, env|` and `Router#ws`, matched like
@@ -206,6 +212,7 @@ The first release. Requires iyi 0.14.1 or later.
   `Content-Length` is read, before the body is buffered.
 - Static file paths with a `..` segment or a NUL byte are refused.
 
-[Unreleased]: https://github.com/sdogruyol/iyi-web/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/sdogruyol/iyi-web/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/sdogruyol/iyi-web/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/sdogruyol/iyi-web/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/sdogruyol/iyi-web/releases/tag/v0.1.0

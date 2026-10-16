@@ -185,7 +185,7 @@ Found later and fixed:
 | Shutdown | INT and TERM drain: the listener closes, idle connections close, requests in flight finish within `shutdown_timeout` (30 s); a second signal cuts off at once; `shutdown_message` |
 | Command line | `-b` (IPv4 or IPv6), `-p`, `-h`, `extra_options`. `-s` and `--ssl-*` stop the program with a message that TLS is not supported |
 | Listening options | IPv6 and `unix_socket`; `read_timeout`, `write_timeout` and `idle_timeout` (not in Kemal) |
-| Installation | `iyi get github.com/sdogruyol/iyi-web` writes `require github.com/sdogruyol/iyi-web v0.1.1` to `iyi.mod`, and files write `import github.com/sdogruyol/iyi-web/iyi_web/dsl::*`; with `--as web` the line ends `as web` and files write `import web/iyi_web/dsl::*` (iyi 0.15.0 and later) |
+| Installation | `iyi get github.com/sdogruyol/iyi-web` writes `require github.com/sdogruyol/iyi-web v0.2.0` to `iyi.mod`, and files write `import github.com/sdogruyol/iyi-web/iyi_web/dsl::*`; with `--as web` the line ends `as web` and files write `import web/iyi_web/dsl::*` (iyi 0.15.0 and later) |
 | Examples | Ten, from `hello` to a JSON API, uploads, templates, routers, middleware, SSE, a WebSocket chat room, cookies and in-process testing |
 
 ### Remaining
