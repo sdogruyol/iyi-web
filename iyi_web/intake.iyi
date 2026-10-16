@@ -261,7 +261,7 @@ pub class Intake
     # `+5` none. Lines that name different lengths are refused.
     declared = -1_i64
     lengths.each do |line|
-      length = HTTP.content_length(line)
+      length = content_length(line)
       return ParseError.new("Content-Length is not a number") unless length
       return ParseError.new("Content-Length given twice, differently") if declared >= 0 && length != declared
       declared = length
@@ -354,6 +354,30 @@ pub class Intake
       i = i + 1
     end
     value
+  end
+
+  # A `Content-Length` line as a number, read as `std/http` reads it from
+  # iyi 0.16.1 on (`HTTP.content_length`, which 0.15.0 lacks): `5, 5` is
+  # one length, digits and nothing else are a length, and a length past
+  # 2147483647 reads as one past it. Nil when it is not one.
+  private def content_length(value : String) : Int64?
+    parts = value.split(',')
+    return nil if parts.size == 0
+    first = HTTP.trim(parts[0])
+    parts.each do |part|
+      return nil unless HTTP.trim(part) == first
+    end
+    return nil if first.bytesize == 0
+    p = first.to_unsafe
+    n = 0_i64
+    i = 0
+    while i < first.bytesize
+      return nil unless p[i] >= 48_u8 && p[i] <= 57_u8
+      n = n * 10_i64 + (p[i] - 48_u8).to_i64
+      n = 2147483648_i64 if n > 2147483647_i64
+      i = i + 1
+    end
+    n
   end
 
   private def find_crlf(from : Int32) : Int32?
