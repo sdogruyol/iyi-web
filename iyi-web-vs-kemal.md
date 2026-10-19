@@ -110,14 +110,20 @@ Not in Kemal's core, but seen in its examples:
 
 ## 5. Status
 
-iyi-web `master`, iyi 0.15.0 (the released toolchain). `iyi test iyi_web`
-passes in all 31 test files and `iyi test examples` in its one. Every example
-was built, run and exercised with curl; WebSockets with Node's client.
+iyi-web `master`, on iyi 0.15.0 (the oldest it supports) and 0.18.0 (the
+latest release). `iyi test iyi_web` passes in all 31 test files and
+`iyi test examples` in its one, on both. Every example was built, run and
+exercised with curl; WebSockets with Node's client.
 
 iyi 0.14.1 lifted most of what section 4 listed as needed in iyi first:
 `std/signal`, read and write timeouts, `SocketError` values instead of
 panics, one reader and one writer per descriptor, IPv6, unix sockets and
 `IO#seek`.
+
+iyi 0.18.0 lifted two more: std/tls has a server (`TlsServer`,
+`TlsServerConfig`) and std/compress compresses a stream a piece at a time
+(`Deflater`). iyi-web uses neither yet, as either raises its minimum from
+iyi 0.15.0 to 0.18.0; see Remaining.
 
 ### Fixed defects
 
@@ -195,8 +201,6 @@ Possible within iyi-web:
 - The `error 404 do |env, ex|` form and `error` per exception class. The panic
   text can be read with `Panicked#text`; exception classes have no direct
   equivalent in iyi.
-- `send_file` with gzip. Static files are compressed up to 1 MiB only, since
-  `std/compress` encodes a whole string at once.
 - Headers set after a streamed file response has started (an after filter,
   `CompressHandler`) are not sent; Kemal behaves the same.
 - Static files: precompressed `.gz` files, the system MIME table.
@@ -210,17 +214,25 @@ Possible within iyi-web:
   are copied into a string for `std/http`'s parser, which copies the body out
   again.
 
+Possible within iyi-web on iyi 0.18.0, which would become its minimum:
+
+- TLS: `-s`, `--ssl-key-file`, `--ssl-cert-file`, `bind_tls` and `wss://`,
+  over std/tls's `TlsServer`. The server, `Response#upgrade` and
+  `WebSocket` hold an `IyiSocket` today and would take the TLS stream.
+- `send_file` with gzip, and static files over 1 MiB, which are sent
+  uncompressed: iyi 0.15.0's `std/compress` encodes a whole string at once,
+  0.18.0's `Deflater` a piece at a time.
+
 Needing changes in iyi first:
 
 | Missing in iyi | iyi-web feature waiting on it |
 |---|---|
-| TLS | `-s`, `--ssl-key-file`, `--ssl-cert-file`, `bind_tls` |
-| SO_REUSEPORT in std/socket | `reuse_port` |
-| A caught panic that the runtime does not print | No `iyi: panic:` line on stderr when a client disconnects mid-response, or a write times out |
-| A streaming `std/compress` | Compressing large static files and `send_file` |
+| SO_REUSEPORT in std/socket (not in 0.18.0) | `reuse_port` |
+| A caught panic that the runtime does not print (0.18.0 still prints it) | No `iyi: panic:` line on stderr when a client disconnects mid-response, or a write times out |
 
 Problems found in iyi and worked around in iyi-web. The first four are fixed
-in iyi 0.14.1 or 0.15.0:
+in iyi 0.14.1 or 0.15.0, and the three marked so after 0.15.0; the
+workarounds stay while iyi-web supports 0.15.0:
 
 - `File.tempfile` derived a predictable name and wrote through a symlink
   planted there (fixed in 0.14.1). iyi-web still spools each upload into a
@@ -234,14 +246,19 @@ in iyi 0.14.1 or 0.15.0:
   failed with `BUG: __iyi_once is not defined` (fixed).
 - `std/option_parser` panics on invalid input unless `invalid_option` and
   `missing_option` handlers are set. iyi-web uses its own `CLIParser`.
-- `File.exists?` answers false for a unix socket's file, because it opens the
-  path for reading; `File.info?` reports it.
-- A method a subclass inherits cannot call a top-level function of its
-  module by its short name ("not brought into scope"); the full name works.
-- An integer literal passed to an imported function taking `Int64` is not
-  autocast, and the error says the function is not in scope.
+- `File.exists?` answered false for a unix socket's file, because it opened
+  the path for reading; `File.info?` reports it (fixed in 0.17.0, which
+  opens with `O_PATH` on Linux - so `exists?` no longer says whether a
+  file can be read, and `token.iyi` asks `File.readable?` of
+  `/dev/urandom`).
+- A method a subclass inherits could not call a top-level function of its
+  module by its short name ("not brought into scope"); the full name works
+  (fixed by 0.18.0).
+- An integer literal passed to an imported function taking `Int64` was not
+  autocast, and the error said the function is not in scope (fixed by
+  0.18.0).
 - `JSON.to_json` refuses a hash whose values are a union, such as
-  `{"version" => 1, "healthy" => true}`.
+  `{"version" => 1, "healthy" => true}` (still so in 0.18.0).
 - A closure captures a variable rather than its value, and a `while` body is
   not a scope, so a task spawned in a loop sees the loop's last value. This
   is Crystal's rule too; it caused the accept-loop bug above.

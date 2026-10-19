@@ -6,6 +6,17 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
+Builds and passes its tests on iyi 0.18.0 as on 0.15.0, the oldest it
+supports; the exported surface is unchanged (`iyi mod release`).
+
+### Fixed
+
+- Multipart boundaries and upload spool directories panicked on iyi 0.17.0
+  and later where `/dev/urandom` is there but may not be read, as in a
+  sandbox: `File.exists?` stopped opening the path in 0.17.0, so the check
+  passed and the open after it failed. `File.readable?` is asked instead,
+  and `std/random` used when it says no, as before.
+
 ## [0.2.0] - 2026-10-16
 
 Requires iyi 0.15.0 or later. Five exports are gone (`iyi mod release`):

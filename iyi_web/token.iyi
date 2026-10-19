@@ -2,6 +2,7 @@
 # uploads are spooled into.
 module iyi_web/token
 
+import std/file::{File}
 import std/random::{Random}
 
 # *count* random bytes as `2 * count` lower-case hex digits.
@@ -9,15 +10,17 @@ pub def random_hex(count : Int32) : String
   hex(random_bytes(count))
 end
 
-# `File.exists?` is an open for reading, so it answers whether the device
-# can be read. wasm32 has no such path to ask about.
+# `File.readable?`, not `File.exists?`: from iyi 0.17.0 on `exists?` no
+# longer opens the path, so a device that is there but may not be read -
+# a sandbox's - answered true, and the open below panicked. wasm32 has no
+# such path to ask about.
 #
 # Where there is no `/dev/urandom` - Windows, wasm32 - the bytes come from
 # `std/random` seeded by `Random.new`, which reads the platform's own
 # entropy (`RtlGenRandom` on Windows; the clocks on wasm32, which has none).
 private def random_bytes(count : Int32) : String
   {% if !flag?(:wasm32) %}
-    if File.exists?("/dev/urandom")
+    if File.readable?("/dev/urandom")
       bytes = ""
       File.open("/dev/urandom", "r", count) do |io|
         bytes = io.read_bytes(count)
