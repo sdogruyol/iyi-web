@@ -1,0 +1,61 @@
+# What an error page is told caused it, and the built-in 500 page.
+#
+# Kemal hands every error handler an `Exception`. iyi has none: a failure is
+# a value of a type implementing the prelude's `Error`, so that is what a
+# `|env, err|` page gets: the `Panicked` a route's panic was caught as, the
+# error a route returned, or a `StatusError` when there is only a status,
+# such as the 404 for a path no route serves.
+module iyi_web/failure
+
+import std/html::{HTML}
+import iyi_web/context::{Context}
+import iyi_web/status::*
+
+# An error status with no failure behind it: one the router answers itself
+# (404, 405, 400 ...), or one a filter or route set on the response.
+pub struct StatusError
+  getter status : Int32
+
+  def initialize(@status : Int32)
+  end
+end
+
+impl Error for StatusError
+  def message : String
+    status.to_s + " " + phrase(status)
+  end
+end
+
+# Renders the first of *pages* - `error` pages for error types, keyed by
+# type name in registration order - that takes *failure*'s type. False
+# when none does. A page answers nil for an error of another type; one it
+# takes answers its body, or writes it with a helper and answers "". The
+# caller sets the status and clears the body first.
+pub def render_error_type_page(ctx : Context, failure : Error, pages : Hash(String, Proc(Context, Error, String?))) : Bool
+  pages.each_value do |page|
+    if body = page.call(ctx, failure)
+      ctx.response.set_body(body) unless body.empty?
+      return true
+    end
+  end
+  false
+end
+
+# Writes the built-in page for a failure no `error` handler answered: a
+# panic, or an error a route returned. *message* reaches the client only
+# when *show* is set, and then the page is locked down so a message that
+# echoes request data cannot run as script. The caller sets the status.
+pub def render_failure_page(ctx : Context, message : String, show : Bool) : Nil
+  title = "500 Internal Server Error"
+  head = "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>" + title + "</title></head><body><h1>" + title + "</h1>"
+  ctx.response.content_type = "text/html; charset=utf-8"
+  unless show
+    ctx.response.set_body(head + "</body></html>\n")
+    return
+  end
+  request = ctx.request
+  ctx.response.set_body(head + "<p>" + HTML.escape(request.method) + " " + HTML.escape(request.path) + "</p><pre>" +
+                        HTML.escape(message) + "</pre></body></html>\n")
+  ctx.response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'"
+  ctx.response.headers["X-Content-Type-Options"] = "nosniff"
+end

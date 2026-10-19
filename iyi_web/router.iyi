@@ -15,14 +15,24 @@ import iyi_web/status::*
 import iyi_web/event_stream::{EventStream}
 import iyi_web/websocket::{WebSocket}
 import iyi_web/config::{Config, config}
+import iyi_web/failure::{StatusError, render_error_type_page, render_failure_page}
 
 alias HandlerProc = Context -> String
+
+# A route answers its body, or the error it failed with.
+alias RouteProc = Proc(Context, String | Error)
+
+# An `error` page for a status, told what caused it.
+alias ErrorPage = Proc(Context, Error, String)
+
+# An `error` page for an error type: nil when the error is not its type.
+alias ErrorTypePage = Proc(Context, Error, String?)
 
 HTTP_METHODS   = %w(get post put patch delete options head query)
 FILTER_METHODS = %w(get post put patch delete options query)
 
 pub struct Route
-  def initialize(@method : String, @path : String, @handler : Context -> String)
+  def initialize(@method : String, @path : String, @handler : RouteProc)
   end
 
   pub def method : String
@@ -33,7 +43,7 @@ pub struct Route
     @path
   end
 
-  pub def handler : Context -> String
+  pub def handler : RouteProc
     @handler
   end
 end
@@ -55,7 +65,7 @@ end
 private record RouteDefinition,
   method : String,
   path : String,
-  handler : Context -> String
+  handler : RouteProc
 
 private record FilterDefinition,
   kind : Symbol,
@@ -76,22 +86,27 @@ pub class Router
   @filters : Array(FilterDefinition)
   @sub_routers : Array(SubRouter)
   @sockets : Array(SocketDefinition)
-  @error_handlers : Hash(Int32, HandlerProc)
+  @error_handlers : Hash(Int32, ErrorPage)
+  @error_types : Hash(String, ErrorTypePage)
 
   def initialize(@prefix : String = "")
     @routes = [] of RouteDefinition
     @filters = [] of FilterDefinition
     @sub_routers = [] of SubRouter
     @sockets = [] of SocketDefinition
-    @error_handlers = {} of Int32 => HandlerProc
+    @error_handlers = {} of Int32 => ErrorPage
+    @error_types = {} of String => ErrorTypePage
   end
 
   pub def prefix : String
     @prefix
   end
 
+  # A route's block answers an `IntoBody`, or a union of one with error
+  # members: `String | NotFound` where `NotFound` implements `Error`. An
+  # error it answers goes to the `error` page for its type.
   {% for method in HTTP_METHODS %}
-    pub def {{ method.id }}(path : String, &block : Context -> B) : Nil forall B : IntoBody
+    pub def {{ method.id }}(path : String, &block : Context -> B) : Nil forall B
       add_route({{ method.upcase }}, path, &block)
     end
   {% end %}
@@ -168,24 +183,56 @@ pub class Router
     mount("", router)
   end
 
-  pub def error(status_code : Int32, &block : Context -> B) : Nil forall B : IntoBody
-    @error_handlers[status_code] = ->(ctx : Context) { block.call(ctx).into_body }
+  # The page for *status_code*. The block may take the cause as a second
+  # parameter: the `Panicked` a route's panic was caught as, for a 500;
+  # the error a route answered, when no `error` for its type caught it;
+  # otherwise a `StatusError` for the status.
+  pub def error(status_code : Int32, &block : Context, Error -> B) : Nil forall B : IntoBody
+    @error_handlers[status_code] = ->(ctx : Context, cause : Error) { block.call(ctx, cause).into_body }
   end
 
-  pub def error_handler(status_code : Int32) : HandlerProc?
+  # The page for an error of type *type*, or of a subclass of it: Kemal's
+  # `error MyException`. It takes an error a route answers, and a panic in
+  # a route as `Panicked` (or `Error`). The response is a 500 unless the
+  # block sets another status. Pages for types are tried in the order they
+  # were registered, and the first that matches renders, before any
+  # `error 500`.
+  pub def error(type : E.class, &block : Context, E -> B) : Nil forall E : Error, B : IntoBody
+    @error_types[E.to_s] = ->(ctx : Context, failure : Error) : String? {
+      failure.is_a?(E) ? block.call(ctx, failure).into_body : nil
+    }
+  end
+
+  pub def error_handler(status_code : Int32) : ErrorPage?
     error_handlers[status_code]?
   end
 
   # Parent first, then each mount, so a nested `error 404` replaces the
   # parent's for the same code. Routes and filters already flatten this way.
-  pub def error_handlers : Hash(Int32, HandlerProc)
-    collected = {} of Int32 => HandlerProc
+  pub def error_handlers : Hash(Int32, ErrorPage)
+    collected = {} of Int32 => ErrorPage
     @error_handlers.each do |code, handler|
       collected[code] = handler
     end
     @sub_routers.each do |sub|
       sub.router.error_handlers.each do |code, handler|
         collected[code] = handler
+      end
+    end
+    collected
+  end
+
+  # Flattened like `error_handlers`: a mount's page for a type replaces
+  # the parent's in the parent's place in the order. `Server` takes these
+  # for a panic, beside `error_handlers`.
+  pub def error_type_handlers : Hash(String, ErrorTypePage)
+    collected = {} of String => ErrorTypePage
+    @error_types.each do |name, page|
+      collected[name] = page
+    end
+    @sub_routers.each do |sub|
+      sub.router.error_type_handlers.each do |name, page|
+        collected[name] = page
       end
     end
     collected
@@ -236,15 +283,26 @@ pub class Router
     collected
   end
 
-  private def add_route(method : String, path : String, &block : Context -> B) : Nil forall B : IntoBody
+  # Unbounded, so a union with error members is accepted: the bound is
+  # checked on what is left once the errors are taken out.
+  private def add_route(method : String, path : String, &block : Context -> B) : Nil forall B
     raise "path must start with /" unless path.starts_with?('/')
-    handler = ->(ctx : Context) { block.call(ctx).into_body }
+    handler = ->(ctx : Context) : String | Error {
+      result = block.call(ctx)
+      result.is_a?(::Error) ? result.as(Error) : body_of(result)
+    }
     @routes << RouteDefinition.new(method: method, path: path, handler: handler)
   end
 
   private def add_filter(kind : Symbol, method : String, path : String, &block : Context -> B) : Nil forall B : IntoBody
     handler = ->(ctx : Context) { block.call(ctx).into_body }
     @filters << FilterDefinition.new(kind: kind, method: method, path: path, handler: handler)
+  end
+
+  # Where a route answering something that is not an `IntoBody` is
+  # refused, naming the member that is not.
+  private def body_of(value : IntoBody) : String
+    value.into_body
   end
 end
 
@@ -267,18 +325,20 @@ end
 pub class RouteHandler < Handler
   @tree : Tree(Route)
   @filters : Array(Tuple(Symbol, String, String, HandlerProc))
-  @error_handlers : Hash(Int32, HandlerProc)
+  @error_handlers : Hash(Int32, ErrorPage)
+  @error_types : Hash(String, ErrorTypePage)
   @methods : Array(String)
   @sockets : Tree(SocketRoute)
   @config : Config
 
   # *settings* supplies the WebSocket origin list and message limit, read
-  # at each handshake.
+  # at each handshake, and whether the 500 page shows an error's message.
   def initialize(router : Router, settings : Config = config)
     super()
     @tree = Tree(Route).new
     @filters = router.filters
-    @error_handlers = {} of Int32 => HandlerProc
+    @error_handlers = {} of Int32 => ErrorPage
+    @error_types = router.error_type_handlers
     @methods = [] of String
     @sockets = Tree(SocketRoute).new
     @config = settings
@@ -361,7 +421,7 @@ pub class RouteHandler < Handler
     # gets that page, and the route does not run.
     if ctx.response.status_code >= 400
       if custom = @error_handlers[ctx.response.status_code]?
-        render_page(ctx, custom)
+        render_page(ctx, custom, StatusError.new(ctx.response.status_code))
         drop_head_body(ctx)
         return
       end
@@ -379,23 +439,30 @@ pub class RouteHandler < Handler
       return
     end
 
-    body = route.handler.call(ctx)
-    unless ctx.halted?
-      # A helper like `env.text` already wrote the body and returned nil.
-      # Replacing that with the empty IntoBody would wipe it.
-      ctx.response.set_body(body) unless body.empty? && !ctx.response.body.empty?
-    end
-
+    answer = route.handler.call(ctx)
     if ctx.halted?
       drop_head_body(ctx)
       return
+    end
+
+    case answer
+    in Error
+      # An error the route answered ends it the way a panic does: the after
+      # filters do not run, and its page replaces whatever was written.
+      render_failure(ctx, answer)
+      drop_head_body(ctx)
+      return
+    in String
+      # A helper like `env.text` already wrote the body and returned nil.
+      # Replacing that with the empty IntoBody would wipe it.
+      ctx.response.set_body(answer) unless answer.empty? && !ctx.response.body.empty?
     end
 
     run_filters(ctx, :after, route.method, path)
 
     if custom = @error_handlers[ctx.response.status_code]?
       if ctx.response.status_code >= 400
-        render_page(ctx, custom)
+        render_page(ctx, custom, StatusError.new(ctx.response.status_code))
       end
     end
 
@@ -459,7 +526,7 @@ pub class RouteHandler < Handler
     if ctx.response.status_code >= 400
       # A filter that answered with an error refused the upgrade.
       if custom = @error_handlers[ctx.response.status_code]?
-        ctx.response.set_body(custom.call(ctx))
+        ctx.response.set_body(custom.call(ctx, StatusError.new(ctx.response.status_code)))
       end
       ctx.response.headers["Connection"] = "close"
       return true
@@ -502,19 +569,34 @@ pub class RouteHandler < Handler
   private def render_error(ctx : Context, status : Int32) : Nil
     ctx.response.status_code = status
     if handler = @error_handlers[status]?
-      render_page(ctx, handler)
+      render_page(ctx, handler, StatusError.new(status))
     else
       ctx.response.content_type = "text/html; charset=utf-8"
       ctx.response.set_body(status.to_s + " " + phrase(status))
     end
   end
 
+  # An error a route answered gets the first page registered for its
+  # type, as a 500 unless that page sets another status. With none, it
+  # gets the 500 page, told the error; the built-in one shows the message
+  # only under `show_exceptions`, as for a panic.
+  private def render_failure(ctx : Context, failure : Error) : Nil
+    ctx.response.status_code = 500
+    ctx.response.set_body("")
+    return if render_error_type_page(ctx, failure, @error_types)
+    if page = @error_handlers[500]?
+      render_page(ctx, page, failure)
+    else
+      render_failure_page(ctx, failure.message, @config.show_exceptions?)
+    end
+  end
+
   # An error page answers its body, or writes it with a helper such as
   # `env.json` and answers nil. What the response held before - a route's
   # own body, a halt's message - is not the page, so it goes first.
-  private def render_page(ctx : Context, page : HandlerProc) : Nil
+  private def render_page(ctx : Context, page : ErrorPage, cause : Error) : Nil
     ctx.response.set_body("")
-    body = page.call(ctx)
+    body = page.call(ctx, cause)
     ctx.response.set_body(body) unless body.empty?
   end
 end

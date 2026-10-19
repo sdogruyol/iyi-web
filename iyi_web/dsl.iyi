@@ -53,8 +53,9 @@ FILTER_METHODS = %w(get post put patch delete options query)
 
 APP = Router.new
 
+# A route may answer an error as well as a body; see `Router#get`.
 {% for method in HTTP_METHODS %}
-  pub def {{ method.id }}(path : String, &block : Context -> B) : Nil forall B : IntoBody
+  pub def {{ method.id }}(path : String, &block : Context -> B) : Nil forall B
     APP.{{ method.id }}(path, &block)
   end
 {% end %}
@@ -103,8 +104,16 @@ pub def ws(path : String, &block : WebSocket, Context -> Nil) : Nil
   APP.ws(path, &block)
 end
 
-pub def error(status_code : Int32, &block : Context -> B) : Nil forall B : IntoBody
+# `error 404 do |env| ... end`, or `do |env, err|` for what caused the page;
+# see `Router#error`.
+pub def error(status_code : Int32, &block : Context, Error -> B) : Nil forall B : IntoBody
   APP.error(status_code, &block)
+end
+
+# `error NotFound do |env, err| ... end`: the page for an error of that type
+# a route answers.
+pub def error(type : E.class, &block : Context, E -> B) : Nil forall E : Error, B : IntoBody
+  APP.error(type, &block)
 end
 
 pub def mount(path : String, router : Router) : Nil
@@ -281,7 +290,7 @@ private def start(port : Int32 | Nil) : Nil
   cfg = config
   cfg.port = port if port
 
-  server = Server.new(handler_chain, cfg, app.error_handlers)
+  server = Server.new(handler_chain, cfg, app.error_handlers, app.error_type_handlers)
   address = ""
   if path = cfg.unix_socket
     server.bind_unix(path)

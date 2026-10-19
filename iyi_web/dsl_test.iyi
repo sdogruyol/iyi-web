@@ -38,6 +38,17 @@ class Collected < Logger
   end
 end
 
+struct Refused
+  def initialize
+  end
+end
+
+impl Error for Refused
+  def message : String
+    "refused"
+  end
+end
+
 get "/dsl" do |env|
   "from-dsl"
 end
@@ -57,6 +68,19 @@ end
 
 error 404 do |env|
   "dsl-missing"
+end
+
+error 405 do |env, err|
+  "dsl " + err.message
+end
+
+get "/refused" do |env|
+  env.params.query["ok"]? ? "allowed" : Refused.new
+end
+
+error Refused do |env, err|
+  env.response.status_code = 403
+  "dsl " + err.message
 end
 
 mounted = Router.new
@@ -119,6 +143,17 @@ describe "iyi_web/dsl" do
   it "registers error handlers" do
     handler = RouteHandler.new(app)
     assert dispatch(handler, "GET", "/nope").response.body == "dsl-missing"
+  end
+
+  it "registers a page told its cause, and a page for an error type" do
+    handler = RouteHandler.new(app)
+    wrong = dispatch(handler, "PUT", "/dsl")
+    assert wrong.response.status_code == 405
+    assert wrong.response.body == "dsl 405 Method Not Allowed"
+    refused = dispatch(handler, "GET", "/refused")
+    assert refused.response.status_code == 403
+    assert refused.response.body == "dsl refused"
+    assert dispatch(handler, http_request("GET", "/refused", "ok=1")).response.body == "allowed"
   end
 
   it "registers before_all" do

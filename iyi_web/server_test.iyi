@@ -99,6 +99,10 @@ router.get "/boom-json" do |env|
   raise "handler failed" if env.request.path == "/boom-json"
   "unreachable"
 end
+router.get "/boom-cause" do |env|
+  raise "kaboom" if env.request.path == "/boom-cause"
+  "unreachable"
+end
 router.sse "/events" do |stream, env|
   stream.send("one", event: "tick")
   stream.send("two", event: "tick")
@@ -113,12 +117,14 @@ router.post "/upload" do |env|
   upload = env.params.files["file"]?
   upload ? upload.path + "|" + upload.read : "none"
 end
-router.error 500 do |env|
+router.error 500 do |env, err|
   raise "page failed" if env.request.path == "/boom-twice"
   if env.request.path == "/boom-json"
     # Written by the helper; the block's own answer is empty.
     env.json({"error" => "sorry"})
     ""
+  elsif env.request.path == "/boom-cause"
+    (err.is_a?(Panicked) ? "panicked: " : "other: ") + err.message
   else
     "sorry: " + env.request.path
   end
@@ -129,8 +135,33 @@ cfg.logging = false
 cfg.serve_static = false
 cfg.powered_by_header = true
 
-server = Server.new(chain([RouteHandler.new(router)]), cfg, router.error_handlers)
+server = Server.new(chain([RouteHandler.new(router)]), cfg, router.error_handlers, router.error_type_handlers)
 port = server.bind("127.0.0.1", 0)
+
+# A page for `Panicked` takes every panic, so it gets a server of its own.
+typed = Router.new
+typed.get "/panic" do |env|
+  raise "typed <kaboom>" if env.request.path == "/panic"
+  "unreachable"
+end
+typed.get "/teapot" do |env|
+  raise "short and stout" if env.request.path == "/teapot"
+  "unreachable"
+end
+typed.get "/page-panics" do |env|
+  raise "first" if env.request.path == "/page-panics"
+  "unreachable"
+end
+typed.error Panicked do |env, err|
+  raise "page failed" if env.request.path == "/page-panics"
+  env.response.status_code = 418 if env.request.path == "/teapot"
+  "caught: " + err.message
+end
+typed.error 500 do |env, err|
+  "fallback: " + err.message
+end
+typed_server = Server.new(chain([RouteHandler.new(typed)]), cfg, typed.error_handlers, typed.error_type_handlers)
+typed_port = typed_server.bind("127.0.0.1", 0)
 
 group do |g|
   g.spawn do
@@ -322,6 +353,12 @@ group do |g|
         assert http_body(boom) == "{\"error\":\"sorry\"}"
       end
 
+      it "tells the error 500 page the panic it answers" do
+        boom = exchange(port, close_request("GET", "/boom-cause"))
+        assert status_line(boom) == "HTTP/1.1 500 Internal Server Error"
+        assert http_body(boom) == "panicked: kaboom"
+      end
+
       it "falls back to the built-in 500 page when the error page panics" do
         cfg.show_exceptions = true
         shown = exchange(port, close_request("GET", "/boom-twice"))
@@ -371,14 +408,35 @@ group do |g|
         assert status_line(forged) == "HTTP/1.1 500 Internal Server Error"
         assert http_header(forged, "Set-Cookie").nil?
       end
+
+      it "gives a route's panic to the `error Panicked` page before the 500 page" do
+        caught = exchange(typed_port, "GET /panic HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        assert status_line(caught) == "HTTP/1.1 500 Internal Server Error"
+        assert http_header(caught, "Connection") == "close"
+        assert http_body(caught) == "caught: typed <kaboom>"
+
+        teapot = exchange(typed_port, close_request("GET", "/teapot"))
+        assert status_line(teapot) == "HTTP/1.1 418 I'm a teapot"
+        assert http_body(teapot) == "caught: short and stout"
+
+        fallback = exchange(typed_port, close_request("GET", "/page-panics"))
+        assert status_line(fallback) == "HTTP/1.1 500 Internal Server Error"
+        assert http_body(fallback) == "fallback: first"
+      end
     end
 
     server.close
+    typed_server.close
     0
   end
 
   g.spawn do
     server.listen
+    0
+  end
+
+  g.spawn do
+    typed_server.listen
     0
   end
 end
