@@ -35,7 +35,6 @@ module iyi_web/server
 
 import std/socket::{IyiSocket, SocketError}
 import std/http::{HTTP}
-import std/html::{HTML}
 import std/time::{Time, Span}
 import iyi_web/handler::{Handler}
 import iyi_web/context::{Context}
@@ -44,11 +43,12 @@ import iyi_web/intake::{Intake, TooLarge, HeadTooLarge}
 import iyi_web/response::{Response}
 import iyi_web/config::{Config}
 import iyi_web/http_date::*
+import iyi_web/failure::{render_failure_page}
 
 pub class Server
   @handler : Handler
   @config : Config
-  @error_pages : Hash(Int32, Proc(Context, String))
+  @error_pages : Hash(Int32, Proc(Context, Error, String))
   @socket : IyiSocket?
   @in_flight : Int32
   @host : String
@@ -63,8 +63,8 @@ pub class Server
   @date_value : String
 
   # *error_pages* are the application's `error` handlers; the one for 500
-  # renders the page a panicking request gets.
-  def initialize(@handler : Handler, @config : Config, @error_pages : Hash(Int32, Proc(Context, String)) = {} of Int32 => Proc(Context, String))
+  # renders the page a panicking request gets, told the `Panicked`.
+  def initialize(@handler : Handler, @config : Config, @error_pages : Hash(Int32, Proc(Context, Error, String)) = {} of Int32 => Proc(Context, Error, String))
     @socket = nil
     @in_flight = 0
     @host = "127.0.0.1"
@@ -403,7 +403,7 @@ pub class Server
     if page = @error_pages[500]?
       body = ""
       prepare_500(ctx)
-      page_failed = isolated { body = page.call(ctx) }
+      page_failed = isolated { body = page.call(ctx, failure) }
       unless page_failed
         # A page written with `env.json` or `env.text` answers nil.
         ctx.response.set_body(body) unless body.empty?
@@ -412,11 +412,7 @@ pub class Server
     end
     unless rendered
       prepare_500(ctx)
-      ctx.response.set_body(panic_page(request, failure))
-      if @config.show_exceptions?
-        ctx.response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'"
-        ctx.response.headers["X-Content-Type-Options"] = "nosniff"
-      end
+      render_failure_page(ctx, failure.text, @config.show_exceptions?)
     end
     ctx.response.headers["Connection"] = "close"
     if @config.logging
@@ -429,13 +425,6 @@ pub class Server
     ctx.response.reset
     ctx.response.status_code = 500
     stamp(ctx)
-  end
-
-  private def panic_page(request : Request, failure : Panicked) : String
-    title = "500 Internal Server Error"
-    return "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>" + title + "</title></head><body><h1>" + title + "</h1></body></html>\n" unless @config.show_exceptions?
-    "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>" + title + "</title></head><body><h1>" + title + "</h1><p>" +
-      HTML.escape(request.method) + " " + HTML.escape(request.path) + "</p><pre>" + HTML.escape(failure.text) + "</pre></body></html>\n"
   end
 
   private def wire_version(request : Request) : String

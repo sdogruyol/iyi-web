@@ -5,7 +5,38 @@ module iyi_web/router_test
 import iyi_web/router::{Router, RouteHandler}
 import iyi_web/harness::*
 import iyi_web/context::{Context}
+import iyi_web/config::{Config}
+import iyi_web/failure::{StatusError}
 import iyi_web/spec::*
+
+struct Missing
+  getter what : String
+
+  def initialize(@what : String)
+  end
+end
+
+impl Error for Missing
+  def message : String
+    "no " + what
+  end
+end
+
+class Invalid
+  getter field : String
+
+  def initialize(@field : String)
+  end
+end
+
+impl Error for Invalid
+  def message : String
+    field + " is <invalid>"
+  end
+end
+
+class Blank < Invalid
+end
 
 describe "Router" do
   describe "HTTP verbs" do
@@ -673,6 +704,174 @@ describe "Router" do
         end
       end
       assert dispatch(handler, "GET", "/gone").response.body == ""
+    end
+  end
+
+  describe "error causes and error types" do
+    it "tells a status page what caused it" do
+      handler = routes do |r|
+        r.get "/gone" do |env|
+          env.response.status_code = 410
+          "route body"
+        end
+        r.error 404 do |env, err|
+          err.is_a?(StatusError) ? "status " + err.message : "other"
+        end
+        r.error 410 do |env, err|
+          err.message
+        end
+      end
+      missing = dispatch(handler, "GET", "/nope")
+      assert missing.response.status_code == 404
+      assert missing.response.body == "status 404 Not Found"
+      assert dispatch(handler, "GET", "/gone").response.body == "410 Gone"
+    end
+
+    it "sends an error a route answers to the page for its type, as a 500" do
+      handler = routes do |r|
+        r.get "/users/:id" do |env|
+          env.params.url["id"] == "1" ? "ada" : Missing.new("user " + env.params.url["id"])
+        end
+        r.error Missing do |env, err|
+          "missing: " + err.what
+        end
+      end
+      assert dispatch(handler, "GET", "/users/1").response.body == "ada"
+      missing = dispatch(handler, "GET", "/users/2")
+      assert missing.response.status_code == 500
+      assert missing.response.body == "missing: user 2"
+    end
+
+    it "keeps the status a page for an error type sets, and skips after filters" do
+      handler = routes do |r|
+        r.post "/signup" do |env|
+          env.response.headers["X-Route"] = "1"
+          Invalid.new("name")
+        end
+        r.after "/signup" do |env|
+          env.response.headers["X-After"] = "1"
+        end
+        r.error Invalid do |env, err|
+          env.response.status_code = 422
+          env.json({"field" => err.field})
+        end
+      end
+      ctx = dispatch(handler, "POST", "/signup")
+      assert ctx.response.status_code == 422
+      assert ctx.response.body == "{\"field\":\"name\"}"
+      assert ctx.response.headers["x-route"]? == "1"
+      assert ctx.response.headers["x-after"]?.nil?
+    end
+
+    it "matches a subclass, and tries pages for types in the order they were registered" do
+      handler = routes do |r|
+        r.get "/blank" do |env|
+          Blank.new("title")
+        end
+        r.error Invalid do |env, err|
+          "invalid " + err.field
+        end
+        r.error Blank do |env, err|
+          "blank " + err.field
+        end
+      end
+      assert dispatch(handler, "GET", "/blank").response.body == "invalid title"
+    end
+
+    it "catches every error type with `error Error`, after the pages registered before it" do
+      handler = routes do |r|
+        r.get "/missing" do |env|
+          Missing.new("thing")
+        end
+        r.get "/invalid" do |env|
+          Invalid.new("name")
+        end
+        r.error Missing do |env, err|
+          "missing"
+        end
+        r.error Error do |env, err|
+          "any: " + err.message
+        end
+      end
+      assert dispatch(handler, "GET", "/missing").response.body == "missing"
+      assert dispatch(handler, "GET", "/invalid").response.body == "any: name is <invalid>"
+    end
+
+    it "gives an error with no page for its type to the 500 page, told the error" do
+      handler = routes do |r|
+        r.get "/x" do |env|
+          Missing.new("thing")
+        end
+        r.error 500 do |env, err|
+          "500: " + err.message
+        end
+      end
+      ctx = dispatch(handler, "GET", "/x")
+      assert ctx.response.status_code == 500
+      assert ctx.response.body == "500: no thing"
+    end
+
+    it "shows an unhandled error's message on the built-in 500 page only under show_exceptions" do
+      router = Router.new
+      router.get "/x" do |env|
+        env.response.content_type = "application/json"
+        env.response.print("{}")
+        Invalid.new("email")
+      end
+      settings = Config.new
+      settings.show_exceptions = true
+      shown = dispatch(RouteHandler.new(router, settings), "GET", "/x")
+      assert shown.response.status_code == 500
+      assert shown.response.content_type == "text/html; charset=utf-8"
+      assert shown.response.body.includes?("<pre>email is &lt;invalid&gt;</pre>")
+      assert shown.response.headers["content-security-policy"] == "default-src 'none'; style-src 'unsafe-inline'"
+
+      settings.show_exceptions = false
+      hidden = dispatch(RouteHandler.new(router, settings), "GET", "/x")
+      assert hidden.response.status_code == 500
+      assert hidden.response.body.includes?("500 Internal Server Error")
+      assert !hidden.response.body.includes?("invalid")
+      assert !hidden.response.body.includes?("{}")
+    end
+
+    it "answers HEAD on a route that answered an error with the page's length and no body" do
+      handler = routes do |r|
+        r.get "/x" do |env|
+          Missing.new("thing")
+        end
+        r.error Missing do |env, err|
+          env.response.status_code = 404
+          "gone"
+        end
+      end
+      ctx = dispatch(handler, "HEAD", "/x")
+      assert ctx.response.status_code == 404
+      assert ctx.response.headers["content-length"] == "4"
+      assert ctx.response.body == ""
+    end
+
+    it "collects pages for error types from a mounted router, the mount's winning" do
+      api = Router.new
+      api.get "/x" do |env|
+        Missing.new("item")
+      end
+      api.error Missing do |env, err|
+        "api " + err.what
+      end
+      root = Router.new
+      root.error Missing do |env, err|
+        "root " + err.what
+      end
+      root.error Invalid do |env, err|
+        "root invalid"
+      end
+      root.get "/y" do |env|
+        Invalid.new("y")
+      end
+      root.mount "/api", api
+      handler = RouteHandler.new(root)
+      assert dispatch(handler, "GET", "/api/x").response.body == "api item"
+      assert dispatch(handler, "GET", "/y").response.body == "root invalid"
     end
   end
 
