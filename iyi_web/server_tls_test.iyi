@@ -1,0 +1,252 @@
+# HTTPS end to end: `bind_tls` under the committed test certificate,
+# fetched by std/tls's client trusting the test root, a WebSocket over
+# `wss://`, a flushed body, a unix socket, a drain, and a client that fails
+# the handshake.
+#
+# The fixture in testdata/: a P-256 root, `ca.crt`, and a P-256 leaf for
+# localhost and 127.0.0.1 it signed, `localhost.crt` with its PKCS #8 key
+# `localhost.key`, both for a hundred years; the root's key was thrown
+# away. std/x509 takes neither a self-signed leaf nor a CA as a server's
+# certificate, hence the two, and Python's strict checking wants the key
+# usages and key identifiers. Made with:
+#
+#   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+#     -keyout ca.key -out ca.crt -days 36500 -subj "/CN=iyi-web test root" \
+#     -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"
+#   openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+#     -keyout localhost.key -out leaf.csr -subj /CN=localhost
+#   printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n' >leaf.ext
+#   openssl x509 -req -in leaf.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+#     -days 36500 -extfile leaf.ext -out localhost.crt
+module iyi_web/server_tls_test
+
+import std/socket::{IyiSocket}
+import std/file::{File}
+import std/time::{Time}
+import std/tls::{TlsClient, TlsConfig, TlsServerConfig}
+import std/x509::{Certificate}
+import iyi_web/router::{Router, RouteHandler}
+import iyi_web/handler::{chain}
+import iyi_web/server::{Server}
+import iyi_web/websocket::{WebSocket, Frame, FrameError}
+import iyi_web/config::*
+import iyi_web/harness::*
+import iyi_web/spec::*
+
+MASK = "\x37\xfa\x21\x3d"
+
+def trusting : TlsConfig
+  tls = TlsConfig.new
+  tls.roots = Certificate.from_pem(File.read(__DIR__ + "/testdata/ca.crt")).or_panic
+  tls.alpn = ["http/1.1"]
+  tls
+end
+
+def secure(port : Int32) : TlsClient
+  socket = IyiSocket.connect("127.0.0.1", port).or_panic
+  socket.read_timeout_ms = 5000
+  TlsClient.over(socket, "localhost", trusting, 5000).or_panic
+end
+
+# What the server sent until its close_notify.
+def read_to_close(client : TlsClient) : String
+  buffer = ""
+  loop do
+    chunk = client.read(16384).or_panic
+    break if chunk.empty?
+    buffer = buffer + chunk
+  end
+  buffer
+end
+
+def fetch(port : Int32, path : String) : String
+  client = secure(port)
+  client.write("GET #{path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").or_panic
+  answer = read_to_close(client)
+  client.close
+  answer
+end
+
+# The next frame the server sent over *client*, *held* being what came
+# before it.
+def next_frame(client : TlsClient, held : String) : Tuple(Frame, String)
+  buffer = held
+  loop do
+    case decoded = WebSocket.decode_frame(buffer, 0, false, 1024 * 1024)
+    in Frame
+      return {decoded, buffer[decoded.size, buffer.bytesize - decoded.size]}
+    in FrameError
+      raise "the server sent a bad frame: " + decoded.reason
+    in Int32
+      chunk = client.read(16384).or_panic
+      raise "the connection ended" if chunk.empty?
+      buffer = buffer + chunk
+    end
+  end
+end
+
+router = Router.new
+router.get "/" do |env|
+  "secure home"
+end
+router.get "/stream" do |env|
+  env.response.print("one")
+  env.response.flush
+  env.response.print("two")
+  ""
+end
+router.ws "/echo" do |socket, env|
+  socket.on_message { |text| socket.send(text) }
+end
+
+cfg = config
+cfg.logging = false
+cfg.serve_static = false
+cfg.websocket_allowed_origins = ["*"]
+
+tls = TlsServerConfig.from_pem(File.read(__DIR__ + "/testdata/localhost.crt"), File.read(__DIR__ + "/testdata/localhost.key")).or_panic
+tls.alpn = ["http/1.1"]
+server = Server.new(chain([RouteHandler.new(router, cfg)]), cfg)
+port = server.bind_tls("127.0.0.1", 0, tls)
+
+group do |g|
+  g.spawn do
+    describe "Server over TLS" do
+      it "answers a route over HTTPS and ends with close_notify" do
+        home = fetch(port, "/")
+        assert status_line(home) == "HTTP/1.1 200 OK"
+        assert http_body(home) == "secure home"
+      end
+
+      it "serves a second request on a keep-alive TLS connection" do
+        client = secure(port)
+        client.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+        first = ""
+        until (size = http_frame_size(first)) && first.bytesize >= size
+          first = first + client.read(16384).or_panic
+        end
+        assert http_body(first) == "secure home"
+        client.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").or_panic
+        second = read_to_close(client)
+        client.close
+        assert status_line(second) == "HTTP/1.1 200 OK"
+      end
+
+      it "streams a flushed body chunked over TLS" do
+        streamed = fetch(port, "/stream")
+        assert http_header(streamed, "Transfer-Encoding") == "chunked"
+        assert http_body(streamed) == "3\r\none\r\n3\r\ntwo\r\n0\r\n\r\n"
+      end
+
+      it "echoes a WebSocket message over wss" do
+        client = secure(port)
+        client.write("GET /echo HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+                     "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").or_panic
+        head = ""
+        until head.includes?("\r\n\r\n")
+          head = head + client.read(16384).or_panic
+        end
+        ending = head.index("\r\n\r\n") || 0
+        assert status_line(head) == "HTTP/1.1 101 Switching Protocols"
+        held = head[ending + 4, head.bytesize - ending - 4]
+
+        client.write(WebSocket.encode_frame(WebSocket::TEXT, "merhaba", true, MASK)).or_panic
+        echoed, held = next_frame(client, held)
+        assert echoed.opcode == WebSocket::TEXT
+        assert echoed.payload == "merhaba"
+
+        client.write(WebSocket.encode_frame(WebSocket::CLOSE, "\x03\xe8", true, MASK)).or_panic
+        closing, held = next_frame(client, held)
+        assert closing.opcode == WebSocket::CLOSE
+        assert closing.payload == "\x03\xe8"
+        assert read_to_close(client) == held
+        client.close
+      end
+
+      it "drops a client that sends plain HTTP to the TLS port and serves the next" do
+        plain = IyiSocket.connect("127.0.0.1", port).or_panic
+        plain.read_timeout_ms = 5000
+        plain.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").or_panic
+        answer = ""
+        loop do
+          chunk = plain.read(4096)
+          break unless chunk.is_a?(String)
+          break if chunk.empty?
+          answer = answer + chunk
+        end
+        plain.close
+        # A TLS alert record at most, never an HTTP answer in the clear.
+        assert !answer.starts_with?("HTTP/")
+        assert answer.bytesize < 16
+
+        assert http_body(fetch(port, "/")) == "secure home"
+      end
+
+      it "serves TLS on a unix socket" do
+        path = File.tempfile("iyi-web", ".sock")
+        File.delete(path)
+        unix = Server.new(chain([RouteHandler.new(router, cfg)]), cfg)
+        unix.bind_unix(path, tls)
+        group do |inner|
+          inner.spawn do
+            unix.listen
+            0
+          end
+          inner.spawn do
+            socket = IyiSocket.connect_unix(path).or_panic
+            socket.read_timeout_ms = 5000
+            client = TlsClient.over(socket, "localhost", trusting, 5000).or_panic
+            client.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").or_panic
+            answer = read_to_close(client)
+            client.close
+            assert http_body(answer) == "secure home"
+            unix.shutdown(0)
+            0
+          end
+        end
+      end
+
+      it "closes an idle TLS connection and one still in its handshake when it drains" do
+        draining = Server.new(chain([RouteHandler.new(router, cfg)]), cfg)
+        drain_port = draining.bind_tls("127.0.0.1", 0, tls)
+        group do |inner|
+          inner.spawn do
+            draining.listen
+            0
+          end
+          inner.spawn do
+            idle = secure(drain_port)
+            idle.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+            first = ""
+            until (size = http_frame_size(first)) && first.bytesize >= size
+              first = first + idle.read(16384).or_panic
+            end
+            silent = IyiSocket.connect("127.0.0.1", drain_port).or_panic
+            silent.read_timeout_ms = 5000
+            sleep(50)
+            started = Time.monotonic
+            # The default 30 s for requests in flight: neither is one.
+            draining.shutdown
+            assert (Time.monotonic - started).total_seconds_i64 < 5_i64
+            # Closed under TLS, with no close_notify: an end either way.
+            ended = idle.read(16384)
+            assert ended.is_a?(String) ? ended.empty? : true
+            gone = silent.read(4096)
+            assert gone.is_a?(String) ? gone.empty? : true
+            idle.close
+            silent.close
+            0
+          end
+        end
+      end
+    end
+
+    server.close
+    0
+  end
+
+  g.spawn do
+    server.listen
+    0
+  end
+end

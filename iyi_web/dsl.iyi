@@ -217,9 +217,9 @@ pub def extra_options(&block : CLIParser -> Nil) : Nil
   HOLDER.extra_options = block
 end
 
-# Reads the command line (`-b HOST`, `-p PORT`, `-h` and any
-# `extra_options`), then serves. A *port* given here wins over `-p`;
-# `args: nil` skips the command line.
+# Reads the command line (`-b HOST`, `-p PORT`, `-s` with `--ssl-key-file`
+# and `--ssl-cert-file`, `-h` and any `extra_options`), then serves. A
+# *port* given here wins over `-p`; `args: nil` skips the command line.
 #
 # Returns once the server has stopped - by `stop`, or by INT or TERM - and
 # the requests in flight then have finished, or `shutdown_timeout` seconds
@@ -283,13 +283,14 @@ private def start(port : Int32 | Nil) : Nil
 
   server = Server.new(handler_chain, cfg, app.error_handlers)
   address = ""
+  tls = cfg.ssl
   if path = cfg.unix_socket
-    server.bind_unix(path)
+    server.bind_unix(path, tls)
     address = "unix://" + path
   else
-    bound = server.bind(cfg.host, cfg.port)
+    bound = tls ? server.bind_tls(cfg.host, cfg.port, tls) : server.bind(cfg.host, cfg.port)
     cfg.port = bound
-    address = "http://" + display_host(cfg.host) + ":" + bound.to_s
+    address = (tls ? "https://" : "http://") + display_host(cfg.host) + ":" + bound.to_s
   end
   HOLDER.server = server
   cfg.running = true
