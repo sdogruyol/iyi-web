@@ -1,0 +1,102 @@
+# Content codings: negotiation by qvalue, which files compress, the body
+# round-trips, and the headers a response with two forms carries.
+module iyi_web/content_coding_test
+
+import std/compress::{Gzip, Zlib}
+import iyi_web/content_coding::{select_content_coding, compressible_file?, encode_body, append_vary, etag_with_coding}
+import iyi_web/headers::{Headers}
+import iyi_web/spec::*
+
+TEXT = "The quick brown fox jumps over the lazy dog. " * 40
+
+describe "select_content_coding" do
+  it "prefers gzip, and x-gzip is gzip" do
+    assert select_content_coding("gzip, deflate") == "gzip"
+    assert select_content_coding("deflate, gzip") == "gzip"
+    assert select_content_coding("X-GZIP") == "gzip"
+    assert select_content_coding("br, gzip;q=0.5") == "gzip"
+  end
+
+  it "follows qvalues" do
+    assert select_content_coding("gzip;q=0.4, deflate;q=0.8") == "deflate"
+    assert select_content_coding("gzip;q=0, deflate") == "deflate"
+    assert select_content_coding("deflate") == "deflate"
+  end
+
+  it "answers nil when nothing is acceptable or identity wins" do
+    assert select_content_coding("gzip;q=0").nil?
+    assert select_content_coding("gzip;q=0, deflate;q=0").nil?
+    assert select_content_coding("identity").nil?
+    assert select_content_coding("").nil?
+    assert select_content_coding("br").nil?
+    assert select_content_coding("identity;q=1, gzip;q=0.5").nil?
+  end
+
+  it "reads * as every coding not named" do
+    assert select_content_coding("*") == "gzip"
+    assert select_content_coding("gzip;q=0, *") == "deflate"
+    assert select_content_coding("*;q=0").nil?
+    assert select_content_coding("identity;q=0, deflate;q=0.1") == "deflate"
+  end
+
+  it "drops malformed qvalues and keeps the lowest of duplicates" do
+    assert select_content_coding("gzip;q=2").nil?
+    assert select_content_coding("gzip;q=abc, deflate;q=0.2") == "deflate"
+    assert select_content_coding("gzip;q=0, gzip").nil?
+    assert select_content_coding("gzip; Q=0.5 ; level=1") == "gzip"
+  end
+
+  it "chooses only among the codings offered" do
+    assert select_content_coding("deflate", ["gzip"]).nil?
+    assert select_content_coding("deflate, gzip;q=0.5", ["gzip"]) == "gzip"
+    assert select_content_coding("identity;q=1, gzip;q=0.5", ["gzip"]).nil?
+  end
+end
+
+describe "compressible_file?" do
+  it "takes compressible types from COMPRESS_MIN_SIZE bytes" do
+    assert compressible_file?("text/html; charset=utf-8", 860_i64)
+    assert !compressible_file?("text/html; charset=utf-8", 859_i64)
+    assert compressible_file?("application/problem+json", 5000000000_i64)
+    assert compressible_file?("image/svg+xml; charset=utf-8", 2000_i64)
+    assert compressible_file?("application/wasm", 2000_i64)
+  end
+
+  it "refuses binary and already-compressed types" do
+    assert !compressible_file?("image/png", 2000_i64)
+    assert !compressible_file?("application/octet-stream", 2000_i64)
+    assert !compressible_file?("application/gzip", 2000_i64)
+    assert !compressible_file?("font/woff2", 2000_i64)
+    assert !compressible_file?("", 2000_i64)
+  end
+end
+
+describe "encode_body" do
+  it "writes gzip and zlib streams that decode back" do
+    assert Gzip.decompress(encode_body(TEXT, "gzip")) == TEXT
+    assert Zlib.decompress(encode_body(TEXT, "deflate")) == TEXT
+    assert encode_body(TEXT, "gzip").bytesize < TEXT.bytesize
+  end
+
+  it "panics on a coding it cannot produce" do
+    assert panics? { encode_body(TEXT, "br") }
+  end
+end
+
+describe "append_vary and etag_with_coding" do
+  it "adds a field once and respects *" do
+    headers = Headers.new
+    append_vary(headers, "Accept-Encoding")
+    append_vary(headers, "accept-encoding")
+    assert headers["Vary"] == "Accept-Encoding"
+    headers["Vary"] = "*"
+    append_vary(headers, "Accept-Encoding")
+    assert headers["Vary"] == "*"
+  end
+
+  it "suffixes quoted tags only" do
+    assert etag_with_coding("W/\"42\"", "gzip") == "W/\"42-gzip\""
+    assert etag_with_coding("\"abc\"", "deflate") == "\"abc-deflate\""
+    assert etag_with_coding("bare", "gzip") == "bare"
+  end
+end

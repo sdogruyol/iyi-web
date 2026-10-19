@@ -1,10 +1,9 @@
-# Compression: negotiation by qvalue, the body round-trips, and every
-# response that must go out as it is does.
+# Compression: the body round-trips, and every response that must go out
+# as it is does. Negotiation is tested in `content_coding_test`.
 module iyi_web/compress_test
 
 import std/compress::{Gzip, Zlib}
-import iyi_web/compress::{CompressHandler, select_content_coding, compressible_type?, encode_body, append_vary, etag_with_coding}
-import iyi_web/headers::{Headers}
+import iyi_web/compress::{CompressHandler}
 import iyi_web/handler::{chain}
 import iyi_web/harness::*
 import iyi_web/spec::*
@@ -53,93 +52,6 @@ def fetch(path : String, accept : String?, method : String = "GET")
   request = http_request(method, path)
   request.headers["Accept-Encoding"] = accept if accept
   dispatch(compress_app, request)
-end
-
-describe "select_content_coding" do
-  it "prefers gzip, and x-gzip is gzip" do
-    assert select_content_coding("gzip, deflate") == "gzip"
-    assert select_content_coding("deflate, gzip") == "gzip"
-    assert select_content_coding("X-GZIP") == "gzip"
-    assert select_content_coding("br, gzip;q=0.5") == "gzip"
-  end
-
-  it "follows qvalues" do
-    assert select_content_coding("gzip;q=0.4, deflate;q=0.8") == "deflate"
-    assert select_content_coding("gzip;q=0, deflate") == "deflate"
-    assert select_content_coding("deflate") == "deflate"
-  end
-
-  it "answers nil when nothing is acceptable or identity wins" do
-    assert select_content_coding("gzip;q=0").nil?
-    assert select_content_coding("gzip;q=0, deflate;q=0").nil?
-    assert select_content_coding("identity").nil?
-    assert select_content_coding("").nil?
-    assert select_content_coding("br").nil?
-    assert select_content_coding("identity;q=1, gzip;q=0.5").nil?
-  end
-
-  it "reads * as every coding not named" do
-    assert select_content_coding("*") == "gzip"
-    assert select_content_coding("gzip;q=0, *") == "deflate"
-    assert select_content_coding("*;q=0").nil?
-    assert select_content_coding("identity;q=0, deflate;q=0.1") == "deflate"
-  end
-
-  it "drops malformed qvalues and keeps the lowest of duplicates" do
-    assert select_content_coding("gzip;q=2").nil?
-    assert select_content_coding("gzip;q=abc, deflate;q=0.2") == "deflate"
-    assert select_content_coding("gzip;q=0, gzip").nil?
-    assert select_content_coding("gzip; Q=0.5 ; level=1") == "gzip"
-  end
-end
-
-describe "compressible_type?" do
-  it "takes text, JSON, JavaScript, XML and SVG" do
-    assert compressible_type?("text/html; charset=utf-8")
-    assert compressible_type?("Text/CSS")
-    assert compressible_type?("application/json")
-    assert compressible_type?("application/problem+json; charset=utf-8")
-    assert compressible_type?("application/atom+xml")
-    assert compressible_type?("image/svg+xml")
-    assert compressible_type?("application/javascript")
-  end
-
-  it "refuses binary and already-compressed types" do
-    assert !compressible_type?("image/png")
-    assert !compressible_type?("application/octet-stream")
-    assert !compressible_type?("application/gzip")
-    assert !compressible_type?("")
-  end
-end
-
-describe "encode_body" do
-  it "writes gzip and zlib streams that decode back" do
-    assert Gzip.decompress(encode_body(TEXT, "gzip")) == TEXT
-    assert Zlib.decompress(encode_body(TEXT, "deflate")) == TEXT
-    assert encode_body(TEXT, "gzip").bytesize < TEXT.bytesize
-  end
-
-  it "panics on a coding it cannot produce" do
-    assert panics? { encode_body(TEXT, "br") }
-  end
-end
-
-describe "append_vary and etag_with_coding" do
-  it "adds a field once and respects *" do
-    headers = Headers.new
-    append_vary(headers, "Accept-Encoding")
-    append_vary(headers, "accept-encoding")
-    assert headers["Vary"] == "Accept-Encoding"
-    headers["Vary"] = "*"
-    append_vary(headers, "Accept-Encoding")
-    assert headers["Vary"] == "*"
-  end
-
-  it "suffixes quoted tags only" do
-    assert etag_with_coding("W/\"42\"", "gzip") == "W/\"42-gzip\""
-    assert etag_with_coding("\"abc\"", "deflate") == "\"abc-deflate\""
-    assert etag_with_coding("bare", "gzip") == "bare"
-  end
 end
 
 describe "CompressHandler" do

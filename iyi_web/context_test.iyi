@@ -3,6 +3,7 @@
 module iyi_web/context_test
 
 import std/file::{File}
+import std/compress::{Gzip, Zlib}
 import std/time::{Time}
 import iyi_web/context::{Context}
 import iyi_web/harness::*
@@ -293,6 +294,103 @@ describe "Context helpers" do
       assert headed.response.body == ""
       assert headed.response.headers["content-length"] == "200000"
       assert headed.response.content_type == "text/plain; charset=utf-8"
+    end
+  end
+
+  it "send_file compresses as Kemal does: gzip on, accepted, compressible, large enough, no range" do
+    File.tempfile("iyi-web-gzip-", ".json") do |path|
+      content = numbered(200000)
+      File.write(path, content)
+
+      accepted = http_request("GET", "/")
+      accepted.headers["Accept-Encoding"] = "gzip, deflate"
+      packed = Context.for(accepted)
+      packed.response.headers["ETag"] = "\"v1\""
+      packed.send_file(path)
+      assert packed.response.status_code == 200
+      assert packed.response.headers["content-encoding"] == "gzip"
+      assert packed.response.headers["vary"] == "Accept-Encoding"
+      assert packed.response.headers["etag"] == "\"v1-gzip\""
+      assert packed.response.content_type == "application/json; charset=utf-8"
+      assert Gzip.decompress(packed.response.body) == content
+
+      zlib = http_request("GET", "/")
+      zlib.headers["Accept-Encoding"] = "deflate"
+      deflated = Context.for(zlib)
+      deflated.send_file(path)
+      assert deflated.response.headers["content-encoding"] == "deflate"
+      assert Zlib.decompress(deflated.response.body) == content
+
+      # Not accepted, off, or a range: the stored bytes, still varying
+      # wherever the coding could have been chosen.
+      plain = Context.for(http_request("GET", "/"))
+      plain.send_file(path)
+      assert !plain.response.headers.has_key?("Content-Encoding")
+      assert plain.response.headers["vary"] == "Accept-Encoding"
+      assert plain.response.body == content
+
+      off = Context.for(accepted)
+      off.static_gzip = false
+      off.send_file(path)
+      assert !off.response.headers.has_key?("Content-Encoding")
+      assert !off.response.headers.has_key?("Vary")
+      assert off.response.body == content
+
+      ranged = http_request("GET", "/")
+      ranged.headers["Accept-Encoding"] = "gzip"
+      ranged.headers["Range"] = "bytes=100-199"
+      part = Context.for(ranged)
+      part.send_file(path)
+      assert part.response.status_code == 206
+      assert !part.response.headers.has_key?("Content-Encoding")
+      assert part.response.headers["vary"] == "Accept-Encoding"
+      assert part.response.body == content[100, 100]
+
+      # The caller's own encoding is left alone.
+      encoded = Context.for(accepted)
+      encoded.response.headers["Content-Encoding"] = "br"
+      encoded.send_file(path)
+      assert encoded.response.headers["content-encoding"] == "br"
+      assert encoded.response.body == content
+    end
+  end
+
+  it "send_file leaves small and binary files uncompressed" do
+    File.tempfile("iyi-web-gzip-", ".txt") do |small|
+      File.write(small, numbered(859))
+      accepted = http_request("GET", "/")
+      accepted.headers["Accept-Encoding"] = "gzip"
+      ctx = Context.for(accepted)
+      ctx.send_file(small)
+      assert !ctx.response.headers.has_key?("Content-Encoding")
+      assert !ctx.response.headers.has_key?("Vary")
+
+      File.write(small, numbered(860))
+      edge = Context.for(accepted)
+      edge.send_file(small)
+      assert edge.response.headers["content-encoding"] == "gzip"
+
+      image = Context.for(accepted)
+      image.send_file(small, "image/png")
+      assert !image.response.headers.has_key?("Content-Encoding")
+      assert image.response.body == numbered(860)
+    end
+  end
+
+  it "send_file answers a HEAD it would compress with the head a GET gets" do
+    File.tempfile("iyi-web-gzip-", ".txt") do |path|
+      File.write(path, numbered(5000))
+      request = http_request("HEAD", "/")
+      request.headers["Accept-Encoding"] = "gzip"
+      small = Context.for(request)
+      small.send_file(path)
+      assert small.response.headers["content-encoding"] == "gzip"
+      assert small.response.body == ""
+      get = http_request("GET", "/")
+      get.headers["Accept-Encoding"] = "gzip"
+      full = Context.for(get)
+      full.send_file(path)
+      assert small.response.headers["content-length"] == full.response.body.bytesize.to_s
     end
   end
 
