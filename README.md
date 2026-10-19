@@ -60,7 +60,7 @@ This fetches the latest release, records it in `iyi.sum` and writes one line to
 `iyi.mod`:
 
 ```
-require github.com/sdogruyol/iyi-web v0.2.0
+require github.com/sdogruyol/iyi-web v0.3.0
 ```
 
 Files then name iyi-web's modules by their full path. One `import` line loads
@@ -83,7 +83,7 @@ iyi get github.com/sdogruyol/iyi-web --as web
 or add ` as web` to the `require` line by hand:
 
 ```
-require github.com/sdogruyol/iyi-web v0.2.0 as web
+require github.com/sdogruyol/iyi-web v0.3.0 as web
 ```
 
 `web/iyi_web/...` then means `github.com/sdogruyol/iyi-web/iyi_web/...`:
@@ -96,7 +96,7 @@ import web/iyi_web/router::{Router}
 ### Versions
 
 `iyi get -u` moves to the latest release and
-`iyi get github.com/sdogruyol/iyi-web@v0.2.0` to a given one; both keep the
+`iyi get github.com/sdogruyol/iyi-web@v0.3.0` to a given one; both keep the
 short name. `iyi get -u --check` says whether a newer release exists without
 changing anything.
 

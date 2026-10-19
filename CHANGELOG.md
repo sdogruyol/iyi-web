@@ -6,13 +6,14 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-19
+
 Requires iyi 0.18.0 or later, for its TLS server, streaming compressor and
-media-type table. 35 exports are gone (`iyi mod release`), so the next
-release is 0.3.0: `error` pages and routes take new block types,
-`Response#upgrade` and `WebSocket.new` take `IyiSocket | TlsStream`,
-`Server.new` takes pages with their cause, `iyi_web/mime` is gone and the
-`Accept-Encoding` helpers moved from `iyi_web/compress` to
-`iyi_web/content_coding`.
+media-type table. 35 exports are gone (`iyi mod release`): `error` pages
+and routes take new block types, `Response#upgrade` and `WebSocket.new`
+take `IyiSocket | TlsStream`, `Server.new` takes pages with their cause,
+`iyi_web/mime` is gone and the `Accept-Encoding` helpers moved from
+`iyi_web/compress` to `iyi_web/content_coding`.
 
 ### Added
 
@@ -276,7 +277,8 @@ The first release. Requires iyi 0.14.1 or later.
   `Content-Length` is read, before the body is buffered.
 - Static file paths with a `..` segment or a NUL byte are refused.
 
-[Unreleased]: https://github.com/sdogruyol/iyi-web/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/sdogruyol/iyi-web/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/sdogruyol/iyi-web/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/sdogruyol/iyi-web/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/sdogruyol/iyi-web/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/sdogruyol/iyi-web/releases/tag/v0.1.0
