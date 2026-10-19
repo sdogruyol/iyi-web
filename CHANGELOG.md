@@ -6,8 +6,61 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
-Builds and passes its tests on iyi 0.18.0 as on 0.15.0, the oldest it
-supports; the exported surface is unchanged (`iyi mod release`).
+Requires iyi 0.18.0 or later, for its TLS server, streaming compressor and
+media-type table. 35 exports are gone (`iyi mod release`), so the next
+release is 0.3.0: `error` pages and routes take new block types,
+`Response#upgrade` and `WebSocket.new` take `IyiSocket | TlsStream`,
+`Server.new` takes pages with their cause, `iyi_web/mime` is gone and the
+`Accept-Encoding` helpers moved from `iyi_web/compress` to
+`iyi_web/content_coding`.
+
+### Added
+
+- HTTPS, Kemal's `config.ssl`: `config.ssl = TlsServerConfig`, or `-s` with
+  `--ssl-key-file FILE` and `--ssl-cert-file FILE`, serves every connection
+  over `std/tls` (TLS 1.3; Ed25519, P-256 or RSA keys in PKCS #8), and
+  `Server#bind_tls(host, port, tls)` does it without the DSL. A missing key
+  or certificate flag stops the program with Kemal's sentence, an unreadable
+  or refused file with the reason. Each handshake runs in its connection's
+  fiber within `read_timeout`; a failed one closes that connection only.
+  Streaming, SSE, WebSockets (`wss://`) and unix sockets work over TLS, and
+  the startup line reads `https://`.
+- `error 404 do |env, err|`: a page may take what caused it, a value of the
+  prelude's `Error`: the `Panicked` of a route's panic, the error a route
+  returned, or a `StatusError` with the status (new `iyi_web/failure`).
+- Error pages per error type, iyi's `error MyException`: a route may return
+  an error beside its body (`String | Gone`), and `error Gone do |env, err|`
+  answers it, as a `500` unless it sets another status. Pages are tried in
+  registration order, take subclasses, and `error Error` takes every error;
+  a panic is offered to them as a `Panicked` before `error 500`.
+- `env.set(name, value)` for a value of any type, read back by type with
+  `env.get(name, User)` and `env.get?(name, User)`: Kemal's
+  `add_context_storage_type`, without the registration.
+- Static files: a `<file>.gz` beside a file, no older than it, is sent as it
+  is to a client that accepts gzip, with the original's content type.
+- `send_file` compresses with gzip or deflate under Kemal's conditions: the
+  static `gzip` option on, a compressible type of 860 bytes or more, no
+  `Range`.
+
+### Changed
+
+- Static files and `send_file` compress as they read from disk, 64 KiB at a
+  time with `std/compress`'s `Deflater`, whatever their size; static files
+  were compressed up to 1 MiB, whole in memory. A compressed body gets a weak
+  `ETag` naming its coding, and a `Range` request the uncompressed file.
+- Content types come from `std/mime`: `.wasm`, `.mjs`, `.csv`, `.md`,
+  `.avif`, `.mp4` and more are named, `.svg` and `.xml` carry
+  `charset=utf-8`, and `.ico` is `image/vnd.microsoft.icon`.
+- An object stored in the context is kept out of the untyped `env.get(name)`,
+  which panics naming the typed read, and `env.get?(name)`, which answers nil.
+- `Content-Length` is read with `std/http`'s `HTTP.content_length`; the copy
+  kept for iyi 0.15.0 is gone.
+
+### Removed
+
+- `COMPRESS_MAX_SIZE`, `compressible_type?` (`MIME.compressible?` takes its
+  place), `iyi_web/mime`'s `mime_type_of` and `codec`'s `extension_of`.
+- The refusal of `-s` and `--ssl-*` as unsupported.
 
 ### Fixed
 

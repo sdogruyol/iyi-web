@@ -14,7 +14,7 @@ end
 run
 ```
 
-iyi-web serves HTTP/1.1 from native iyi programs. Routes are blocks,
+iyi-web serves HTTP/1.1 and HTTPS from native iyi programs. Routes are blocks,
 middleware is a class, and settings live in a single `config` value. The type
 a route returns is checked when the program compiles.
 
@@ -25,27 +25,28 @@ a route returns is checked when the program compiles.
 - URL, query-string, form, JSON and `multipart/form-data` parameters, with
   file uploads
 - Before and after filters for every route, a path pattern or a single method
-- Error pages per status code, automatic `404` and `405` responses, and a
-  `500` page for a route that panics
+- Error pages per status code and per error type, automatic `404` and `405`
+  responses, and a `500` page for a route that panics
 - Composable routers with `mount` and `namespace`
 - Middleware for every request or for a path prefix
 - Streaming responses and server-sent events
 - WebSockets, with an `Origin` check and sends from any fiber
-- Static files with `ETag`, `304 Not Modified`, gzip and byte ranges, streamed
-  from disk
+- Static files with `ETag`, `304 Not Modified`, byte ranges, gzip at any size
+  and precompressed `.gz` copies, streamed from disk
 - File downloads, cookies, redirects and early responses with `halt`
 - Response compression, CORS and HTML form method override
 - Templates with layouts, compiled into the program
-- Command-line flags for host and port
+- Command-line flags for host, port and TLS
+- HTTPS and `wss://` with iyi's own TLS 1.3
 - Persistent connections, each served by its own fiber
 - Graceful shutdown on `INT` and `TERM`, and timeouts for slow and idle clients
 - IPv4, IPv6 and unix-socket listeners
 
 ## Requirements
 
-[iyi](https://iyi-lang.com) 0.15.0 or later: `iyi get`, the `as` short name on
-an `iyi.mod` requirement, and `import X::{...}` - one line for a module and the
-names it brings into scope - arrived in 0.15.0.
+[iyi](https://iyi-lang.com) 0.18.0 or later: TLS (`std/tls`'s server), the
+streaming compressor (`std/compress`'s `Deflater`) and the media-type table
+(`std/mime`) arrived in 0.18.0.
 
 ## Installation
 
@@ -169,7 +170,9 @@ for other methods gets `405 Method Not Allowed` with an `Allow` header. Every
 
 The value a route returns is the response body. A route may return any type
 that implements `IntoBody`; `String`, `Nil` (an empty body), `Int32`, `Int64`
-and `Bool` do. The check happens at compile time, on the route. Implement
+and `Bool` do. The check happens at compile time. A route may also return an
+error value beside its body, such as `String | NotFound`; the error goes to the
+`error` page for its type (see [Error pages](#error-pages)). Implement
 `IntoBody` to return your own types:
 
 ```iyi
@@ -398,7 +401,8 @@ get "/download/note" do |env|
 end
 ```
 
-The content type follows the file extension unless `mime_type:` is given.
+The content type follows the file extension (`std/mime`'s table) unless
+`mime_type:` is given.
 `filename:` marks the response as a download; `disposition: "inline"` shows
 it instead. Non-ASCII names are encoded for every browser. A `Range` request
 gets `206 Partial Content` or `416`. A missing file responds with `404`.
@@ -410,6 +414,13 @@ gets `206 Partial Content` or `416`. A missing file responds with `404`.
 headers set after `send_file` are not sent for it. A `HEAD` request is
 answered from the file's size without reading it. A file cut short while it
 is being sent ends the connection, so the client sees the body as incomplete.
+
+With static files' `gzip` option on (`serve_static({"gzip" => true})`), a
+textual file of 860 bytes or more goes out gzip- or deflate-compressed to a
+client that accepts it, as Kemal does: compressed 64 KiB at a time as it is
+read, sent chunked and without a `Content-Length`, with
+`Vary: Accept-Encoding`. A `Range` request gets the file uncompressed, and an
+`ETag` set before the call gets the coding as a suffix.
 
 ### Streaming
 
@@ -511,7 +522,8 @@ timeout.
 means same-origin: the `Origin` has to name the request's `Host`. A request
 without `Origin`, which most clients outside a browser send, is refused unless
 the list holds `"*"`. A browser connects with
-`new WebSocket("ws://localhost:3000/chat/ada")`.
+`new WebSocket("ws://localhost:3000/chat/ada")`, or `wss://` when the server
+runs with TLS.
 
 ## Filters
 
@@ -545,16 +557,22 @@ end
   `IntoBody`.
 
 Filters, middleware and routes pass values along a request with `env.set`,
-`env.get` and `env.get?`, which hold a `String`, `Int32`, `Int64`, `Float64`,
-`Bool` or `nil`. `env["key"]` reads and writes strings only:
+`env.get` and `env.get?`. A `String`, `Int32`, `Int64`, `Float64`, `Bool` or
+`nil` reads back with `env.get(name)`. A value of any other type, such as
+your own class, reads back by its type: `env.get(name, User)` panics when
+nothing or something else is stored there, and `env.get?(name, User)`
+answers nil instead. Kemal needs `add_context_storage_type(User)` and
+`env.get(name).as(User)` for the same; iyi-web needs no registration.
+`env["key"]` reads and writes strings only:
 
 ```iyi
 before_all "/account/*" do |env|
   env.set("user_id", 42)
+  env.set("user", User.new("ada"))
 end
 
 get "/account/orders" do |env|
-  "Orders for user " + env.get("user_id").to_s
+  "Orders for " + env.get("user", User).name + ", user " + env.get("user_id").to_s
 end
 ```
 
@@ -569,8 +587,8 @@ error 422 do |env|
   "<h1>Please check the form and try again</h1>"
 end
 
-error 500 do |env|
-  "<h1>Something went wrong</h1>"
+error 500 do |env, err|
+  "<h1>Something went wrong</h1><!-- " + err.message + " -->"
 end
 
 post "/signup" do |env|
@@ -584,11 +602,59 @@ An error page replaces the body of `404` and `405` responses from the router,
 and of any response a route finishes with a status of `400` or above. The
 status code is kept. Responses ended with `halt` are sent unchanged.
 
+A page may take a second argument, `err`, what caused it, as Kemal's
+`error 404 do |env, ex|` does. iyi has no exceptions; `err` is a value of the
+prelude's `Error` trait: the `Panicked` a route's panic was caught as, the
+error a route returned, or a `StatusError` (`web/iyi_web/failure`) with the
+status and a message such as `404 Not Found`.
+
+### Errors by type
+
+Where Kemal has `error MyException do |env, ex|`, iyi-web has a page per error
+type. A route returns the error as part of its value, and the page for its
+type answers it:
+
+```iyi
+struct Gone
+  getter what : String
+
+  def initialize(@what : String)
+  end
+end
+
+impl Error for Gone
+  def message : String
+    what + " is gone"
+  end
+end
+
+get "/posts/:id" do |env|
+  id = env.params.url["id"]
+  id == "1" ? "First post" : Gone.new("post " + id)
+end
+
+error Gone do |env, err|
+  env.response.status_code = 410
+  "<h1>" + err.message + "</h1>"
+end
+```
+
+- `err` has the page's type. Pages are tried in the order they were
+  registered, and a page for a type also takes its subclasses; `error Error`
+  takes every error.
+- The response is a `500` unless the page sets another status. The route's
+  headers are kept, its body is dropped, and after filters do not run.
+- An error no page takes goes to the `error 500` page with it as `err`, then
+  to the built-in page.
+- A panic is offered to the type pages too, as a `Panicked`: `error Panicked`
+  or `error Error` catches it before `error 500` does.
+
 A route that panics gets `500 Internal Server Error` and its connection is
 closed; other connections are not affected, and the panic is logged. The
-`error 500` page is used when there is one. Otherwise the built-in page shows
-the panic message in development and hides it in every other environment;
-`config.show_exceptions = true` or `false` overrides that.
+first page that takes it is used. Otherwise the built-in page shows the panic
+message in development and hides it in every other environment;
+`config.show_exceptions = true` or `false` overrides that. An error a route
+returned that no page takes is shown the same way.
 
 ## Routers
 
@@ -708,9 +774,15 @@ routing, so a file takes precedence over a route with the same path:
 - The content type follows the extension. `ETag` and `Last-Modified` are
   sent, and a matching `If-None-Match` or `If-Modified-Since` gets
   `304 Not Modified`.
-- A textual file of 860 bytes to 1 MiB is sent gzip- or deflate-compressed to
-  a client that accepts it. Any other file is read from disk as it is sent,
-  like `send_file`, and a `Range` request gets `206` or `416`.
+- With the `gzip` option, a textual file of 860 bytes or more is sent gzip- or
+  deflate-compressed to a client that accepts it, compressed as it is read
+  from disk whatever its size. A compressed body gets a weak `ETag` naming its
+  coding. A `Range` request gets `206` or `416` from the uncompressed file.
+- A `<file>.gz` next to a file, no older than it, is sent as it is, with
+  `Content-Encoding: gzip` and the original's content type, to a client that
+  accepts gzip, whether or not the `gzip` option is on. A `Range` request is
+  always served from the original.
+- Content types come from `std/mime`'s table.
 - A directory serves its `index.html`, after redirecting to the path with a
   trailing slash. Paths containing `..` are never served.
 
@@ -800,6 +872,7 @@ config.max_request_body_size = 1024 * 1024
 | `write_timeout` | `60` | |
 | `idle_timeout` | `75` | |
 | `unix_socket` | `nil` | |
+| `ssl` | `nil` (plain HTTP) | `-s --ssl-key-file FILE --ssl-cert-file FILE` |
 | `websocket_allowed_origins` | `[] of String` (same-origin) | |
 | `websocket_max_message_size` | `8 * 1024 * 1024` | |
 | `app_name` | `"iyi-web"` | |
@@ -823,6 +896,8 @@ config.max_request_body_size = 1024 * 1024
 - `unix_socket` is a path to listen at instead of `host` and `port`, for a
   proxy on the same machine: `config.unix_socket = "/run/app.sock"`. The file
   must not exist yet; it is removed when the server stops.
+- `ssl` is a `TlsServerConfig` from `std/tls`; set, every connection is TLS
+  1.3 and the startup line reads `https://`. See [HTTPS](#https).
 - Timeouts are in seconds, and `nil` or `0` turns one off. A client has
   `read_timeout` to send a whole request, headers and body, counted from its
   first byte (from the connection, for its first request); a request cut
@@ -875,7 +950,9 @@ logger JSONLogger.new
 `run 8080` still wins over `-p`. The host may be an IPv6 address, bare or
 bracketed (`-b ::1`, `-b '[::1]'`); `::` takes IPv6 connections only. An
 unknown flag or an invalid port stops the program with the reason and the
-list of flags. `extra_options` adds your own:
+list of flags. `-s` (`--ssl`) serves HTTPS with the PEM files `--ssl-key-file`
+and `--ssl-cert-file` name; a missing or unreadable file, or a key TLS
+refuses, stops the program with the reason. `extra_options` adds your own:
 
 ```iyi
 extra_options do |parser|
@@ -897,6 +974,32 @@ once. A server-sent-events stream is in flight for as long as it is open.
 With `shutdown_message` on, the stop prints
 `[production] storefront is going to take a rest!`. Code after `run` runs.
 
+### HTTPS
+
+```sh
+./app -s --ssl-cert-file chain.pem --ssl-key-file key.pem
+```
+
+or in code, as Kemal's `config.ssl`:
+
+```iyi
+import std/file::{File}
+import std/tls::{TlsServerConfig}
+
+tls = TlsServerConfig.from_pem(File.read("chain.pem"), File.read("key.pem")).or_panic
+tls.alpn = ["http/1.1"]
+config.ssl = tls
+```
+
+TLS is `std/tls`, iyi's own, TLS 1.3 only. The certificate chain comes leaf
+first; the key is PKCS #8, Ed25519, P-256 or RSA of 2048 bits or more. Each
+connection's handshake runs in its own fiber within `read_timeout`, and one
+that fails closes that connection only. Streaming, server-sent events,
+WebSockets (`wss://`) and the unix socket listener work over TLS.
+`Server#bind_tls(host, port, tls)` does the same without the DSL. `std/tls`
+has not been audited yet; until it is, a reverse proxy remains the
+conservative choice in front of a public site.
+
 ## Deployment
 
 ```sh
@@ -904,13 +1007,13 @@ iyi build --release app.iyi -o app
 IYI_WEB_ENV=production ./app -p 8080
 ```
 
-- iyi-web speaks plain HTTP/1.1. Terminate TLS at a reverse proxy such as
-  nginx, Caddy or HAProxy; it can reach the server over a unix socket
-  (`unix_socket`). Keep `idle_timeout` above the proxy's own keep-alive
-  timeout, so that the proxy is the one to close an idle connection.
+- iyi-web serves HTTP/1.1, and HTTPS itself with `-s` (see [HTTPS](#https)).
+  Behind a reverse proxy such as nginx, Caddy or HAProxy, the proxy can reach
+  the server over a unix socket (`unix_socket`). Keep `idle_timeout` above the
+  proxy's own keep-alive timeout, so that the proxy is the one to close an
+  idle connection.
 - A client that disconnects while its response is being written ends that
-  request only; iyi's socket layer reports it as a panic line on standard
-  error.
+  request only; iyi's runtime reports it as a panic line on standard error.
 
 ## Testing
 
@@ -966,9 +1069,11 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/event_stream` | `EventStream` |
 | `web/iyi_web/websocket` | `WebSocket`, `Frame`, `FrameError` |
 | `web/iyi_web/templates` | `render`, `content_for`, `yield_content` |
-| `web/iyi_web/compress` | `CompressHandler` and the `Accept-Encoding` helpers |
+| `web/iyi_web/compress` | `CompressHandler` |
+| `web/iyi_web/content_coding` | `Accept-Encoding` negotiation, `Vary` and `ETag` helpers, `COMPRESS_MIN_SIZE` |
+| `web/iyi_web/failure` | `StatusError`, the built-in error page |
 | `web/iyi_web/range` | `Range` header parsing and `206` responses |
-| `web/iyi_web/file_body` | `respond_file`, `FILE_CHUNK_SIZE`: a file sent from disk, whole or by range |
+| `web/iyi_web/file_body` | `respond_file`, `respond_file_encoded`, `FILE_CHUNK_SIZE`: a file sent from disk, whole, by range or compressed |
 | `web/iyi_web/cors` | `CORSHandler` |
 | `web/iyi_web/override` | `OverrideMethodHandler` |
 | `web/iyi_web/static` | `StaticHandler` |
@@ -997,7 +1102,7 @@ iyi run examples/json_api.iyi -- -p 8080
 | `middleware.iyi` | A custom `Handler` with `only` and `exclude`, CORS, gzip and static files from `examples/public/` |
 | `streaming_and_sse.iyi` | `flush`, chunked responses and server-sent events |
 | `websocket_chat.iyi` | A chat room over `ws`, broadcasting to every member |
-| `cookies_and_context.iyi` | Cookies, redirects and `env.set` / `env.get` |
+| `cookies_and_context.iyi` | Cookies, redirects and `env.set` / `env.get`, with a value of the application's own type |
 | `testing.iyi` | Routes in their own module, tested in-process by `testing_test.iyi` |
 
 Each file's opening comment lists `curl` commands to try. `iyi test examples`

@@ -110,20 +110,20 @@ Not in Kemal's core, but seen in its examples:
 
 ## 5. Status
 
-iyi-web `master`, on iyi 0.15.0 (the oldest it supports) and 0.18.0 (the
-latest release). `iyi test iyi_web` passes in all 31 test files and
-`iyi test examples` in its one, on both. Every example was built, run and
-exercised with curl; WebSockets with Node's client.
+iyi-web `master`, on iyi 0.18.0, the oldest it supports. `iyi test iyi_web`
+passes in all 33 test files and `iyi test examples` in its one. Every example
+was built, run and exercised with curl; WebSockets with Node's client, and
+over TLS with Python's.
 
 iyi 0.14.1 lifted most of what section 4 listed as needed in iyi first:
 `std/signal`, read and write timeouts, `SocketError` values instead of
 panics, one reader and one writer per descriptor, IPv6, unix sockets and
 `IO#seek`.
 
-iyi 0.18.0 lifted two more: std/tls has a server (`TlsServer`,
-`TlsServerConfig`) and std/compress compresses a stream a piece at a time
-(`Deflater`). iyi-web uses neither yet, as either raises its minimum from
-iyi 0.15.0 to 0.18.0; see Remaining.
+iyi 0.18.0 lifted TLS: std/tls has a server (`TlsServer`,
+`TlsServerConfig`), which iyi-web serves HTTPS and `wss://` over. Its
+streaming compressor (`Deflater`) and media-type table (`std/mime`) closed
+the last static-file gaps.
 
 ### Fixed defects
 
@@ -172,25 +172,26 @@ Found later and fixed:
 
 | Area | Done |
 |---|---|
-| Error pages | `error 500`, `show_exceptions`, 413. An error status set by a before filter also gets its error page; a page may be written with `env.json` and the other helpers |
+| Error pages | `error 500`, `show_exceptions`, 413. An error status set by a before filter also gets its error page; a page may be written with `env.json` and the other helpers. `error 404 do \|env, err\|` with the cause (`Panicked`, a returned error, or a `StatusError`). Kemal's `error MyException` is `error MyError do \|env, err\|` for an `Error` type a route returns; a panic reaches `error Panicked` / `error Error` |
 | JSON parameters | `env.params.json`, `_json`, 400 for malformed JSON |
 | File uploads | `params.files`, `all_files`, `FileUpload`, both limits and 413. Each file is written into a directory of its own, with an unguessable name and mode 0700, and deleted after the response |
 | Parameter details | `raw_body`, `query_all` / `body_all` (Kemal's `fetch_all`). JSON and multipart bodies are parsed on first use |
 | Incremental responses | `flush`, `headers_sent?`, a chunked body on HTTP/1.1. A panic discards the unsent body |
 | SSE | `sse`, `Router#sse`, `EventStream` (`send`, `comment`, `close`); a HEAD short-circuit; line breaks rejected in `event`/`id` |
 | WebSocket | `ws`, `Router#ws`; handshake with 101, 400, 403 (`websocket_allowed_origins`), 405 and 426; `on_message`, `on_binary`, `on_ping`, `on_pong`, `on_close`, `send`, `send_binary`, `ping`, `pong`, `close`; sends from any fiber |
-| Static files | gzip and deflate (`Vary`, up to 1 MiB), 304 via ETag/Last-Modified, Range (206, 416, `multipart/byteranges`), `dir_index`, `dir_listing`, a trailing-`/` redirect for directories, `static_headers`, `nosniff`, `Accept-Ranges`; files streamed from disk, HEAD without reading them |
-| `send_file` | Range, `disposition:`, filename encoding, streamed from disk, HEAD without reading the file; `send_data` for bytes in memory |
+| Static files | gzip and deflate (`Vary`) at any size, compressed as the file is read; precompressed `.gz` files; 304 via ETag/Last-Modified, Range (206, 416, `multipart/byteranges`), `dir_index`, `dir_listing`, a trailing-`/` redirect for directories, `static_headers`, `nosniff`, `Accept-Ranges`; files streamed from disk, HEAD without reading them; types from `std/mime` |
+| `send_file` | Range, gzip under Kemal's conditions, `disposition:`, filename encoding, streamed from disk, HEAD without reading the file; `send_data` for bytes in memory |
 | Templates | `render` (with a layout), `content_for`, `yield_content`; nested `render` works |
-| Context | `set`/`get`/`get?`, `route_pattern`, `route_found?` |
+| Context | `set`/`get`/`get?`, `route_pattern`, `route_found?`. A value of any type is stored and read back by type, `env.get("user", User)`, in place of `add_context_storage_type` and `.as(User)` |
 | Helpers | Everything in the row; `status` takes the code as an `Int32` rather than an `HTTP::Status` |
 | Middleware | `only`/`exclude`, `use(handler, position)`, `use(path, [handlers])`, `CompressHandler` |
 | Filters | Everything in the row |
 | Cookies | `domain`, `expires`, `delete_cookie`; values are encoded and decoded |
 | Logging | `Logger` / `StdoutLogger`, `logger`, `log "message"`, `logging false` |
 | Shutdown | INT and TERM drain: the listener closes, idle connections close, requests in flight finish within `shutdown_timeout` (30 s); a second signal cuts off at once; `shutdown_message` |
-| Command line | `-b` (IPv4 or IPv6), `-p`, `-h`, `extra_options`. `-s` and `--ssl-*` stop the program with a message that TLS is not supported |
-| Listening options | IPv6 and `unix_socket`; `read_timeout`, `write_timeout` and `idle_timeout` (not in Kemal) |
+| Command line | `-b` (IPv4 or IPv6), `-p`, `-s`, `--ssl-key-file`, `--ssl-cert-file`, `-h`, `extra_options` |
+| TLS | `config.ssl` (a `TlsServerConfig`), `bind_tls`, `wss://`; TLS 1.3 over iyi's own std/tls |
+| Listening options | IPv6 and `unix_socket` (with TLS too); `read_timeout`, `write_timeout` and `idle_timeout` (not in Kemal) |
 | Installation | `iyi get github.com/sdogruyol/iyi-web` writes `require github.com/sdogruyol/iyi-web v0.2.0` to `iyi.mod`, and files write `import github.com/sdogruyol/iyi-web/iyi_web/dsl::*`; with `--as web` the line ends `as web` and files write `import web/iyi_web/dsl::*` (iyi 0.15.0 and later) |
 | Examples | Ten, from `hello` to a JSON API, uploads, templates, routers, middleware, SSE, a WebSocket chat room, cookies and in-process testing |
 
@@ -198,14 +199,10 @@ Found later and fixed:
 
 Possible within iyi-web:
 
-- The `error 404 do |env, ex|` form and `error` per exception class. The panic
-  text can be read with `Panicked#text`; exception classes have no direct
-  equivalent in iyi.
+- `error HTTP::Status`: `std/http` has no status enum; `error` takes the
+  code as an `Int32`.
 - Headers set after a streamed file response has started (an after filter,
   `CompressHandler`) are not sent; Kemal behaves the same.
-- Static files: precompressed `.gz` files, the system MIME table.
-- `add_context_storage_type`. The types that can be stored are fixed
-  (`StoreValue`).
 - WebSocket subprotocols and `permessage-deflate` (Kemal has neither).
   WebSocket sessions are not closed with `1001` when the server drains; they
   are cut off at `shutdown_timeout`.
@@ -214,14 +211,9 @@ Possible within iyi-web:
   are copied into a string for `std/http`'s parser, which copies the body out
   again.
 
-Possible within iyi-web on iyi 0.18.0, which would become its minimum:
-
-- TLS: `-s`, `--ssl-key-file`, `--ssl-cert-file`, `bind_tls` and `wss://`,
-  over std/tls's `TlsServer`. The server, `Response#upgrade` and
-  `WebSocket` hold an `IyiSocket` today and would take the TLS stream.
-- `send_file` with gzip, and static files over 1 MiB, which are sent
-  uncompressed: iyi 0.15.0's `std/compress` encodes a whole string at once,
-  0.18.0's `Deflater` a piece at a time.
+Differences that come from iyi's TLS: std/tls's server speaks TLS 1.3 only,
+with Ed25519, P-256 or RSA certificates and PKCS #8 keys, where Kemal takes
+whatever OpenSSL does; and std/tls has not been audited yet.
 
 Needing changes in iyi first:
 
@@ -230,9 +222,9 @@ Needing changes in iyi first:
 | SO_REUSEPORT in std/socket (not in 0.18.0) | `reuse_port` |
 | A caught panic that the runtime does not print (0.18.0 still prints it) | No `iyi: panic:` line on stderr when a client disconnects mid-response, or a write times out |
 
-Problems found in iyi and worked around in iyi-web. The first four are fixed
-in iyi 0.14.1 or 0.15.0, and the three marked so after 0.15.0; the
-workarounds stay while iyi-web supports 0.15.0:
+Problems found in iyi and worked around in iyi-web. The first four were fixed
+in iyi 0.14.1 or 0.15.0, and the three marked so by 0.18.0, the oldest iyi
+iyi-web supports:
 
 - `File.tempfile` derived a predictable name and wrote through a symlink
   planted there (fixed in 0.14.1). iyi-web still spools each upload into a

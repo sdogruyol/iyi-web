@@ -12,9 +12,17 @@ import std/base64::{Base64}
 import std/file::{File}
 import iyi_web/dsl::*
 
-# Session token => user name. The cookie carries only an unguessable
-# token, read from the operating system's random source.
-SESSIONS = {} of String => String
+# The signed-in user, as the application keeps it.
+class User
+  getter name : String
+
+  def initialize(@name : String)
+  end
+end
+
+# Session token => user. The cookie carries only an unguessable token, read
+# from the operating system's random source.
+SESSIONS = {} of String => User
 
 def new_token : String
   random = File.open("/dev/urandom")
@@ -24,11 +32,14 @@ def new_token : String
 end
 
 # Filters, handlers and routes share values through `env.set` and
-# `env.get?`; a value keeps its type (String, Int32, Int64, Float64, Bool or
-# nil). Cookies arrive decoded.
+# `env.get`. A String, Int32, Int64, Float64, Bool or nil reads back with
+# `env.get(name)`; a value of the application's own type, such as `User`,
+# by its type with `env.get?(name, User)`. Cookies arrive decoded.
 before_all do |env|
   if token = env.cookies["session"]?
-    env.set("user", SESSIONS[token]?)
+    if user = SESSIONS[token]?
+      env.set("user", user)
+    end
   end
   visits = (env.cookies["visits"]? || "0").to_i? || 0
   env.set("visits", visits + 1)
@@ -49,7 +60,7 @@ post "/sign-in" do |env|
     env.halt(422, "A name is required")
   else
     token = new_token
-    SESSIONS[token] = name
+    SESSIONS[token] = User.new(name)
     # `http_only` keeps scripts from reading it; add `secure: true` behind HTTPS.
     env.set_cookie("session", token, http_only: true, same_site: "Lax", max_age: 86400)
     env.redirect("/account", 303)
@@ -57,9 +68,8 @@ post "/sign-in" do |env|
 end
 
 get "/account" do |env|
-  user = env.get?("user")
-  if user.is_a?(String)
-    "Signed in as " + user
+  if user = env.get?("user", User)
+    "Signed in as " + user.name
   else
     # A redirect skips the rest of the chain; the route's value is dropped.
     env.redirect("/")

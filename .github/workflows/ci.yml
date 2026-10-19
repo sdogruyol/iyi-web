@@ -13,12 +13,12 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-2025]
         # The oldest iyi this release supports (README, Requirements), and
-        # the latest, whose std/http and import rules have moved on.
-        iyi: ["0.15.0", latest]
+        # the latest.
+        iyi: ["0.18.0", latest]
         # Windows on the latest only.
         exclude:
           - os: windows-2025
-            iyi: "0.15.0"
+            iyi: "0.18.0"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -63,8 +63,7 @@ jobs:
   # What the next tag has to be called, from what the exported surface did
   # since the last one: an export gone is a new minor before v1 and a new
   # major after, and a pull request that makes one says so here. On the
-  # latest iyi, since `iyi mod release` arrived in 0.15.1 - after the
-  # oldest release the tests pin.
+  # latest iyi.
   surface:
     runs-on: ubuntu-24.04
     steps:
