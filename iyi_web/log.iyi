@@ -16,11 +16,8 @@ import std/time::{Time, Span}
 pub abstract class Logger
   # One finished request. *ctx* carries the status that was sent; the
   # default writes `request_log_line` through `write`.
-  #
-  # Qualified: iyi 0.15.0 does not find a module's own function from a
-  # method a subclass inherits.
   pub def request(ctx : Context, elapsed : Span) : Nil
-    write(IyiWeb::Log.request_log_line(ctx.request.method, ctx.request.path, ctx.response.status_code, elapsed))
+    write(request_log_line(ctx.request.method, ctx.request.path, ctx.response.status_code, elapsed))
   end
 
   # One line of text, without its newline.

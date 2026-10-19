@@ -10,10 +10,10 @@ pub def random_hex(count : Int32) : String
   hex(random_bytes(count))
 end
 
-# `File.readable?`, not `File.exists?`: from iyi 0.17.0 on `exists?` no
-# longer opens the path, so a device that is there but may not be read -
-# a sandbox's - answered true, and the open below panicked. wasm32 has no
-# such path to ask about.
+# `File.readable?`, not `File.exists?`: `exists?` does not open the path,
+# so a device that is there but may not be read - a sandbox's - answers
+# true, and the open below would panic. wasm32 has no such path to ask
+# about.
 #
 # Where there is no `/dev/urandom` - Windows, wasm32 - the bytes come from
 # `std/random` seeded by `Random.new`, which reads the platform's own

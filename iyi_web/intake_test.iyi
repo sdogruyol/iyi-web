@@ -3,7 +3,7 @@
 module iyi_web/intake_test
 
 import iyi_web/intake::{Intake, TooLarge, HeadTooLarge}
-import iyi_web/request::{Request, ParseError, parse_incoming}
+import iyi_web/request::{Request, ParseError}
 import iyi_web/spec::*
 
 STEPS = [1, 2, 3, 7, 64, 4096]
@@ -129,8 +129,7 @@ describe "Intake" do
       # A line that never ends is refused once it passes the bound.
       assert head_refusal("GET /" + "a" * 9000, step) == 414
     end
-    # Within the bounds, read to the last field. Repeated lines are joined
-    # by `std/http` from iyi 0.16.1 on, and the last one kept before it.
+    # Within the bounds, read to the last field.
     fits = "GET / HTTP/1.1\r\nHost: x\r\n" + "X-A: b\r\n" * 2000 + "X-Last: z\r\n\r\n"
     assert taken(fits, 4096)[0].headers["x-last"]? == "z"
   end
@@ -151,14 +150,8 @@ describe "Intake" do
 
   it "reads a repeated length on one line as std/http does" do
     one_line = "POST /e HTTP/1.1\r\nHost: x\r\nContent-Length: 3, 3\r\n\r\nabc"
-    # `std/http` reads `3, 3` as 3 from iyi 0.16.1 on, and refused it before.
-    std_takes = !parse_incoming(one_line).request.nil?
     STEPS.each do |step|
-      if std_takes
-        assert taken(one_line + NEXT, step)[0].body == "abc"
-      else
-        assert refused?(one_line + NEXT, step)
-      end
+      assert taken(one_line + NEXT, step)[0].body == "abc"
       assert too_large?("POST /e HTTP/1.1\r\nHost: x\r\nContent-Length: 1025, 1025\r\n\r\n", step)
       assert refused?("POST /e HTTP/1.1\r\nHost: x\r\nContent-Length: 3, 4\r\n\r\nabcd", step)
       assert refused?("POST /e HTTP/1.1\r\nHost: x\r\nContent-Length: +3\r\n\r\nabc", step)

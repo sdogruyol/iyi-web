@@ -84,8 +84,7 @@ describe "parse_head" do
   end
 
   it "never reads the first of two Host lines" do
-    # `std/http` refuses two from iyi 0.16.1 on (RFC 9112 §3.2), and kept
-    # the last before.
+    # `std/http` refuses two (RFC 9112 §3.2).
     case parse_head("GET / HTTP/1.1\r\nHost: first\r\nHost: second")
     in ParseError
     in Request
@@ -94,7 +93,7 @@ describe "parse_head" do
   end
 
   it "leaves missing Host and Content-Type empty" do
-    # HTTP/1.0: an HTTP/1.1 request without Host is refused from iyi 0.16.1 on.
+    # HTTP/1.0: an HTTP/1.1 request without Host is refused.
     req = parsed("GET / HTTP/1.0")
     assert req.host == ""
     assert req.content_type == ""
