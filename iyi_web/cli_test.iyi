@@ -1,5 +1,6 @@
 # Command-line flags: bind and port reach the config, bad input is named,
-# help is noticed, and an application's own flags run.
+# TLS loads its key and certificate, help is noticed, and an application's
+# own flags run.
 module iyi_web/cli_test
 
 import iyi_web/cli::{CLIParser, cli_parser}
@@ -27,8 +28,40 @@ describe "cli_parser" do
     assert cli_parser(cfg).parse(["--port"]) == "Missing argument for option: --port"
   end
 
-  it "refuses the TLS flags" do
-    assert cli_parser(Config.new).parse(["--ssl"]) == "TLS is not supported: terminate TLS at a reverse proxy."
+  it "loads TLS from -s with both files, and refuses -s without one" do
+    key = __DIR__ + "/testdata/localhost.key"
+    cert = __DIR__ + "/testdata/localhost.crt"
+    cfg = Config.new
+    assert cli_parser(cfg).parse(["-s", "--ssl-key-file", key, "--ssl-cert-file=" + cert]).nil?
+    if tls = cfg.ssl
+      assert tls.alpn == ["http/1.1"]
+      assert tls.leaf.matches_host?("localhost")
+    else
+      assert false
+    end
+
+    plain = Config.new
+    assert cli_parser(plain).parse(["--ssl-key-file", key, "--ssl-cert-file", cert]).nil?
+    assert plain.ssl.nil?
+
+    assert cli_parser(Config.new).parse(["--ssl", "--ssl-cert-file", cert]) == "SSL configuration error: SSL key file not specified. Use --ssl-key-file FILE to specify the key file."
+    assert cli_parser(Config.new).parse(["-s", "--ssl-key-file", key]) == "SSL configuration error: SSL certificate file not specified. Use --ssl-cert-file FILE to specify the certificate file."
+    assert cli_parser(Config.new).parse(["-s", "-h"]).nil?
+  end
+
+  it "names a TLS file it cannot read and a key TLS refuses, rather than starting" do
+    key = __DIR__ + "/testdata/localhost.key"
+    cert = __DIR__ + "/testdata/localhost.crt"
+    missing = __DIR__ + "/testdata/no-such.pem"
+    assert cli_parser(Config.new).parse(["-s", "--ssl-key-file", missing, "--ssl-cert-file", cert]) == "SSL configuration error: cannot read the SSL key file " + missing + "."
+    assert cli_parser(Config.new).parse(["-s", "--ssl-key-file", key, "--ssl-cert-file", __DIR__ + "/testdata"]) == "SSL configuration error: cannot read the SSL certificate file " + __DIR__ + "/testdata."
+    # The certificate given as the key: no PRIVATE KEY block in it.
+    refused = cli_parser(Config.new).parse(["-s", "--ssl-key-file", cert, "--ssl-cert-file", cert])
+    if problem = refused
+      assert problem.starts_with?("SSL configuration error: tls: the private key")
+    else
+      assert false
+    end
   end
 
   it "notices help and leaves plain arguments and everything after -- alone" do

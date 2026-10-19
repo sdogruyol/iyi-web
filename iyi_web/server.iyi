@@ -31,10 +31,18 @@
 # the client to take bytes. The socket's own bound is per wait, so the
 # read bound is set before every read from what is left of the request's
 # deadline; a client trickling a byte at a time still runs out.
+#
+# Under TLS (`bind_tls`) a connection is std/http's `TlsStream` over the
+# socket rather than the socket, and the handshake runs first, in the
+# connection's own task and inside its first request's `read_timeout`, as
+# `std/http`'s server runs it: a client that fails it - plain HTTP sent to
+# the TLS port, a certificate it refuses - is told by an alert and loses
+# only its own connection.
 module iyi_web/server
 
 import std/socket::{IyiSocket, SocketError}
-import std/http::{HTTP}
+import std/http::{HTTP, TlsStream}
+import std/tls::{TlsServer, TlsServerConfig, TlsError}
 import std/time::{Time, Span}
 import iyi_web/handler::{Handler}
 import iyi_web/context::{Context}
@@ -51,6 +59,7 @@ pub class Server
   @error_pages : Hash(Int32, Proc(Context, Error, String))
   @error_types : Hash(String, Proc(Context, Error, String?))
   @socket : IyiSocket?
+  @tls : TlsServerConfig?
   @in_flight : Int32
   @host : String
   @port : Int32
@@ -71,6 +80,7 @@ pub class Server
                  @error_pages : Hash(Int32, Proc(Context, Error, String)) = {} of Int32 => Proc(Context, Error, String),
                  @error_types : Hash(String, Proc(Context, Error, String?)) = {} of String => Proc(Context, Error, String?))
     @socket = nil
+    @tls = nil
     @in_flight = 0
     @host = "127.0.0.1"
     @port = 0
@@ -85,19 +95,31 @@ pub class Server
   end
 
   pub def bind(host : String, port : Int32) : Int32
-    listener = IyiSocket.listen(host, port)
-    @socket = listener
-    @host = host
-    @port = listener.local_port
-    @port
+    listen_at(host, port, nil)
+  end
+
+  # Like `bind`, every connection TLS under *tls*.
+  pub def bind_tls(host : String, port : Int32, tls : TlsServerConfig) : Int32
+    listen_at(host, port, tls)
   end
 
   # Listens at *path*, a unix socket's file, which must not exist yet; the
-  # listener's close removes it.
-  pub def bind_unix(path : String) : Nil
+  # listener's close removes it. Every connection is TLS under *tls* when
+  # it is given.
+  pub def bind_unix(path : String, tls : TlsServerConfig? = nil) : Nil
     @socket = IyiSocket.listen_unix(path)
+    @tls = tls
     @host = path
     @port = 0
+  end
+
+  private def listen_at(host : String, port : Int32, tls : TlsServerConfig?) : Int32
+    listener = IyiSocket.listen(host, port)
+    @socket = listener
+    @tls = tls
+    @host = host
+    @port = listener.local_port
+    @port
   end
 
   # Serves until `close` or `shutdown` has drained the connections.
@@ -161,12 +183,13 @@ pub class Server
   end
 
   private def serve_isolated(conn : Connection) : Nil
-    client = conn.socket
-    # The connection's write bound, set once. Its read bound is set before
-    # every read, in `read_request`.
-    client.write_timeout_ms = milliseconds(@config.write_timeout)
+    # The connection's write bound, set once, on the socket TLS writes
+    # through too. Its read bound is set before every read, in
+    # `read_request`.
+    conn.socket.write_timeout_ms = milliseconds(@config.write_timeout)
     exchange = Exchange.new
     failure = isolated(conn) { serve_connection(conn, exchange) }
+    client = conn.stream
     # A connection cut off at shutdown has nobody left to answer.
     if failure && !exchange.writing && !client.closed?
       if ctx = exchange.context
@@ -178,7 +201,9 @@ pub class Server
       end
     end
     untrack(conn)
+    # TLS's close sends close_notify, then closes the socket.
     client.close
+    conn.socket.close
   end
 
   # A method of its own because a `while` body is not a scope: a block
@@ -283,7 +308,10 @@ pub class Server
   end
 
   private def serve_connection(conn : Connection, exchange : Exchange) : Nil
-    client = conn.socket
+    if tls = @tls
+      return unless secure(conn, tls)
+    end
+    client = conn.stream
     leftover = ""
     requests = 0
     loop do
@@ -312,6 +340,23 @@ pub class Server
     end
   end
 
+  # The TLS handshake, held to `read_timeout` - TLS's own 30 s when that is
+  # off - and counted against the first request's, which runs from the
+  # accept. Until it is done the connection has sent no request, so a drain
+  # closes it as it closes one waiting for its first byte. False when it
+  # failed: `TlsServer.over` has sent the alert and closed the socket.
+  private def secure(conn : Connection, tls : TlsServerConfig) : Bool
+    socket = conn.socket
+    limit = milliseconds(@config.read_timeout) || TlsServer::HANDSHAKE_TIMEOUT_MS
+    socket.read_timeout_ms = limit
+    conn.idle = true
+    secured = TlsServer.over(socket, tls, limit)
+    conn.idle = false
+    return false if secured.is_a?(TlsError)
+    conn.stream = ServerTls.new(secured, socket)
+    true
+  end
+
   private def wants_keepalive?(wire_close : Bool, already : Int32) : Bool
     return false unless @config.keepalive
     return false if @draining
@@ -323,7 +368,7 @@ pub class Server
   # connection may carry another request. *leftover* is what the client
   # sent after this request, which a connection taken over (a WebSocket)
   # reads first.
-  private def dispatch(client : IyiSocket, request : Request, leftover : String, keepalive : Bool, exchange : Exchange) : Bool
+  private def dispatch(client : IyiSocket | TlsStream, request : Request, leftover : String, keepalive : Bool, exchange : Exchange) : Bool
     @in_flight = @in_flight + 1
     defer leave
     ctx = Context.for(request)
@@ -367,7 +412,7 @@ pub class Server
   # and headers are out, and the connection carries no more HTTP. The read
   # timeout was for a request arriving; an upgraded connection waits on
   # its own terms. A panic from here on has no response to become.
-  private def take_over(client : IyiSocket, ctx : Context, leftover : String, exchange : Exchange, upgrade : Proc(IyiSocket, String, Nil)) : Bool
+  private def take_over(client : IyiSocket | TlsStream, ctx : Context, leftover : String, exchange : Exchange, upgrade : Proc(IyiSocket | TlsStream, String, Nil)) : Bool
     exchange.writing = true
     write_raw(client, ctx.response.to_http(wire_version(ctx.request), false))
     exchange.writing = false
@@ -404,7 +449,7 @@ pub class Server
   # `Panicked` is used, as a 500 unless it sets another status; then the
   # application's `error 500` page. Either is application code, so it may
   # panic too, and then the next one is tried, down to the built-in page.
-  private def answer_panic(client : IyiSocket, ctx : Context, started : Span, failure : Panicked) : Nil
+  private def answer_panic(client : IyiSocket | TlsStream, ctx : Context, started : Span, failure : Panicked) : Nil
     request = ctx.request
     rendered = false
     unless @error_types.empty?
@@ -454,7 +499,7 @@ pub class Server
   # While the server drains, a keep-alive connection takes no further
   # request, and a new one only the request it has already sent.
   private def read_request(conn : Connection, leftover : String, first : Bool) : Tuple(Request, String, Bool) | ParseError | TooLarge | HeadTooLarge | TimedOut | Closed
-    client = conn.socket
+    client = conn.stream
     intake = conn.reader(leftover, @config.max_request_body_size)
     limit = milliseconds(@config.read_timeout)
     since = first ? conn.accepted : Time.monotonic
@@ -506,7 +551,7 @@ pub class Server
     gone.total_seconds_i64 * 1000_i64 + (gone.nanoseconds // 1000000).to_i64
   end
 
-  private def write_error(client : IyiSocket, status : Int32, body : String) : Nil
+  private def write_error(client : IyiSocket | TlsStream, status : Int32, body : String) : Nil
     res = Response.new
     res.status_code = status
     res.content_type = "text/plain; charset=utf-8"
@@ -515,7 +560,7 @@ pub class Server
     write_raw(client, res.to_http("HTTP/1.1"))
   end
 
-  private def write_raw(client : IyiSocket, bytes : String) : Nil
+  private def write_raw(client : IyiSocket | TlsStream, bytes : String) : Nil
     # Closed under the task by a cut-off at shutdown: the panic is what
     # stops a handler that is still streaming.
     raise "the connection was cut off at shutdown" if client.closed?
@@ -548,12 +593,14 @@ class Exchange
   end
 end
 
-# A connection `listen` took, as a drain sees it: its socket, when it was
-# taken, whether its task is parked waiting for a request's first byte,
-# and the group running that task. The server keeps them in a list of its
-# own, which a connection leaves in constant time.
+# A connection `listen` took, as a drain sees it: its socket, what is read
+# and written - the socket, or TLS over it - when it was taken, whether its
+# task is parked waiting for a request's first byte, and the group running
+# that task. The server keeps them in a list of its own, which a
+# connection leaves in constant time.
 class Connection
   getter socket : IyiSocket
+  property stream : IyiSocket | TlsStream
   getter accepted : Span
   property idle : Bool
   property task_group : IyiGroup?
@@ -562,6 +609,7 @@ class Connection
   @reader : Intake?
 
   def initialize(@socket : IyiSocket)
+    @stream = @socket
     @accepted = Time.monotonic
     @idle = false
     @task_group = nil
@@ -590,5 +638,44 @@ class Connection
       running.cancel_children
     end
     @socket.close
+  end
+end
+
+# A TLS connection the server took. A drain or a cut-off closes the socket
+# under it, not TLS, and a socket read or written once closed panics; so
+# this one is closed when its socket is, as the plain socket would be.
+#
+# Closing TLS writes too - its close_notify - and the runtime refuses a
+# second write to a socket another task's write is parked on: a WebSocket
+# closed while a broadcast from another connection's task waits on a slow
+# client would panic. A close then closes the socket alone, which wakes
+# that write as it wakes one on a plain socket, and sends no close_notify,
+# which cannot follow half a record anyway.
+class ServerTls < TlsStream
+  @socket : IyiSocket
+  @writing : Int32
+
+  def initialize(tls : TlsServer, @socket : IyiSocket)
+    super(tls, "the client")
+    @writing = 0
+  end
+
+  def write(text : String) : Int32 | Cancelled | SocketError
+    @writing = @writing + 1
+    sent = super(text)
+    @writing = @writing - 1
+    sent
+  end
+
+  def closed? : Bool
+    @socket.closed? || super
+  end
+
+  def close : Nil
+    if @writing > 0 || @socket.closed?
+      @socket.close
+    else
+      super
+    end
   end
 end

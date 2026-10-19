@@ -6,6 +6,7 @@
 module iyi_web/config
 
 import std/file::{File}
+import std/tls::{TlsServerConfig}
 import iyi_web/handler::{Handler}
 import iyi_web/context::{Context}
 import iyi_web/log::{Logger, StdoutLogger}
@@ -44,6 +45,7 @@ pub class Config
   @write_timeout : Int32?
   @idle_timeout : Int32?
   @unix_socket : String?
+  @ssl : TlsServerConfig?
   @websocket_allowed_origins : Array(String)
   @websocket_max_message_size : Int32
 
@@ -81,6 +83,7 @@ pub class Config
     @write_timeout = 60
     @idle_timeout = 75
     @unix_socket = nil
+    @ssl = nil
     @websocket_allowed_origins = [] of String
     @websocket_max_message_size = 8 * 1024 * 1024
   end
@@ -250,6 +253,16 @@ pub class Config
 
   pub def unix_socket=(value : String?) : String?
     @unix_socket = value
+  end
+
+  # TLS for every connection, Kemal's `config.ssl`: set it here, or with
+  # `-s --ssl-key-file FILE --ssl-cert-file FILE`. nil serves plain HTTP.
+  pub def ssl : TlsServerConfig?
+    @ssl
+  end
+
+  pub def ssl=(value : TlsServerConfig?) : TlsServerConfig?
+    @ssl = value
   end
 
   pub def custom_handlers : Array(Handler)

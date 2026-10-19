@@ -29,6 +29,7 @@
 module iyi_web/websocket
 
 import std/socket::{IyiSocket, SocketError}
+import std/http::{TlsStream}
 import std/digest::{SHA1}
 import std/base64::{Base64}
 import std/unicode::{Unicode}
@@ -73,7 +74,7 @@ pub class WebSocket
   PING         = 0x9
   PONG         = 0xA
 
-  @socket : IyiSocket
+  @socket : IyiSocket | TlsStream
   @max_message_size : Int32
   @buffer : String
   @offset : Int32
@@ -90,8 +91,9 @@ pub class WebSocket
   @on_pong : Proc(String, Nil)?
   @on_close : Proc(Int32, String, Nil)?
 
-  # *socket* is a connection whose handshake is already done.
-  def initialize(@socket : IyiSocket, @max_message_size : Int32 = 8 * 1024 * 1024)
+  # *socket* is a connection whose handshake is already done: the socket,
+  # or under TLS the `TlsStream` over it, so `wss://` is the same session.
+  def initialize(@socket : IyiSocket | TlsStream, @max_message_size : Int32 = 8 * 1024 * 1024)
     @buffer = ""
     @offset = 0
     # The write lock: one token, taken to write a frame and put back after.

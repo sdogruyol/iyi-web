@@ -10,6 +10,7 @@
 module iyi_web/response
 
 import std/socket::{IyiSocket}
+import std/http::{TlsStream}
 import iyi_web/headers::{Headers}
 import iyi_web/status::*
 
@@ -25,7 +26,7 @@ pub class Response
   @head : Bool
   @headers_sent : Bool
   @chunked : Bool
-  @upgrade : Proc(IyiSocket, String, Nil)?
+  @upgrade : Proc(IyiSocket | TlsStream, String, Nil)?
 
   def initialize
     @status_code = 200
@@ -167,13 +168,14 @@ pub class Response
 
   # Takes the connection over once this response - a 101 - is out. The
   # server writes the status line and headers, then calls *block* with the
-  # socket and whatever the client sent after the request, and the
-  # connection carries no more HTTP. How a WebSocket starts.
-  pub def upgrade(&block : IyiSocket, String -> Nil) : Nil
+  # connection - the socket, or under TLS the `TlsStream` over it - and
+  # whatever the client sent after the request, and the connection carries
+  # no more HTTP. How a WebSocket starts.
+  pub def upgrade(&block : (IyiSocket | TlsStream, String) -> Nil) : Nil
     @upgrade = block
   end
 
-  pub def upgrade_handler : Proc(IyiSocket, String, Nil)?
+  pub def upgrade_handler : Proc(IyiSocket | TlsStream, String, Nil)?
     @upgrade
   end
 
