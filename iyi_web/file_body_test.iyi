@@ -6,6 +6,7 @@
 module iyi_web/file_body_test
 
 import std/file::{File}
+import std/compress::{Gzip}
 import std/socket::{IyiSocket}
 import iyi_web/file_body::*
 import iyi_web/range::{byteranges_body}
@@ -128,6 +129,49 @@ group do |g|
           assert over.headers_sent?
           assert writes.size == 3
           assert writes[1] + writes[2] == content[0, FILE_CHUNK_SIZE + 1]
+        end
+      end
+
+      it "compresses a file larger than one chunk as it reads it, chunked" do
+        writes = [] of String
+        response = attached(writes)
+        respond_file_encoded(response, path, size, "text/plain", "gzip", false)
+        assert writes[0].starts_with?("HTTP/1.1 200 OK\r\n")
+        assert writes[0].includes?("Content-Encoding: gzip\r\n")
+        assert writes[0].includes?("Transfer-Encoding: chunked\r\n")
+        assert !writes[0].includes?("Content-Length")
+        # One flush per chunk read, each a chunk of the gzip stream.
+        assert writes.size >= 5
+        stream = ""
+        index = 1
+        while index < writes.size
+          frame = writes[index]
+          head = frame.partition("\r\n")
+          length = head[0].to_i(16)
+          assert length <= FILE_CHUNK_SIZE + 64
+          stream = stream + head[2][0, length]
+          index = index + 1
+        end
+        assert Gzip.decompress(stream) == content
+        response.finish
+        assert writes[writes.size - 1] == "0\r\n\r\n"
+        assert response.reusable?
+      end
+
+      it "buffers an encoded file of one chunk or less with its length, and a HEAD of it too" do
+        File.tempfile("iyi-web-chunk-", ".txt") do |small|
+          File.write(small, content[0, FILE_CHUNK_SIZE])
+          writes = [] of String
+          response = attached(writes)
+          respond_file_encoded(response, small, FILE_CHUNK_SIZE.to_i64, "text/plain", "gzip", false)
+          assert writes.empty?
+          assert Gzip.decompress(response.body) == content[0, FILE_CHUNK_SIZE]
+
+          headed = attached(writes)
+          respond_file_encoded(headed, small, FILE_CHUNK_SIZE.to_i64, "text/plain", "gzip", true)
+          assert writes.empty?
+          assert headed.body == ""
+          assert headed.headers["Content-Length"] == response.body.bytesize.to_s
         end
       end
 

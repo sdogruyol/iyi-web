@@ -117,16 +117,3 @@ describe "matches_path_prefix?" do
     assert !matches_path_prefix?("/api/users", "/api")
   end
 end
-
-describe "extension_of" do
-  it "returns the downcased suffix after the last dot" do
-    assert extension_of("/public/app.js") == "js"
-    assert extension_of("/a.B") == "b"
-  end
-
-  it "returns empty when there is no extension" do
-    assert extension_of("Makefile") == ""
-    assert extension_of("/.hidden") == ""
-    assert extension_of("/dir/") == ""
-  end
-end

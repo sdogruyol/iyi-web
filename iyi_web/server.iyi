@@ -324,6 +324,7 @@ pub class Server
     ctx = Context.for(request)
     ctx.params.limit_uploads(@config.max_file_uploads, @config.max_multipart_form_field_size)
     ctx.max_ranges = @config.max_ranges
+    ctx.static_gzip = @config.serve_static && @config.static_gzip
     defer ctx.params.cleanup
     exchange.context = ctx
     exchange.started = Time.monotonic

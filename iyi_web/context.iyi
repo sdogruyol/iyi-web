@@ -8,6 +8,7 @@ module iyi_web/context
 
 import std/file::{File}
 import std/json::{JSON}
+import std/mime::{MIME}
 import std/time::{Time}
 import iyi_web/request::{Request}
 import iyi_web/response::{Response}
@@ -15,9 +16,9 @@ import iyi_web/params::{Params}
 import iyi_web/cookies::{CookieJar, encode_cookie_value}
 import iyi_web/headers::{Headers}
 import iyi_web/http_date::*
-import iyi_web/mime::*
 import iyi_web/range::{respond_ranged, parse_ranges}
-import iyi_web/file_body::{respond_file}
+import iyi_web/file_body::{respond_file, respond_file_encoded}
+import iyi_web/content_coding::{select_content_coding, compressible_file?, append_vary, etag_with_coding}
 
 # What `set` stores for later filters, middleware and the route.
 pub alias StoreValue = Nil | String | Int32 | Int64 | Float64 | Bool
@@ -32,6 +33,7 @@ pub class Context
   @route_method : String?
   @route_pattern : String?
   @max_ranges : Int32
+  @static_gzip : Bool
 
   def initialize(@request : Request, @response : Response, @params : Params)
     @halted = false
@@ -40,6 +42,7 @@ pub class Context
     @route_method = nil
     @route_pattern = nil
     @max_ranges = 16
+    @static_gzip = true
   end
 
   def self.for(request : Request) : Context
@@ -179,6 +182,14 @@ pub class Context
   # makes the response a download (`disposition` defaults to "attachment");
   # the name is encoded per RFC 6266 and RFC 8187. A GET with `Range` gets
   # 206 or 416.
+  #
+  # As in Kemal, the file is gzip- or deflate-encoded as it is read when
+  # the static `gzip` option is on, the client accepts the coding, the type
+  # is compressible and the file has at least `COMPRESS_MIN_SIZE` bytes,
+  # and the request is not for a byte range; the response then varies on
+  # `Accept-Encoding`, and an `ETag` set before the call is marked with the
+  # coding. A response that already has a `Content-Encoding` is the
+  # caller's encoded file and is sent as it is.
   pub def send_file(path : String, mime_type : String = "", filename : String = "", disposition : String = "") : Nil
     info = File.info?(path)
     unless info && info.file? && File.readable?(path)
@@ -186,21 +197,40 @@ pub class Context
       return
     end
 
-    type = mime_type.empty? ? mime_type_of(path) : mime_type
+    type = mime_type.empty? ? type_of(path) : mime_type
     describe_download(type, filename, disposition)
     size = info.size
     header = requested_range
     ranges = header ? parse_ranges(header, size, @max_ranges) : nil
-    respond_file(@response, path, size, ranges, type, @request.method == "HEAD")
+    headers = @response.headers
+    head = @request.method == "HEAD"
+
+    if @static_gzip && !headers.has_key?("Content-Encoding") && compressible_file?(type, size)
+      append_vary(headers, "Accept-Encoding")
+      accept = @request.headers["Accept-Encoding"]?
+      coding = ranges.nil? && accept ? select_content_coding(accept) : nil
+      if coding
+        if etag = headers["ETag"]?
+          headers["ETag"] = etag_with_coding(etag, coding)
+        end
+        respond_file_encoded(@response, path, size, type, coding, head)
+        return
+      end
+    end
+    respond_file(@response, path, size, ranges, type, head)
   end
 
   # `send_file` for bytes already in memory. MIME follows *filename*'s
   # extension unless the caller names one, and is
   # `application/octet-stream` without either.
   pub def send_data(data : String, mime_type : String = "", filename : String = "", disposition : String = "") : Nil
-    type = mime_type.empty? ? mime_type_of(filename) : mime_type
+    type = mime_type.empty? ? type_of(filename) : mime_type
     describe_download(type, filename, disposition)
     @response.set_body(data) unless respond_ranged(@response, requested_range, data, type, @max_ranges)
+  end
+
+  private def type_of(name : String) : String
+    MIME.with_charset(MIME.from_extension(name))
   end
 
   private def describe_download(type : String, filename : String, disposition : String) : Nil
@@ -220,6 +250,13 @@ pub class Context
   # requests off. The server sets it from the configuration.
   pub def max_ranges=(value : Int32) : Int32
     @max_ranges = value
+  end
+
+  # Whether `send_file` compresses, as static files are: on when static
+  # files are served with the `gzip` option. The server sets it from the
+  # configuration.
+  pub def static_gzip=(value : Bool) : Bool
+    @static_gzip = value
   end
 
   pub def set(name : String, value : StoreValue) : Nil

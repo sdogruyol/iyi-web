@@ -2,14 +2,25 @@
 #
 # Every file carries `ETag` (weak, from its modification time) and
 # `Last-Modified`, and a matching `If-None-Match` or `If-Modified-Since`
-# gets a 304. A textual file of `COMPRESS_MIN_SIZE` to `COMPRESS_MAX_SIZE`
-# bytes is sent gzip- or deflate-encoded when the client accepts it. A GET
-# with `Range` gets 206 or 416. Anything not compressed is read from disk as
-# it is sent (`iyi_web/file_body`), so a large file or a range of one costs
-# a chunk of memory and a HEAD does not open the file. A `..` segment or a
-# NUL byte is refused, so a request cannot walk out of the folder; on
-# Windows so is any `\` or `:`, which the file system reads as a separator,
-# a drive or a stream.
+# gets a 304. Media types come from `std/mime` by extension. A file of a
+# type `MIME.compressible?` takes and of at least `COMPRESS_MIN_SIZE` bytes
+# is sent gzip- or deflate-encoded when the client accepts it, compressed
+# as it is read, whatever its size. A GET with `Range` gets 206 or 416, of
+# the file as it is stored. Everything is read from disk as it is sent
+# (`iyi_web/file_body`), so a large file or a range of one costs a chunk
+# of memory and a HEAD does not read a file it would send as it is. A `..`
+# segment or a NUL byte is refused, so a request cannot walk out of the
+# folder; on Windows so is any `\` or `:`, which the file system reads as
+# a separator, a drive or a stream.
+#
+# A precompressed copy beside a file - `app.js.gz` next to `app.js`, a
+# regular file no older than it - is sent in its place, with
+# `Content-Encoding: gzip` and `app.js`'s media type, to a client that
+# accepts gzip whenever gzip is the coding the request gets, even with the
+# `gzip` option off or for a type not compressed on the fly. A `Range` is
+# always answered from the file itself: a client resuming a download it
+# took whole gets the bytes it asked for, not bytes of whichever encoded
+# copy is on disk now.
 #
 # A directory serves its `index.html` (`dir_index`) or an HTML listing of
 # its entries (`dir_listing`); a directory path without a trailing slash
@@ -19,17 +30,17 @@ module iyi_web/static
 import std/file::{File}
 import std/dir::{Dir}
 import std/html::{HTML}
+import std/mime::{MIME}
 import std/time::{Time}
 import std/uri::{URI}
 import iyi_web/codec::*
-import iyi_web/mime::*
 import iyi_web/handler::{Handler}
 import iyi_web/context::{Context}
 import iyi_web/config::{StaticHeadersHook}
 import iyi_web/http_date::*
-import iyi_web/compress::{COMPRESS_MIN_SIZE, COMPRESS_MAX_SIZE, select_content_coding, compressible_type?, encode_body, append_vary, etag_with_coding}
+import iyi_web/content_coding::{select_content_coding, compressible_file?, append_vary, etag_with_coding}
 import iyi_web/range::*
-import iyi_web/file_body::{respond_file}
+import iyi_web/file_body::{respond_file, respond_file_encoded}
 
 pub class StaticHandler < Handler
   @root : String
@@ -86,7 +97,7 @@ pub class StaticHandler < Handler
 
   private def serve_file(ctx : Context, path : String, info : File::Info) : Nil
     headers = ctx.response.headers
-    type = mime_type_of(path)
+    type = MIME.with_charset(MIME.from_extension(path))
     size = info.size
     etag = "W/\"" + info.modification_time.to_s + "\""
     headers["Last-Modified"] = http_date(Time.from_unix(info.modification_time))
@@ -96,15 +107,20 @@ pub class StaticHandler < Handler
     range_header = ctx.request.method == "GET" && @max_ranges > 0 ? ctx.request.headers["Range"]? : nil
     ranged = range_header ? parse_ranges(range_header, size, @max_ranges) : nil
 
-    # A range is always sent identity-encoded; the full body may be
-    # compressed. Either way the ETag names what this request receives. A
-    # file too large to compress has one representation, so no `Vary`.
+    # A file compressed on the fly, or one with a precompressed copy, has
+    # an encoded and an identity form, and says so even to a request that
+    # gets the identity one: a range, which is always of the stored bytes,
+    # or a client that accepts no coding. The ETag names what this request
+    # receives.
+    compressed = @gzip && compressible_file?(type, size)
+    precompressed = precompressed_copy(path, info)
+    append_vary(headers, "Accept-Encoding") if compressed || precompressed
     coding = nil
-    if @gzip && compressible_type?(type) && size >= COMPRESS_MIN_SIZE.to_i64 && size <= COMPRESS_MAX_SIZE.to_i64
-      append_vary(headers, "Accept-Encoding")
-      if ranged.nil?
-        if accept = ctx.request.headers["Accept-Encoding"]?
-          coding = select_content_coding(accept)
+    if ranged.nil?
+      if accept = ctx.request.headers["Accept-Encoding"]?
+        coding = select_content_coding(accept) if compressed
+        if precompressed && coding.nil? && select_content_coding(accept, ["gzip"])
+          coding = "gzip"
         end
       end
     end
@@ -121,15 +137,29 @@ pub class StaticHandler < Handler
       hook.call(ctx, path, info)
     end
 
-    ctx.response.content_type = type
+    head = ctx.request.method == "HEAD"
     if encoding = coding
-      # The encoded length is only known once the file is encoded, so a
-      # HEAD reads it too; COMPRESS_MAX_SIZE bounds what that costs.
-      headers["Content-Encoding"] = encoding
-      send_body(ctx, encode_body(File.read(path), encoding))
+      if copy = precompressed
+        if encoding == "gzip"
+          headers["Content-Encoding"] = "gzip"
+          respond_file(ctx.response, path + ".gz", copy.size, nil, type, head)
+          return
+        end
+      end
+      respond_file_encoded(ctx.response, path, size, type, encoding, head)
       return
     end
-    respond_file(ctx.response, path, size, ranged, type, ctx.request.method == "HEAD")
+    respond_file(ctx.response, path, size, ranged, type, head)
+  end
+
+  # The `.gz` copy of the file at *path* that can stand in for it: a
+  # regular file no older than the one it compresses, so a file edited
+  # after it was compressed is not answered with its old contents.
+  private def precompressed_copy(path : String, info : File::Info) : File::Info?
+    copy = File.info?(path + ".gz")
+    return nil unless copy
+    return nil unless copy.file? && copy.modification_time >= info.modification_time
+    copy
   end
 
   # `If-None-Match` wins when present (weak comparison, `*` matches any);

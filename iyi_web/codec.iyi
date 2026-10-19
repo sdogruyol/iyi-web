@@ -131,16 +131,6 @@ pub def parse_query_pairs(text : String) : Array(Tuple(String, String))
   pairs
 end
 
-pub def extension_of(path : String) : String
-  slash = path.rindex("/")
-  start = slash ? slash + 1 : 0
-  name = path[start, path.bytesize - start]
-  dot = name.rindex(".")
-  return "" unless dot
-  return "" if dot == 0
-  name[dot + 1, name.bytesize - dot - 1].downcase
-end
-
 private def hex_value(char : Char) : Int32
   return char.ord - 48 if char >= '0' && char <= '9'
   return char.ord - 65 + 10 if char >= 'A' && char <= 'F'

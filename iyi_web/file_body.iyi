@@ -11,8 +11,16 @@
 # A response not attached to a connection (the test harness) keeps what
 # is flushed as its body.
 #
+# A file sent gzip- or deflate-encoded (`respond_file_encoded`) is read the
+# same way, each chunk compressed as it is read (`std/compress`'s
+# `Deflater`, whose pieces each end on a byte boundary the client can
+# decode at once) and flushed; its length is known only at the end, so a
+# streamed one goes out chunked. Up to `FILE_CHUNK_SIZE` bytes it is
+# encoded whole and buffered, with a `Content-Length`.
+#
 # A HEAD gets the same `Content-Length` and no body, and the file is not
-# opened.
+# opened - except when it would be encoded and buffered, where the length
+# is only known once the file is encoded, which costs at most a chunk.
 #
 # The length is the file's size when it was looked at. A file removed
 # before it is opened, or cut short while it is read, cannot keep that
@@ -23,6 +31,7 @@
 module iyi_web/file_body
 
 import std/file::{File}
+import std/compress::{Deflater, Envelope}
 import iyi_web/response::{Response}
 import iyi_web/range::*
 
@@ -67,6 +76,50 @@ pub def respond_file(response : Response, path : String, size : Int64, ranges : 
   in Nil
     response.content_type = content_type
     send_spans(response, path, [{"", 0_i64, size}], "", head)
+  end
+end
+
+# Answers the whole file at *path*, of *size* bytes and media type
+# *content_type*, encoded with *coding* (`"gzip"` or `"deflate"`, the zlib
+# format), and sets `Content-Encoding`. The status is left as the caller
+# set it. Any other coding is a programming error and panics.
+pub def respond_file_encoded(response : Response, path : String, size : Int64, content_type : String, coding : String, head : Bool) : Nil
+  envelope = case coding
+             when "gzip"    then Envelope::Gzip
+             when "deflate" then Envelope::Zlib
+             else                raise "unsupported content coding #{coding.inspect}"
+             end
+  response.content_type = content_type
+  response.headers["Content-Encoding"] = coding
+  response.set_body("")
+  streamed = size > FILE_CHUNK_SIZE.to_i64
+
+  # A streamed HEAD sends the head a GET would, chunked and without a
+  # length, rather than compress the whole file to count its bytes.
+  if head && streamed
+    response.flush
+    return
+  end
+
+  deflater = Deflater.new(envelope)
+  file = File.open(path, "r", FILE_CHUNK_SIZE)
+  defer file.close
+  response.flush if streamed
+  remaining = size
+  while remaining > 0_i64
+    want = remaining < FILE_CHUNK_SIZE.to_i64 ? remaining.to_i32 : FILE_CHUNK_SIZE
+    chunk = file.read_bytes(want)
+    raise "#{path} ended #{remaining} bytes short of the #{size} being sent" if chunk.empty?
+    response.print(deflater.compress(chunk))
+    response.flush if streamed
+    remaining = remaining - chunk.bytesize.to_i64
+  end
+  response.print(deflater.finish)
+  if streamed
+    response.flush
+  elsif head
+    response.headers["Content-Length"] = response.body.bytesize.to_s
+    response.set_body("")
   end
 end
 

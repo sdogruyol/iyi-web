@@ -4,9 +4,8 @@
 module iyi_web/static_test
 
 import std/file::{File}
-import std/compress::{Gzip}
+import std/compress::{Gzip, Zlib, Inflater, Envelope}
 import iyi_web/static::{StaticHandler}
-import iyi_web/compress::{COMPRESS_MAX_SIZE}
 import iyi_web/handler::{chain}
 import iyi_web/context::{Context}
 import iyi_web/harness::*
@@ -55,6 +54,19 @@ describe "StaticHandler" do
     assert dispatch(app, "GET", "/app.js").response.content_type == "text/javascript; charset=utf-8"
     assert dispatch(app, "GET", "/data.json").response.content_type == "application/json; charset=utf-8"
     assert dispatch(app, "GET", "/unknown.bin").response.content_type == "application/octet-stream"
+  end
+
+  it "takes media types from std/mime" do
+    File.tempfile("iyi-web-static-", ".wasm") do |wasm|
+      File.write(wasm, "\u0000asm")
+      app = static_app_at(File.dirname(wasm))
+      assert dispatch(app, "GET", "/" + File.basename(wasm)).response.content_type == "application/wasm"
+    end
+    File.tempfile("iyi-web-static-", ".mjs") do |module_file|
+      File.write(module_file, "export {}")
+      app = static_app_at(File.dirname(module_file))
+      assert dispatch(app, "GET", "/" + File.basename(module_file)).response.content_type == "text/javascript; charset=utf-8"
+    end
   end
 
   it "serves index.html for a directory" do
@@ -228,29 +240,129 @@ describe "StaticHandler" do
     end
   end
 
-  it "compresses a textual file of up to COMPRESS_MAX_SIZE bytes and sends a larger one as it is" do
+  it "compresses a textual file larger than 1 MiB as it reads it, and sends a range of it as it is" do
     File.tempfile("iyi-web-static-", ".txt") do |path|
-      content = numbered(COMPRESS_MAX_SIZE + 1)
-      File.write(path, content[0, COMPRESS_MAX_SIZE])
+      content = numbered(1572864 + 77)
+      File.write(path, content)
       app = static_app_at(File.dirname(path))
       url = "/" + File.basename(path)
 
-      at_limit = http_request("GET", url)
-      at_limit.headers["Accept-Encoding"] = "gzip"
-      packed = dispatch(app, at_limit)
+      accepted = http_request("GET", url)
+      accepted.headers["Accept-Encoding"] = "gzip"
+      packed = dispatch(app, accepted)
       assert packed.response.headers["content-encoding"] == "gzip"
       assert packed.response.headers["vary"] == "Accept-Encoding"
-      assert Gzip.decompress(packed.response.body) == content[0, COMPRESS_MAX_SIZE]
+      assert packed.response.headers["etag"].ends_with?("-gzip\"")
+      assert packed.response.body.bytesize < content.bytesize
+      assert Gzip.decompress(packed.response.body) == content
 
+      # The same stream read a piece at a time, as a client would.
+      given = false
+      reader = Inflater.new(Envelope::Gzip) do
+        if given
+          nil
+        else
+          given = true
+          packed.response.body
+        end
+      end
+      unpacked = ""
+      loop do
+        piece = reader.read(65536).or_panic
+        break if piece.empty?
+        unpacked = unpacked + piece
+      end
+      assert unpacked == content
+
+      deflate = http_request("GET", url)
+      deflate.headers["Accept-Encoding"] = "deflate"
+      zlib = dispatch(app, deflate)
+      assert zlib.response.headers["content-encoding"] == "deflate"
+      assert Zlib.decompress(zlib.response.body) == content
+
+      ranged = http_request("GET", url)
+      ranged.headers["Accept-Encoding"] = "gzip"
+      ranged.headers["Range"] = "bytes=1500000-1500099"
+      part = dispatch(app, ranged)
+      assert part.response.status_code == 206
+      assert !part.response.headers.has_key?("Content-Encoding")
+      assert part.response.headers["vary"] == "Accept-Encoding"
+      assert !part.response.headers["etag"].ends_with?("-gzip\"")
+      assert part.response.headers["content-range"] == "bytes 1500000-1500099/" + content.bytesize.to_s
+      assert part.response.body == content[1500000, 100]
+
+      cached = http_request("GET", url)
+      cached.headers["Accept-Encoding"] = "gzip"
+      cached.headers["If-None-Match"] = packed.response.headers["etag"]
+      assert dispatch(app, cached).response.status_code == 304
+      identity_tag = http_request("GET", url)
+      identity_tag.headers["Accept-Encoding"] = "gzip"
+      identity_tag.headers["If-None-Match"] = part.response.headers["etag"]
+      assert dispatch(app, identity_tag).response.status_code == 200
+
+      headed = http_request("HEAD", url)
+      headed.headers["Accept-Encoding"] = "gzip"
+      head = dispatch(app, headed)
+      assert head.response.headers["content-encoding"] == "gzip"
+      assert head.response.body == ""
+    end
+  end
+
+  it "sends a .gz copy beside the file to a client that accepts gzip" do
+    File.tempfile("iyi-web-static-", ".js") do |path|
+      content = numbered(4000)
       File.write(path, content)
-      over = http_request("GET", url)
-      over.headers["Accept-Encoding"] = "gzip"
-      plain = dispatch(app, over)
-      assert plain.response.headers["content-encoding"]?.nil?
-      assert plain.response.headers["vary"]?.nil?
-      assert !plain.response.headers["etag"].ends_with?("-gzip\"")
-      assert plain.response.headers["content-length"] == (COMPRESS_MAX_SIZE + 1).to_s
+      copy = path + ".gz"
+      # Marked, so a body from the copy cannot pass for one compressed on
+      # the fly.
+      File.write(copy, Gzip.compress("precompressed " + content))
+      app = static_app_at(File.dirname(path))
+      url = "/" + File.basename(path)
+
+      accepted = http_request("GET", url)
+      accepted.headers["Accept-Encoding"] = "gzip"
+      packed = dispatch(app, accepted)
+      assert packed.response.headers["content-encoding"] == "gzip"
+      assert packed.response.content_type == "text/javascript; charset=utf-8"
+      assert packed.response.headers["vary"] == "Accept-Encoding"
+      assert packed.response.headers["etag"].ends_with?("-gzip\"")
+      assert packed.response.body == File.read(copy)
+
+      # Sent with the gzip option off too: the copy alone makes the file
+      # negotiable.
+      off = chain([StaticHandler.new(File.dirname(path), gzip: false)])
+      assert dispatch(off, accepted).response.body == File.read(copy)
+
+      plain = dispatch(app, "GET", url)
+      assert !plain.response.headers.has_key?("Content-Encoding")
+      assert plain.response.headers["vary"] == "Accept-Encoding"
       assert plain.response.body == content
+
+      refused = http_request("GET", url)
+      refused.headers["Accept-Encoding"] = "gzip;q=0, deflate"
+      deflated = dispatch(app, refused)
+      assert deflated.response.headers["content-encoding"] == "deflate"
+      assert Zlib.decompress(deflated.response.body) == content
+
+      ranged = http_request("GET", url)
+      ranged.headers["Accept-Encoding"] = "gzip"
+      ranged.headers["Range"] = "bytes=0-6"
+      part = dispatch(app, ranged)
+      assert part.response.status_code == 206
+      assert !part.response.headers.has_key?("Content-Encoding")
+      assert part.response.body == content[0, 7]
+
+      headed = http_request("HEAD", url)
+      headed.headers["Accept-Encoding"] = "gzip"
+      head = dispatch(app, headed)
+      assert head.response.headers["content-length"] == File.size(copy).to_s
+
+      # A copy older than the file is stale and is not sent.
+      File.touch(copy, File.info(path).modification_time - 10_i64)
+      stale = dispatch(app, accepted)
+      assert stale.response.headers["content-encoding"] == "gzip"
+      assert Gzip.decompress(stale.response.body) == content
+      File.delete(copy)
     end
   end
 
