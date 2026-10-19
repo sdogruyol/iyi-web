@@ -19,15 +19,42 @@ import iyi_web/mime::*
 import iyi_web/range::{respond_ranged, parse_ranges}
 import iyi_web/file_body::{respond_file}
 
-# What `set` stores for later filters, middleware and the route.
+# What `set` stores for later filters, middleware and the route, readable
+# untyped with `get`. Any other value is kept boxed and read back by type.
 pub alias StoreValue = Nil | String | Int32 | Int64 | Float64 | Bool
+
+# Kemal widens its store's union with `add_context_storage_type`, a macro
+# that pushes onto a constant the library's `macro finished` reads. Here
+# that union would be fixed when this module's artifact is written, before
+# any consumer's type exists, so a value of any other type is boxed instead
+# and asked for by type when it is read.
+abstract class StoredObject
+  abstract def fetch(type : V.class) : V? forall V
+  abstract def type_name : String
+end
+
+# Answers by the value's runtime type, not the static type it was stored
+# as: a `User?` or an `Animal` holding a `Dog` reads back as `User` or `Dog`.
+class Stored(T) < StoredObject
+  def initialize(@value : T)
+  end
+
+  def fetch(type : V.class) : V? forall V
+    value = @value
+    value.is_a?(V) ? value : nil
+  end
+
+  def type_name : String
+    @value.class.to_s
+  end
+end
 
 pub class Context
   @request : Request
   @response : Response
   @params : Params
   @halted : Bool
-  @store : Hash(String, StoreValue)
+  @store : Hash(String, StoreValue | StoredObject)
   @cookies : CookieJar?
   @route_method : String?
   @route_pattern : String?
@@ -35,7 +62,7 @@ pub class Context
 
   def initialize(@request : Request, @response : Response, @params : Params)
     @halted = false
-    @store = {} of String => StoreValue
+    @store = {} of String => StoreValue | StoredObject
     @cookies = nil
     @route_method = nil
     @route_pattern = nil
@@ -226,14 +253,48 @@ pub class Context
     @store[name] = value
   end
 
-  # Panics when nothing was stored under *name*.
-  pub def get(name : String) : StoreValue
-    raise "nothing stored under #{name.inspect}" unless @store.has_key?(name)
-    @store[name]?
+  # Stores a value of any other type, read back with `get(name, T)`. A nil
+  # is stored as the plain nil `get` answers.
+  pub def set(name : String, value : T) : Nil forall T
+    @store[name] = value.nil? ? nil : Stored.new(value)
   end
 
+  # Panics when nothing was stored under *name*, or when what was is not a
+  # `StoreValue` and so has to be read with `get(name, T)`.
+  pub def get(name : String) : StoreValue
+    raise "nothing stored under #{name.inspect}" unless @store.has_key?(name)
+    value = @store[name]?
+    if value.is_a?(StoredObject)
+      raise "#{name.inspect} holds a #{value.type_name}: read it with get(#{name.inspect}, #{value.type_name})"
+    end
+    value
+  end
+
+  # Nil as well when what is stored is not a `StoreValue`.
   pub def get?(name : String) : StoreValue
-    @store[name]?
+    value = @store[name]?
+    value.is_a?(StoredObject) ? nil : value
+  end
+
+  # The value under *name* as a *type*, Kemal's `env.get(name).as(T)`.
+  # Panics when nothing was stored there, or something of another type.
+  pub def get(name : String, type : T.class) : T forall T
+    raise "nothing stored under #{name.inspect}" unless @store.has_key?(name)
+    value = @store[name]?
+    found = stored_as(value, T)
+    return found unless found.nil?
+    shown = value.is_a?(StoredObject) ? value.type_name : value.class.to_s
+    raise "#{name.inspect} holds a #{shown}, not a #{T}"
+  end
+
+  # The value under *name* as a *type*, or nil when nothing was stored
+  # there or something of another type.
+  pub def get?(name : String, type : T.class) : T? forall T
+    stored_as(@store[name]?, T)
+  end
+
+  private def stored_as(value : StoreValue | StoredObject, type : T.class) : T? forall T
+    value.is_a?(StoredObject) ? value.fetch(T) : (value.is_a?(T) ? value : nil)
   end
 
   pub def []=(key : String, value : String) : String

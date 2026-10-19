@@ -27,6 +27,23 @@ def numbered(size : Int32) : String
   lines.join[0, size]
 end
 
+class StoredUser
+  getter name : String
+
+  def initialize(@name : String)
+  end
+end
+
+class StoredAdmin < StoredUser
+end
+
+struct StoredPoint
+  getter x : Int32
+
+  def initialize(@x : Int32)
+  end
+end
+
 describe "Context" do
   it "starts open with the request and an empty store" do
     ctx = env
@@ -65,6 +82,54 @@ describe "Context" do
     assert ctx["name"] == "ada"
     assert ctx["count"]?.nil?
     assert panics? { ctx.get("missing") }
+  end
+
+  it "stores a class and a struct and reads them back by type" do
+    ctx = env
+    ctx.set("user", StoredUser.new("ada"))
+    ctx.set("point", StoredPoint.new(3))
+    assert ctx.get("user", StoredUser).name == "ada"
+    found = ctx.get?("user", StoredUser)
+    assert !found.nil? && found.name == "ada"
+    assert ctx.get("point", StoredPoint).x == 3
+  end
+
+  it "reads by the stored value's runtime type" do
+    ctx = env
+    user : StoredUser = StoredAdmin.new("grace")
+    ctx.set("user", user)
+    assert ctx.get("user", StoredAdmin).name == "grace"
+    maybe : StoredUser? = StoredUser.new("ada")
+    ctx.set("maybe", maybe)
+    assert ctx.get("maybe", StoredUser).name == "ada"
+  end
+
+  it "answers nil from a typed get? for another type or a missing key" do
+    ctx = env
+    ctx.set("user", StoredUser.new("ada"))
+    ctx.set("count", 3)
+    assert ctx.get?("user", StoredPoint).nil?
+    assert ctx.get?("count", String).nil?
+    assert ctx.get?("missing", StoredUser).nil?
+    assert ctx.get("count", Int32) == 3
+  end
+
+  it "panics from a typed get for another type or a missing key" do
+    ctx = env
+    ctx.set("user", StoredUser.new("ada"))
+    assert panics? { ctx.get("user", StoredPoint) }
+    assert panics? { ctx.get("missing", StoredUser) }
+  end
+
+  it "keeps a stored object out of the untyped get" do
+    ctx = env
+    ctx.set("user", StoredUser.new("ada"))
+    assert ctx.get?("user").nil?
+    assert panics? { ctx.get("user") }
+    none : StoredUser? = nil
+    ctx.set("user", none)
+    assert ctx.get("user").nil?
+    assert ctx.get?("user", StoredUser).nil?
   end
 end
 
