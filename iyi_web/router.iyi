@@ -15,7 +15,7 @@ import iyi_web/status::*
 import iyi_web/event_stream::{EventStream}
 import iyi_web/websocket::{WebSocket}
 import iyi_web/config::{Config, config}
-import iyi_web/failure::{StatusError, render_failure_page}
+import iyi_web/failure::{StatusError, render_error_type_page, render_failure_page}
 
 alias HandlerProc = Context -> String
 
@@ -191,10 +191,12 @@ pub class Router
     @error_handlers[status_code] = ->(ctx : Context, cause : Error) { block.call(ctx, cause).into_body }
   end
 
-  # The page for an error a route answers whose type is *type*, or a
-  # subclass of it: Kemal's `error MyException`. The response is a 500
-  # unless the block sets another status. Pages for types are tried in the
-  # order they were registered, and the first that matches renders.
+  # The page for an error of type *type*, or of a subclass of it: Kemal's
+  # `error MyException`. It takes an error a route answers, and a panic in
+  # a route as `Panicked` (or `Error`). The response is a 500 unless the
+  # block sets another status. Pages for types are tried in the order they
+  # were registered, and the first that matches renders, before any
+  # `error 500`.
   pub def error(type : E.class, &block : Context, E -> B) : Nil forall E : Error, B : IntoBody
     @error_types[E.to_s] = ->(ctx : Context, failure : Error) : String? {
       failure.is_a?(E) ? block.call(ctx, failure).into_body : nil
@@ -221,8 +223,9 @@ pub class Router
   end
 
   # Flattened like `error_handlers`: a mount's page for a type replaces
-  # the parent's in the parent's place in the order.
-  def error_type_handlers : Hash(String, ErrorTypePage)
+  # the parent's in the parent's place in the order. `Server` takes these
+  # for a panic, beside `error_handlers`.
+  pub def error_type_handlers : Hash(String, ErrorTypePage)
     collected = {} of String => ErrorTypePage
     @error_types.each do |name, page|
       collected[name] = page
@@ -580,12 +583,7 @@ pub class RouteHandler < Handler
   private def render_failure(ctx : Context, failure : Error) : Nil
     ctx.response.status_code = 500
     ctx.response.set_body("")
-    @error_types.each_value do |page|
-      if body = page.call(ctx, failure)
-        ctx.response.set_body(body) unless body.empty?
-        return
-      end
-    end
+    return if render_error_type_page(ctx, failure, @error_types)
     if page = @error_handlers[500]?
       render_page(ctx, page, failure)
     else

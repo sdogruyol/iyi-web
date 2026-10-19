@@ -43,12 +43,13 @@ import iyi_web/intake::{Intake, TooLarge, HeadTooLarge}
 import iyi_web/response::{Response}
 import iyi_web/config::{Config}
 import iyi_web/http_date::*
-import iyi_web/failure::{render_failure_page}
+import iyi_web/failure::{render_error_type_page, render_failure_page}
 
 pub class Server
   @handler : Handler
   @config : Config
   @error_pages : Hash(Int32, Proc(Context, Error, String))
+  @error_types : Hash(String, Proc(Context, Error, String?))
   @socket : IyiSocket?
   @in_flight : Int32
   @host : String
@@ -62,9 +63,13 @@ pub class Server
   @date_at : Int64
   @date_value : String
 
-  # *error_pages* are the application's `error` handlers; the one for 500
-  # renders the page a panicking request gets, told the `Panicked`.
-  def initialize(@handler : Handler, @config : Config, @error_pages : Hash(Int32, Proc(Context, Error, String)) = {} of Int32 => Proc(Context, Error, String))
+  # *error_pages* are the application's `error` handlers for statuses, and
+  # *error_types* its `error` handlers for error types (`Router`'s
+  # `error_handlers` and `error_type_handlers`). A panicking request gets
+  # the first type page that takes its `Panicked`, else the 500 page.
+  def initialize(@handler : Handler, @config : Config,
+                 @error_pages : Hash(Int32, Proc(Context, Error, String)) = {} of Int32 => Proc(Context, Error, String),
+                 @error_types : Hash(String, Proc(Context, Error, String?)) = {} of String => Proc(Context, Error, String?))
     @socket = nil
     @in_flight = 0
     @host = "127.0.0.1"
@@ -394,13 +399,19 @@ pub class Server
 
   # The handler panicked before its response went out. The response is
   # rebuilt from nothing: whatever the handler had written is not a page
-  # anyone meant to send. The application's `error 500` page is used when
-  # it renders; it is application code, so it may panic too, and then the
-  # built-in page is sent instead.
+  # anyone meant to send. The first `error` page for a type that takes the
+  # `Panicked` is used, as a 500 unless it sets another status; then the
+  # application's `error 500` page. Either is application code, so it may
+  # panic too, and then the next one is tried, down to the built-in page.
   private def answer_panic(client : IyiSocket, ctx : Context, started : Span, failure : Panicked) : Nil
     request = ctx.request
     rendered = false
-    if page = @error_pages[500]?
+    unless @error_types.empty?
+      prepare_500(ctx)
+      isolated { rendered = render_error_type_page(ctx, failure, @error_types) }
+    end
+    page = @error_pages[500]?
+    if page && !rendered
       body = ""
       prepare_500(ctx)
       page_failed = isolated { body = page.call(ctx, failure) }

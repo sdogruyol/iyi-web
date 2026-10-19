@@ -26,6 +26,21 @@ impl Error for StatusError
   end
 end
 
+# Renders the first of *pages* - `error` pages for error types, keyed by
+# type name in registration order - that takes *failure*'s type. False
+# when none does. A page answers nil for an error of another type; one it
+# takes answers its body, or writes it with a helper and answers "". The
+# caller sets the status and clears the body first.
+pub def render_error_type_page(ctx : Context, failure : Error, pages : Hash(String, Proc(Context, Error, String?))) : Bool
+  pages.each_value do |page|
+    if body = page.call(ctx, failure)
+      ctx.response.set_body(body) unless body.empty?
+      return true
+    end
+  end
+  false
+end
+
 # Writes the built-in page for a failure no `error` handler answered: a
 # panic, or an error a route returned. *message* reaches the client only
 # when *show* is set, and then the page is locked down so a message that

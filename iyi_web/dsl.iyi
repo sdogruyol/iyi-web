@@ -290,7 +290,7 @@ private def start(port : Int32 | Nil) : Nil
   cfg = config
   cfg.port = port if port
 
-  server = Server.new(handler_chain, cfg, app.error_handlers)
+  server = Server.new(handler_chain, cfg, app.error_handlers, app.error_type_handlers)
   address = ""
   if path = cfg.unix_socket
     server.bind_unix(path)
