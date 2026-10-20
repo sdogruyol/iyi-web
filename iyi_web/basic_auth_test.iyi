@@ -1,0 +1,134 @@
+# Basic auth: the challenge on every refusal, the user name for the route on
+# success, and no panic on credentials that are not base64.
+module iyi_web/basic_auth_test
+
+import std/base64::{Base64}
+import iyi_web/basic_auth::{BasicAuthHandler, basic_credentials}
+import iyi_web/handler::{Handler, chain}
+import iyi_web/request::{Request}
+import iyi_web/harness::*
+import iyi_web/spec::*
+
+def guarded(handler : Handler) : Handler
+  chain([handler, routes { |r|
+    r.get "/admin" do |env|
+      "hello " + env.get("basic_auth.username").to_s
+    end
+    r.get "/public" do |env|
+      "open"
+    end
+  }])
+end
+
+def fixed_app : Handler
+  guarded(BasicAuthHandler.new("admin", "pa:ss word", realm: "Admin \"area\""))
+end
+
+def authorized(path : String, header : String) : Request
+  req = http_request("GET", path)
+  req.headers["Authorization"] = header
+  req
+end
+
+def basic(user_pass : String) : String
+  "Basic " + Base64.encode(user_pass)
+end
+
+describe "BasicAuthHandler" do
+  it "challenges a request without credentials" do
+    ctx = dispatch(fixed_app, "GET", "/admin")
+    assert ctx.response.status_code == 401
+    assert ctx.response.body == "Unauthorized"
+    assert ctx.response.headers["WWW-Authenticate"] == "Basic realm=\"Admin \\\"area\\\"\", charset=\"UTF-8\""
+  end
+
+  it "lets the right credentials through and stores the user name" do
+    ctx = dispatch(fixed_app, authorized("/admin", basic("admin:pa:ss word")))
+    assert ctx.response.status_code == 200
+    assert ctx.response.body == "hello admin"
+    assert ctx.get("basic_auth.username") == "admin"
+    assert !ctx.response.headers.has_key?("WWW-Authenticate")
+  end
+
+  it "takes the scheme in any case" do
+    ctx = dispatch(fixed_app, authorized("/admin", "bAsIc " + Base64.encode("admin:pa:ss word")))
+    assert ctx.response.status_code == 200
+  end
+
+  it "refuses a wrong password, a wrong user and a prefix of the password" do
+    ["admin:wrong", "root:pa:ss word", "admin:pa:ss", "admin:pa:ss word!", "admin:", ":pa:ss word"].each do |pair|
+      ctx = dispatch(fixed_app, authorized("/admin", basic(pair)))
+      assert ctx.response.status_code == 401, pair
+      assert ctx.response.body == "Unauthorized"
+      assert ctx.get?("basic_auth.username").nil?
+    end
+  end
+
+  it "answers 401, not a panic, for credentials that are not base64" do
+    ["Basic !!!notbase64", "Basic YWRtaW46cGFzcw=x", "Basic Q", "Basic YW=JD", "Basic YQ===", "Basic ", "Basic", "Basic YWRt aW46", "Basic YWRtaW4tcGFzcw"].each do |header|
+      ctx = dispatch(fixed_app, authorized("/admin", header))
+      assert ctx.response.status_code == 401, header
+      assert ctx.response.headers.has_key?("WWW-Authenticate")
+    end
+  end
+
+  it "refuses another scheme" do
+    ctx = dispatch(fixed_app, authorized("/admin", "Bearer " + Base64.encode("admin:pa:ss word")))
+    assert ctx.response.status_code == 401
+  end
+
+  it "asks the verifier block when given one" do
+    seen = [] of String
+    handler = guarded(BasicAuthHandler.new(realm: "API") { |user, password|
+      seen << user + "/" + password
+      user == "ada" && password == "lovelace"
+    })
+    ok = dispatch(handler, authorized("/admin", basic("ada:lovelace")))
+    assert ok.response.body == "hello ada"
+    bad = dispatch(handler, authorized("/admin", basic("ada:babbage")))
+    assert bad.response.status_code == 401
+    assert bad.response.headers["WWW-Authenticate"] == "Basic realm=\"API\", charset=\"UTF-8\""
+    assert seen == ["ada/lovelace", "ada/babbage"]
+  end
+
+  it "guards only the paths it is for" do
+    handler = BasicAuthHandler.new("admin", "secret")
+    handler.only ["/admin"]
+    app = guarded(handler)
+    assert dispatch(app, "GET", "/public").response.body == "open"
+    assert dispatch(app, "GET", "/admin").response.status_code == 401
+  end
+
+  it "skips excluded paths" do
+    handler = BasicAuthHandler.new("admin", "secret")
+    handler.exclude ["/public"]
+    app = guarded(handler)
+    assert dispatch(app, "GET", "/public").response.body == "open"
+    assert dispatch(app, "GET", "/admin").response.status_code == 401
+  end
+
+  it "refuses a realm no header can carry" do
+    assert panics? { BasicAuthHandler.new("a", "b", realm: "bad\r\nrealm") }
+  end
+end
+
+describe "basic_credentials" do
+  it "splits at the first colon only" do
+    found = basic_credentials("Basic " + Base64.encode("user:a:b"))
+    assert !found.nil?
+    if found
+      assert found[0] == "user"
+      assert found[1] == "a:b"
+    end
+  end
+
+  it "accepts unpadded base64" do
+    found = basic_credentials("Basic YWRtaW46cGFzcw")
+    assert !found.nil? && found[1] == "pass"
+  end
+
+  it "is nil without a colon or a header" do
+    assert basic_credentials("Basic " + Base64.encode("nocolon")).nil?
+    assert basic_credentials(nil).nil?
+  end
+end

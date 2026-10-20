@@ -1,0 +1,144 @@
+# HTTP Basic authentication (RFC 7617), kemal-basic-auth's handler. A
+# request without `Authorization: Basic <credentials>`, with credentials
+# that are not base64 of `user:password`, or with ones the handler does
+# not accept is answered 401 with a `WWW-Authenticate` challenge, and the
+# chain stops there. An accepted request goes on with the user name stored
+# in the context under "basic_auth.username":
+#
+#   use BasicAuthHandler.new("admin", "s3cret", realm: "Admin")
+#   get "/admin" do |env|
+#     "Hello, " + env.get("basic_auth.username").to_s
+#   end
+#
+# The fixed form compares SHA-256 digests of what was sent and what is
+# expected with `Subtle.constant_time_compare`, and always compares both
+# name and password, so neither the time taken nor which half was wrong
+# says how close a guess came. The verifier form hands both halves to the
+# application's block, which owns that concern (`std/password` hashes do).
+#
+# Kemal's handler guards every path and is narrowed by subclassing; here
+# `only` and `exclude` narrow it. Basic credentials are a password on
+# every request: serve them over TLS.
+#
+# Not in the default stack: `use BasicAuthHandler.new(...)`.
+module iyi_web/basic_auth
+
+import std/base64::{Base64}
+import std/crypto::{Subtle}
+import std/digest::{SHA256}
+import iyi_web/handler::{Handler}
+import iyi_web/context::{Context}
+
+pub class BasicAuthHandler < Handler
+  @realm : String
+  @verifier : Proc(String, String, Bool)
+  @challenge : String
+
+  # One fixed user.
+  def initialize(username : String, password : String, @realm : String = "Restricted")
+    super()
+    user_digest = SHA256.hash_bytes(username)
+    password_digest = SHA256.hash_bytes(password)
+    @verifier = ->(user : String, pass : String) {
+      # Both halves are compared whatever the first one answered.
+      user_ok = Subtle.constant_time_compare(SHA256.hash_bytes(user), user_digest)
+      pass_ok = Subtle.constant_time_compare(SHA256.hash_bytes(pass), password_digest)
+      user_ok && pass_ok
+    }
+    @challenge = challenge_for(@realm)
+  end
+
+  # Whatever the block accepts: `{ |user, password| USERS.check(user, password) }`.
+  def initialize(@realm : String = "Restricted", &block : String, String -> Bool)
+    super()
+    @verifier = block
+    @challenge = challenge_for(@realm)
+  end
+
+  pub def realm : String
+    @realm
+  end
+
+  pub def call(ctx : Context) : Nil
+    return call_next(ctx) unless applies?(ctx)
+    credentials = basic_credentials(ctx.request.headers["Authorization"]?)
+    if credentials && @verifier.call(credentials[0], credentials[1])
+      ctx.set("basic_auth.username", credentials[0])
+      call_next(ctx)
+    else
+      ctx.response.headers["WWW-Authenticate"] = @challenge
+      ctx.response.content_type = "text/plain; charset=utf-8"
+      ctx.halt(401, "Unauthorized")
+    end
+  end
+
+  # `Basic realm="...", charset="UTF-8"`, the realm a quoted-string
+  # (RFC 9110 5.6.4): a quote or backslash in it is escaped, and a control
+  # character, which no header may carry, is refused when the handler is
+  # made rather than on the first request.
+  private def challenge_for(realm : String) : String
+    escaped = ""
+    realm.each_char do |char|
+      raise "invalid basic auth realm #{realm.inspect}: control characters are not allowed" if char.ord < 0x20 || char.ord == 0x7f
+      escaped = escaped + "\\" if char == '"' || char == '\\'
+      escaped = escaped + char.to_s
+    end
+    "Basic realm=\"" + escaped + "\", charset=\"UTF-8\""
+  end
+end
+
+# The user name and password an `Authorization` header carries, or nil
+# when it is not Basic credentials: another scheme, no credentials, text
+# that is not base64 - checked here, since `Base64.decode` panics on it -
+# or a decoded value without the `:` that ends the user name (RFC 7617
+# 2: the user name cannot hold one; the password may).
+pub def basic_credentials(header : String?) : Tuple(String, String)?
+  return nil unless header
+  value = header.strip
+  space = value.index(' ')
+  return nil unless space
+  return nil unless value[0, space].downcase == "basic"
+  encoded = value[space + 1, value.bytesize - space - 1].strip
+  return nil unless strict_base64?(encoded)
+  decoded = Base64.decode(encoded)
+  colon = decoded.index(':')
+  return nil unless colon
+  {decoded[0, colon], decoded[colon + 1, decoded.bytesize - colon - 1]}
+end
+
+# The standard alphabet, padded or not, and nothing `Base64.decode` would
+# refuse: no whitespace or URL-safe characters inside, padding only at the
+# end and only as much as the last group needs, and no last group of one
+# character, which cannot encode a byte.
+private def strict_base64?(text : String) : Bool
+  size = text.bytesize
+  return false if size == 0
+  bytes = text.to_unsafe
+  data = size
+  while data > 0 && bytes[data - 1] == 61_u8
+    data = data - 1
+  end
+  pads = size - data
+  index = 0
+  while index < data
+    return false unless base64_byte?(bytes[index])
+    index = index + 1
+  end
+  case data % 4
+  when 0
+    pads == 0
+  when 1
+    false
+  when 2
+    pads == 0 || pads == 2
+  else
+    pads == 0 || pads == 1
+  end
+end
+
+private def base64_byte?(byte : UInt8) : Bool
+  return true if byte >= 65_u8 && byte <= 90_u8
+  return true if byte >= 97_u8 && byte <= 122_u8
+  return true if byte >= 48_u8 && byte <= 57_u8
+  byte == 43_u8 || byte == 47_u8
+end

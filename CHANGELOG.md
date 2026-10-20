@@ -28,6 +28,11 @@ All notable changes to iyi-web are recorded here. The format follows
   `decode_base64url?` that answers nil, not a panic, for text a client sent.
 - `examples/sessions_and_csrf.iyi`: sign-in and sign-out in a session, and
   forms guarded by `CSRFHandler`.
+- `BasicAuthHandler` (new `iyi_web/basic_auth`), kemal-basic-auth: one fixed
+  user compared in constant time, or a verifier block; `401` with
+  `WWW-Authenticate: Basic realm="...", charset="UTF-8"` for missing,
+  refused or malformed credentials (base64 that does not decode is a `401`,
+  not a panic); the user name stored under `"basic_auth.username"`.
 - `Request#remote_address` (the client's IP, nil over a unix socket) and
   `Request#tls?`, filled in by the server.
 - `Handler#applies?`: `only` and `exclude` together, an empty `only`
