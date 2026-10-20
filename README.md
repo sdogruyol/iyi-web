@@ -34,7 +34,7 @@ a route returns is checked when the program compiles.
 - Static files with `ETag`, `304 Not Modified`, byte ranges, gzip at any size
   and precompressed `.gz` copies, streamed from disk
 - File downloads, cookies, redirects and early responses with `halt`
-- Encrypted cookie sessions with secret rotation
+- Encrypted cookie sessions with secret rotation, and CSRF protection
 - Response compression, CORS and HTML form method override
 - Templates with layouts, compiled into the program
 - Command-line flags for host, port and TLS
@@ -768,6 +768,36 @@ streams calls `save_session(env)` before its first `env.response.flush`; a
 change made after the headers went out cannot reach the client, and is
 reported on the error stream.
 
+### CSRF
+
+`CSRFHandler`, kemal-csrf's equivalent, keeps a random token in the session
+and refuses with `403` every `POST`, `PUT`, `PATCH`, `DELETE` and other
+unsafe request that does not send it back in the `authenticity_token` form
+field or the `X-CSRF-Token` header. `GET`, `HEAD`, `OPTIONS`, `TRACE` and
+`QUERY` pass. It needs a `SessionHandler` before it.
+
+```iyi
+import web/iyi_web/session::{SessionHandler}
+import web/iyi_web/csrf::{CSRFHandler, csrf_tag}
+
+use SessionHandler.new(secret)
+csrf = CSRFHandler.new
+csrf.exclude ["/api/*"], "*"
+use csrf
+
+get "/note" do |env|
+  "<form method='post'>" + csrf_tag(env) + "<input name='note'><button>Save</button></form>"
+end
+```
+
+`csrf_tag(env)` is a hidden input holding the token; `csrf_token(env)` is the
+token alone, for a script to send in the header. Each call masks the token
+with fresh random bytes, so no two pages carry the same string and a
+compressed response does not give it away. `CSRFHandler.new` takes `field`,
+`header` and the refusal's `message` (default `"Forbidden (CSRF)"`). `only`
+and `exclude` choose the requests it checks; their method defaults to `GET`,
+which is never checked, so name the method or `"*"`.
+
 ## Middleware
 
 Requests pass through request logging, static files, the middleware added with
@@ -793,6 +823,7 @@ before request logging.
 | `CORSHandler` | `web/iyi_web/cors` | Sets `Access-Control-Allow-Origin` and answers preflight requests with `204`. Takes `origin` (default `*`), `methods`, `headers` (default `*`) and `max_age` (seconds as a string, default `"86400"`). |
 | `OverrideMethodHandler` | `web/iyi_web/override` | Treats a form `POST` with `_method` set to `PUT`, `PATCH` or `DELETE` as that method. |
 | `SessionHandler` | `web/iyi_web/session` | Keeps an encrypted session in a cookie. See [Sessions](#sessions). |
+| `CSRFHandler` | `web/iyi_web/csrf` | Refuses unsafe requests without the session's CSRF token with `403`. See [CSRF](#csrf). |
 | `LogHandler` | `web/iyi_web/log` | Writes one line per request to `config.logger`. Added by default; `logging false` removes it. |
 | `StaticHandler` | `web/iyi_web/static` | Serves the public folder. Added by default; `serve_static false` removes it. |
 
@@ -1145,6 +1176,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/log` | `LogHandler`, `Logger`, `StdoutLogger` |
 | `web/iyi_web/harness` | `http_request`, `form_request`, `dispatch`, `routes` |
 | `web/iyi_web/session` | `SessionHandler`, `Session`, `session`, `save_session` |
+| `web/iyi_web/csrf` | `CSRFHandler`, `csrf_token`, `csrf_tag` |
 | `web/iyi_web/token` | `random_hex`, `random_bytes`, `encode_base64url`, `decode_base64url?`: random tokens nobody can guess, and base64url for carrying them |
 
 ## Examples
@@ -1170,6 +1202,7 @@ iyi run examples/json_api.iyi -- -p 8080
 | `streaming_and_sse.iyi` | `flush`, chunked responses and server-sent events |
 | `websocket_chat.iyi` | A chat room over `ws`, broadcasting to every member |
 | `cookies_and_context.iyi` | Cookies, redirects and `env.set` / `env.get`, with a value of the application's own type |
+| `sessions_and_csrf.iyi` | Sign-in and sign-out with an encrypted cookie session, and forms guarded by `CSRFHandler` |
 | `testing.iyi` | Routes in their own module, tested in-process by `testing_test.iyi` |
 
 Each file's opening comment lists `curl` commands to try. `iyi test examples`

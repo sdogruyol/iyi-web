@@ -1,0 +1,194 @@
+# CSRF: an unsafe request passes only with its session's token, from the
+# form or the header; safe methods and excluded paths pass without one.
+module iyi_web/csrf_test
+
+import iyi_web/csrf::*
+import iyi_web/session::{SessionHandler, session}
+import iyi_web/handler::{chain, Handler}
+import iyi_web/request::{Request}
+import iyi_web/harness::*
+import iyi_web/spec::*
+
+SECRET = "0123456789abcdef0123456789abcdef"
+NAME = "iyi_web.session"
+
+def csrf_app(csrf : CSRFHandler) : Handler
+  chain([SessionHandler.new(SECRET), csrf, routes { |r|
+    r.get "/form" do |env|
+      csrf_tag(env)
+    end
+    r.get "/token" do |env|
+      csrf_token(env)
+    end
+    r.get "/submit" do |env|
+      "read"
+    end
+    r.post "/submit" do |env|
+      "accepted"
+    end
+    r.put "/submit" do |env|
+      "accepted"
+    end
+    r.delete "/submit" do |env|
+      "accepted"
+    end
+    r.post "/api/hook" do |env|
+      "hook"
+    end
+  }])
+end
+
+def csrf_app : Handler
+  csrf_app(CSRFHandler.new)
+end
+
+def session_cookie(ctx) : String?
+  found = nil
+  ctx.response.headers.each do |name, value|
+    if name.downcase == "set-cookie" && value.starts_with?(NAME + "=")
+      ending = value.index(';') || value.bytesize
+      found = value[NAME.bytesize + 1, ending - NAME.bytesize - 1]
+    end
+  end
+  found
+end
+
+# A session that holds a token, and a token masked for it.
+def session_and_token(app : Handler) : Tuple(String, String)
+  ctx = dispatch(app, "GET", "/token")
+  cookie = session_cookie(ctx) || ""
+  assert !cookie.empty?
+  {cookie, ctx.response.body}
+end
+
+def with_cookie(request : Request, cookie : String) : Request
+  request.headers["Cookie"] = NAME + "=" + cookie
+  request
+end
+
+def form_post(cookie : String, body : String, method : String = "POST", path : String = "/submit") : Request
+  with_cookie(form_request(method, path, body), cookie)
+end
+
+describe "CSRFHandler" do
+  it "lets safe methods through without a token" do
+    assert dispatch(csrf_app, "GET", "/submit").response.body == "read"
+    assert dispatch(csrf_app, "HEAD", "/submit").response.status_code != 403
+    assert dispatch(csrf_app, "OPTIONS", "/submit").response.status_code != 403
+  end
+
+  it "refuses an unsafe request with no token" do
+    app = csrf_app
+    pair = session_and_token(app)
+    ctx = dispatch(app, form_post(pair[0], "name=ada"))
+    assert ctx.response.status_code == 403
+    assert ctx.response.body != "accepted"
+    # Nor with no session at all.
+    assert dispatch(app, "POST", "/submit").response.status_code == 403
+    assert dispatch(app, "DELETE", "/submit").response.status_code == 403
+  end
+
+  it "accepts the session's token from the form" do
+    app = csrf_app
+    pair = session_and_token(app)
+    ctx = dispatch(app, form_post(pair[0], "name=ada&authenticity_token=" + pair[1]))
+    assert ctx.response.status_code == 200
+    assert ctx.response.body == "accepted"
+  end
+
+  it "accepts the session's token from the header" do
+    app = csrf_app
+    pair = session_and_token(app)
+    request = with_cookie(http_request("PUT", "/submit"), pair[0])
+    request.headers["X-CSRF-Token"] = pair[1]
+    assert dispatch(app, request).response.body == "accepted"
+  end
+
+  it "masks the token afresh, and accepts every mask" do
+    app = csrf_app
+    pair = session_and_token(app)
+    again = dispatch(app, with_cookie(http_request("GET", "/token"), pair[0]))
+    second = again.response.body
+    assert second != pair[1]
+    # The session already held its token: no new cookie.
+    assert session_cookie(again).nil?
+    assert dispatch(app, form_post(pair[0], "authenticity_token=" + second)).response.body == "accepted"
+  end
+
+  it "refuses another session's token" do
+    app = csrf_app
+    mine = session_and_token(app)
+    theirs = session_and_token(app)
+    ctx = dispatch(app, form_post(mine[0], "authenticity_token=" + theirs[1]))
+    assert ctx.response.status_code == 403
+  end
+
+  it "refuses an altered or malformed token" do
+    app = csrf_app
+    pair = session_and_token(app)
+    token = pair[1]
+    last = token[token.bytesize - 2, 1] == "A" ? "B" : "A"
+    altered = token[0, token.bytesize - 2] + last + token[token.bytesize - 1, 1]
+    assert dispatch(app, form_post(pair[0], "authenticity_token=" + altered)).response.status_code == 403
+    assert dispatch(app, form_post(pair[0], "authenticity_token=" + token[0, 43])).response.status_code == 403
+    assert dispatch(app, form_post(pair[0], "authenticity_token=%00%FF!!")).response.status_code == 403
+    assert dispatch(app, form_post(pair[0], "authenticity_token=")).response.status_code == 403
+    # The session's own token, unmasked, is not a token a page was given.
+    stored = session(dispatch(app, with_cookie(http_request("GET", "/submit"), pair[0])))[CSRF_SESSION_KEY]
+    assert dispatch(app, form_post(pair[0], "authenticity_token=" + stored)).response.status_code == 403
+  end
+
+  it "refuses a wrong header even beside a right form field" do
+    app = csrf_app
+    pair = session_and_token(app)
+    request = form_post(pair[0], "authenticity_token=" + pair[1])
+    request.headers["X-CSRF-Token"] = "wrong"
+    assert dispatch(app, request).response.status_code == 403
+  end
+
+  it "skips paths left out with exclude" do
+    csrf = CSRFHandler.new
+    csrf.exclude ["/api/*"], "*"
+    app = csrf_app(csrf)
+    assert dispatch(app, "POST", "/api/hook").response.body == "hook"
+    assert dispatch(app, "POST", "/submit").response.status_code == 403
+  end
+
+  it "checks only the paths given with only" do
+    csrf = CSRFHandler.new
+    csrf.only ["/submit"], "*"
+    app = csrf_app(csrf)
+    assert dispatch(app, "POST", "/api/hook").response.body == "hook"
+    assert dispatch(app, "POST", "/submit").response.status_code == 403
+  end
+
+  it "reads the field and header names it is given" do
+    app = csrf_app(CSRFHandler.new(field: "_csrf", header: "X-XSRF-Token"))
+    pair = session_and_token(app)
+    assert dispatch(app, form_post(pair[0], "_csrf=" + pair[1])).response.body == "accepted"
+    assert dispatch(app, form_post(pair[0], "authenticity_token=" + pair[1])).response.status_code == 403
+    request = with_cookie(http_request("DELETE", "/submit"), pair[0])
+    request.headers["X-XSRF-Token"] = pair[1]
+    assert dispatch(app, request).response.body == "accepted"
+  end
+end
+
+describe "csrf_tag" do
+  it "is a hidden input holding a token the handler accepts" do
+    app = csrf_app
+    ctx = dispatch(app, "GET", "/form")
+    tag = ctx.response.body
+    assert tag.starts_with?("<input type=\"hidden\" name=\"authenticity_token\" value=\"")
+    assert tag.ends_with?("\">")
+    start = (tag.index("value=\"") || 0) + 7
+    token = tag[start, tag.bytesize - start - 2]
+    cookie = session_cookie(ctx) || ""
+    assert !cookie.empty?
+    assert dispatch(app, form_post(cookie, "authenticity_token=" + token)).response.body == "accepted"
+  end
+
+  it "escapes the field name" do
+    tag = dispatch(csrf_app(CSRFHandler.new(field: "a\"><b")), "GET", "/form").response.body
+    assert tag.includes?("name=\"a&quot;&gt;&lt;b\"")
+  end
+end

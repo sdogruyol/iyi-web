@@ -19,8 +19,15 @@ All notable changes to iyi-web are recorded here. The format follows
   changed and deleted when it is cleared; one over 4096 bytes is refused.
   `regenerate` gives a new id, `set`/`json?` keep any JSON value, and
   `save_session(env)` writes the cookie before a streamed response flushes.
+- CSRF protection, kemal-csrf (new `iyi_web/csrf`): `CSRFHandler` refuses
+  unsafe requests without the session's token in the `authenticity_token`
+  field or the `X-CSRF-Token` header with `403`, compared in constant time;
+  `only`/`exclude` let an API opt out. `csrf_tag(env)` and `csrf_token(env)`
+  hand the token out masked afresh on each call, against BREACH.
 - `iyi_web/token`: `random_bytes`, `encode_base64url` and a
   `decode_base64url?` that answers nil, not a panic, for text a client sent.
+- `examples/sessions_and_csrf.iyi`: sign-in and sign-out in a session, and
+  forms guarded by `CSRFHandler`.
 - `Request#remote_address` (the client's IP, nil over a unix socket) and
   `Request#tls?`, filled in by the server.
 - `Handler#applies?`: `only` and `exclude` together, an empty `only`

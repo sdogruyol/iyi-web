@@ -1,0 +1,123 @@
+# Cross-site request forgery protection, Kemal's kemal-csrf. A page from
+# another site can make the browser POST here with this site's cookies; it
+# cannot read a page of this site, so it cannot know the token one carries.
+# `CSRFHandler` keeps a random token in the session, and refuses with 403
+# a request of an unsafe method - POST, PUT, PATCH, DELETE and anything
+# else that is not GET, HEAD, OPTIONS, TRACE or QUERY - that does not send
+# it back in the form field `authenticity_token` or the `X-CSRF-Token`
+# header. Needs a `SessionHandler` before it in the chain:
+#
+#   use SessionHandler.new(secret)
+#   use CSRFHandler.new
+#
+#   get "/post" do |env|
+#     "<form method='post'>" + csrf_tag(env) + "<button>Send</button></form>"
+#   end
+#
+# `only` and `exclude` choose the requests it checks, as for any handler;
+# their method defaults to GET, which this never checks, so name the method
+# or `"*"`: `exclude ["/api/*"], "*"` for an API that authenticates with a
+# bearer token rather than a cookie, and so has nothing to forge.
+#
+# The token a page carries is masked as Rails masks it: 32 fresh random
+# bytes and the session's token XORed with them. Every page gets different
+# bytes for the same token, so a compressed response (BREACH) gives away
+# nothing about it by its length. The comparison takes the same time
+# whichever byte differs.
+module iyi_web/csrf
+
+import std/crypto::{Subtle}
+import std/html::{HTML}
+import iyi_web/handler::{Handler}
+import iyi_web/context::{Context}
+import iyi_web/session::{session}
+import iyi_web/token::{random_bytes, encode_base64url, decode_base64url?}
+
+# The session key the token is kept under.
+pub CSRF_SESSION_KEY = "_csrf_token"
+
+# Where `CSRFHandler` leaves its field name for `csrf_tag`.
+CSRF_FIELD_KEY = "iyi_web.csrf_field"
+
+TOKEN_SIZE = 32
+
+pub class CSRFHandler < Handler
+  @field : String
+  @header : String
+  @message : String
+
+  def initialize(@field : String = "authenticity_token", @header : String = "X-CSRF-Token", @message : String = "Forbidden (CSRF)")
+    super()
+  end
+
+  pub def call(ctx : Context) : Nil
+    ctx[CSRF_FIELD_KEY] = @field
+    if safe_method?(ctx.request.method) || !applies?(ctx) || valid?(ctx)
+      call_next(ctx)
+    else
+      ctx.halt(403, @message)
+    end
+  end
+
+  # GET, HEAD, OPTIONS and TRACE (RFC 9110 §9.2.1), and QUERY, which its
+  # draft defines as safe: none of them is meant to change anything, so a
+  # forged one has nothing to gain.
+  private def safe_method?(method : String) : Bool
+    method.in?("GET", "HEAD", "OPTIONS", "TRACE", "QUERY")
+  end
+
+  # The header when the request sends one, else the form field: a script
+  # sends the header, a form the field.
+  private def valid?(ctx : Context) : Bool
+    expected = session(ctx)[CSRF_SESSION_KEY]?
+    return false unless expected
+    sent = ctx.request.headers[@header]? || ctx.params.body[@field]?
+    return false unless sent
+    token = unmask(sent)
+    secret = decode_base64url?(expected)
+    return false unless token && secret
+    Subtle.constant_time_compare(token, secret)
+  end
+end
+
+# A token for a form or a script to send back, masked afresh on every call.
+# The first call of a session makes the session's token, which sets the
+# session cookie.
+pub def csrf_token(env : Context) : String
+  current = session(env)
+  stored = current[CSRF_SESSION_KEY]?
+  secret = stored ? decode_base64url?(stored) : nil
+  unless secret && secret.bytesize == TOKEN_SIZE
+    secret = random_bytes(TOKEN_SIZE)
+    current[CSRF_SESSION_KEY] = encode_base64url(secret)
+  end
+  pad = random_bytes(TOKEN_SIZE)
+  encode_base64url(pad + xor(pad, secret))
+end
+
+# `<input type="hidden" name="authenticity_token" value="…">`, under the
+# field name the request's `CSRFHandler` reads.
+pub def csrf_tag(env : Context) : String
+  field = env[CSRF_FIELD_KEY]? || "authenticity_token"
+  "<input type=\"hidden\" name=\"" + HTML.escape(field) + "\" value=\"" + HTML.escape(csrf_token(env)) + "\">"
+end
+
+# The session's token behind a masked one, or nil for text that is not a
+# masked token at all.
+private def unmask(sent : String) : String?
+  bytes = decode_base64url?(sent)
+  return nil unless bytes && bytes.bytesize == TOKEN_SIZE * 2
+  xor(bytes[0, TOKEN_SIZE], bytes[TOKEN_SIZE, TOKEN_SIZE])
+end
+
+private def xor(a : String, b : String) : String
+  left = a.to_unsafe
+  right = b.to_unsafe
+  String.new(a.bytesize) do |target|
+    index = 0
+    while index < a.bytesize
+      target[index] = left[index] ^ right[index]
+      index = index + 1
+    end
+  end
+end

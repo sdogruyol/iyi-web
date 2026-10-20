@@ -1,0 +1,110 @@
+# Sign-in and sign-out kept in an encrypted cookie session, and forms that
+# CSRF protection guards. Run from the repository root with
+# `iyi run examples/sessions_and_csrf.iyi`; set SESSION_SECRET (32 bytes or
+# more) to keep sessions across restarts.
+#
+#   curl -c jar localhost:3000/
+#   TOKEN=$(curl -s -b jar -c jar localhost:3000/token)
+#   curl -i -b jar -c jar -d "name=Ada&authenticity_token=$TOKEN" localhost:3000/sign-in
+#   curl -b jar localhost:3000/
+#   curl -i -b jar -c jar -d 'note=milk' localhost:3000/notes
+#   curl -i -b jar -c jar -H "X-CSRF-Token: $TOKEN" -d 'note=milk' localhost:3000/notes
+#   curl -i -d 'ping=1' localhost:3000/api/ping
+#   curl -i -b jar -c jar -d "authenticity_token=$TOKEN" localhost:3000/sign-out
+#
+# The note without a token is refused with 403; the API route is left out
+# of CSRF checks and takes a POST without one.
+module examples/sessions_and_csrf
+
+import std/html::{HTML}
+import iyi_web/dsl::*
+import iyi_web/context::{Context}
+import iyi_web/session::{SessionHandler, session}
+import iyi_web/csrf::{CSRFHandler, csrf_tag, csrf_token}
+import iyi_web/token::{random_hex}
+
+# A secret made at start-up signs everyone out when the program restarts;
+# a deployment reads its own from the environment. Behind HTTPS, add
+# `secure: true`.
+secret = Program.env("SESSION_SECRET") || random_hex(32)
+use SessionHandler.new(secret, max_age: 7 * 86400)
+
+# An API that authenticates without cookies has nothing a forged request
+# could ride on, so it is left out. The method is `"*"`: `exclude` names GET
+# by default, which CSRF never checks.
+csrf = CSRFHandler.new
+csrf.exclude ["/api/*"], "*"
+use csrf
+
+def page(title : String, content : String) : String
+  "<!doctype html><title>" + title + "</title><h1>" + title + "</h1>" + content
+end
+
+def notes_of(env : Context) : Array(String)
+  notes = [] of String
+  if held = session(env).json?("notes")
+    if items = held.as_a?
+      items.each do |item|
+        if text = item.as_s?
+          notes << text
+        end
+      end
+    end
+  end
+  notes
+end
+
+get "/" do |env|
+  if user = session(env)["user"]?
+    items = notes_of(env).map { |note| "<li>" + HTML.escape(note) + "</li>" }.join
+    env.html page("Signed in as " + HTML.escape(user),
+      "<ul>" + items + "</ul>" +
+      "<form method='post' action='/notes'>" + csrf_tag(env) + "<input name='note'><button>Add note</button></form>" +
+      "<form method='post' action='/sign-out'>" + csrf_tag(env) + "<button>Sign out</button></form>")
+  else
+    env.html page("Sign in",
+      "<form method='post' action='/sign-in'>" + csrf_tag(env) + "<input name='name'><button>Sign in</button></form>")
+  end
+end
+
+# The token for a script, which sends it back in `X-CSRF-Token`.
+get "/token" do |env|
+  csrf_token(env)
+end
+
+post "/sign-in" do |env|
+  name = env.params.body["name"]? || ""
+  if name.empty?
+    env.halt(422, "A name is required")
+  else
+    # A new id at sign-in: whatever id the session had before is not the
+    # signed-in one.
+    session(env).regenerate
+    session(env)["user"] = name
+    env.redirect("/", 303)
+  end
+end
+
+# Values other than strings are kept as the JSON they become.
+post "/notes" do |env|
+  if session(env)["user"]?
+    notes = notes_of(env)
+    notes << (env.params.body["note"]? || "")
+    session(env).set("notes", notes)
+    env.redirect("/", 303)
+  else
+    env.halt(401, "Sign in first")
+  end
+end
+
+# Clearing the session deletes the cookie, and the CSRF token with it.
+post "/sign-out" do |env|
+  session(env).clear
+  env.redirect("/", 303)
+end
+
+post "/api/ping" do |env|
+  "pong"
+end
+
+run

@@ -21,6 +21,7 @@ end
 
 # Session token => user. The cookie carries only an unguessable token:
 # `random_hex` draws from the operating system's entropy on every platform.
+# `examples/sessions_and_csrf.iyi` keeps the session in the cookie instead.
 SESSIONS = {} of String => User
 
 def new_token : String
