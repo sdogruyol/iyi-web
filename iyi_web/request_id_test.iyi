@@ -1,0 +1,117 @@
+# Request ids: a sane incoming id kept, a hostile one replaced, a new one a
+# fresh UUID each time, and the id on the response, in the context and in
+# the request log line.
+module iyi_web/request_id_test
+
+import std/uuid::{UUID}
+import iyi_web/request_id::{RequestIdHandler, acceptable_id?}
+import iyi_web/handler::{Handler, chain}
+import iyi_web/log::{LogHandler, Logger}
+import iyi_web/request::{Request}
+import iyi_web/harness::*
+import iyi_web/spec::*
+
+class Lines < Logger
+  property lines : Array(String)
+
+  def initialize
+    @lines = [] of String
+  end
+
+  pub def write(message : String) : Nil
+    @lines << message
+  end
+end
+
+def id_app(handler : RequestIdHandler) : Handler
+  chain([handler, routes { |r|
+    r.get "/" do |env|
+      "id " + env.get("request_id").to_s
+    end
+  }])
+end
+
+def with_id(value : String, header : String = "X-Request-Id") : Request
+  req = http_request("GET", "/")
+  req.headers[header] = value
+  req
+end
+
+def uuid?(text : String) : Bool
+  text.bytesize == 36 && UUID.parse(text).version == 4
+end
+
+describe "RequestIdHandler" do
+  it "generates a v4 UUID, echoes it and stores it" do
+    ctx = dispatch(id_app(RequestIdHandler.new), "GET", "/")
+    id = ctx.response.headers["X-Request-Id"]
+    assert uuid?(id)
+    assert ctx.get("request_id") == id
+    assert ctx.response.body == "id " + id
+  end
+
+  it "gives every request its own id" do
+    app = id_app(RequestIdHandler.new)
+    first = dispatch(app, "GET", "/").response.headers["X-Request-Id"]
+    second = dispatch(app, "GET", "/").response.headers["X-Request-Id"]
+    assert first != second
+  end
+
+  it "keeps a sane incoming id" do
+    ["abc-123", "7f3c2b9e-1d4a-4c8e-9b2f-0a1b2c3d4e5f", "Root=1-5759e988-bd862e3fe1be46a994272793", "svc.web:42@host/x+y", "a" * 128].each do |sent|
+      ctx = dispatch(id_app(RequestIdHandler.new), with_id(sent))
+      assert ctx.response.headers["X-Request-Id"] == sent, sent
+      assert ctx.get("request_id") == sent
+    end
+  end
+
+  it "replaces a hostile or oversized id rather than cleaning it" do
+    hostile = ["<script>alert(1)</script>", "abc def", "id\"quoted", "a" * 129, "", "caf\u{e9}", "id;rm -rf", "x\ty", "%0d%0aSet-Cookie"]
+    hostile.each do |sent|
+      ctx = dispatch(id_app(RequestIdHandler.new), with_id(sent))
+      got = ctx.response.headers["X-Request-Id"]
+      assert got != sent, sent
+      assert uuid?(got), sent
+    end
+  end
+
+  it "ignores the incoming id when told not to trust it" do
+    ctx = dispatch(id_app(RequestIdHandler.new(trust_incoming: false)), with_id("abc-123"))
+    assert uuid?(ctx.response.headers["X-Request-Id"])
+  end
+
+  it "reads and writes the header it is given, with its own length bound" do
+    app = id_app(RequestIdHandler.new(header: "X-Correlation-Id", max_length: 8))
+    kept = dispatch(app, with_id("12345678", "X-Correlation-Id"))
+    assert kept.response.headers["X-Correlation-Id"] == "12345678"
+    assert !kept.response.headers.has_key?("X-Request-Id")
+    replaced = dispatch(app, with_id("123456789", "X-Correlation-Id"))
+    assert uuid?(replaced.response.headers["X-Correlation-Id"])
+  end
+
+  it "puts the id on the request log line" do
+    lines = Lines.new
+    app = chain([LogHandler.new(lines), RequestIdHandler.new, routes { |r|
+      r.get "/" do |env|
+        "ok"
+      end
+    }])
+    dispatch(app, with_id("trace-7"))
+    assert lines.lines.size == 1
+    assert lines.lines[0].starts_with?("GET / 200 ")
+    assert lines.lines[0].ends_with?("ms trace-7")
+  end
+
+  it "refuses a header name no request can carry" do
+    assert panics? { RequestIdHandler.new(header: "X Request Id") }
+  end
+end
+
+describe "acceptable_id?" do
+  it "bounds the length both ways" do
+    assert !acceptable_id?("")
+    assert acceptable_id?("a")
+    assert acceptable_id?("abcd", 4)
+    assert !acceptable_id?("abcde", 4)
+  end
+end

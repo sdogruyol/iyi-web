@@ -39,10 +39,19 @@ All notable changes to iyi-web are recorded here. The format follows
   `Strict-Transport-Security` when given (HSTS only over TLS or behind
   `X-Forwarded-Proto: https`); each replaceable or left out with `nil`, set
   before the route so the route's own value wins.
+- `RequestIdHandler` (new `iyi_web/request_id`): keeps an incoming
+  `X-Request-Id` that is a short plain token, replaces any other with a
+  UUID v4, echoes it, stores it under `"request_id"`, and the request log
+  line ends with it.
 - `Request#remote_address` (the client's IP, nil over a unix socket) and
   `Request#tls?`, filled in by the server.
 - `Handler#applies?`: `only` and `exclude` together, an empty `only`
   meaning every request.
+
+### Changed
+
+- `request_log_line` takes an optional request id, which `Logger#request`
+  passes when `RequestIdHandler` stored one.
 
 ### Fixed
 

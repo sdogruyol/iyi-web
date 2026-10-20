@@ -15,9 +15,11 @@ import std/time::{Time, Span}
 
 pub abstract class Logger
   # One finished request. *ctx* carries the status that was sent; the
-  # default writes `request_log_line` through `write`.
+  # default writes `request_log_line` through `write`, with the id
+  # `RequestIdHandler` stored when one ran, wherever it sits in the chain.
   pub def request(ctx : Context, elapsed : Span) : Nil
-    write(request_log_line(ctx.request.method, ctx.request.path, ctx.response.status_code, elapsed))
+    id = ctx.get?("request_id")
+    write(request_log_line(ctx.request.method, ctx.request.path, ctx.response.status_code, elapsed, id.is_a?(String) ? id : nil))
   end
 
   # One line of text, without its newline.
@@ -44,7 +46,9 @@ pub class LogHandler < Handler
   end
 end
 
-# The one line format: `GET /users 200 1.234ms`.
-pub def request_log_line(method : String, path : String, status : Int32, elapsed : Span) : String
-  method + " " + path + " " + status.to_s + " " + elapsed.total_milliseconds.to_s + "ms"
+# The one line format: `GET /users 200 1.234ms`, and the request's id after
+# it when there is one: `GET /users 200 1.234ms 6f1c...`.
+pub def request_log_line(method : String, path : String, status : Int32, elapsed : Span, request_id : String? = nil) : String
+  line = method + " " + path + " " + status.to_s + " " + elapsed.total_milliseconds.to_s + "ms"
+  request_id ? line + " " + request_id : line
 end

@@ -1,0 +1,81 @@
+# A request id: one token per request that the response, the request log
+# and whatever the application logs can all be matched by. An id the
+# client or a proxy in front already sent in `X-Request-Id` is kept, so a
+# request can be followed across services; one that is not a plain token
+# is replaced, never trimmed or cleaned up, so nothing an attacker wrote
+# reaches a log line or a response header. A new id is a version 4 UUID.
+#
+# The id is stored in the context under "request_id", sent back in the
+# same header, and appended to the request log's line for the request
+# (`request_log_line`). It is set before the rest of the chain runs, so a
+# streamed response carries it too.
+#
+# Kemal has no built-in for this; Rails' `ActionDispatch::RequestId` keeps
+# an incoming id the same way, though it trims and cleans one it finds
+# hostile where this one replaces it.
+#
+# Not in the default stack: `use RequestIdHandler.new`.
+module iyi_web/request_id
+
+import std/uuid::{UUID}
+import iyi_web/handler::{Handler}
+import iyi_web/context::{Context}
+import iyi_web/headers::{Headers}
+
+pub class RequestIdHandler < Handler
+  @header : String
+  @max_length : Int32
+  @trust_incoming : Bool
+
+  # *header* is where the id is read and echoed. An incoming id is kept
+  # when *trust_incoming* is on and it has 1 to *max_length* bytes, every
+  # one a letter, a digit or one of `-`, `_`, `.`, `:`, `@`, `+`, `=`, `/`.
+  # Turn *trust_incoming* off when nothing in front of the application
+  # sets the header and clients should not choose their own ids.
+  def initialize(@header : String = "X-Request-Id", @max_length : Int32 = 128, @trust_incoming : Bool = true)
+    super()
+    raise "invalid request id header name #{@header.inspect}" unless Headers.valid_name?(@header)
+    raise "request id max_length must be at least 1" if @max_length < 1
+  end
+
+  pub def header : String
+    @header
+  end
+
+  pub def call(ctx : Context) : Nil
+    return call_next(ctx) unless applies?(ctx)
+    incoming = @trust_incoming ? ctx.request.headers[@header]? : nil
+    id = incoming && acceptable_id?(incoming, @max_length) ? incoming : UUID.v4.to_s
+    ctx.set("request_id", id)
+    ctx.response.headers[@header] = id
+    call_next(ctx)
+  end
+end
+
+# Whether *id* is an id to keep as it came: 1 to *max_length* bytes of
+# letters, digits and `-_.:@+=/`. Nothing else - no space, no quote, no
+# control character, nothing outside ASCII - so it cannot break a log line
+# or a header it is copied into.
+pub def acceptable_id?(id : String, max_length : Int32 = 128) : Bool
+  size = id.bytesize
+  return false if size == 0 || size > max_length
+  bytes = id.to_unsafe
+  index = 0
+  while index < size
+    return false unless id_byte?(bytes[index])
+    index = index + 1
+  end
+  true
+end
+
+private def id_byte?(byte : UInt8) : Bool
+  return true if byte >= 48_u8 && byte <= 57_u8
+  return true if byte >= 65_u8 && byte <= 90_u8
+  return true if byte >= 97_u8 && byte <= 122_u8
+  case byte
+  when 45_u8, 95_u8, 46_u8, 58_u8, 64_u8, 43_u8, 61_u8, 47_u8
+    true
+  else
+    false
+  end
+end
