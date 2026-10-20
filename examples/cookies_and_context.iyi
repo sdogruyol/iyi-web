@@ -8,9 +8,8 @@
 #   curl -i -b jar -c jar -X POST localhost:3000/sign-out
 module examples/cookies_and_context
 
-import std/base64::{Base64}
-import std/file::{File}
 import iyi_web/dsl::*
+import iyi_web/token::{random_hex}
 
 # The signed-in user, as the application keeps it.
 class User
@@ -20,15 +19,12 @@ class User
   end
 end
 
-# Session token => user. The cookie carries only an unguessable token, read
-# from the operating system's random source.
+# Session token => user. The cookie carries only an unguessable token:
+# `random_hex` draws from the operating system's entropy on every platform.
 SESSIONS = {} of String => User
 
 def new_token : String
-  random = File.open("/dev/urandom")
-  bytes = random.read_bytes(24)
-  random.close
-  Base64.urlsafe_encode(bytes)
+  random_hex(24)
 end
 
 # Filters, handlers and routes share values through `env.set` and

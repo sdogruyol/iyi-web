@@ -11,6 +11,12 @@ All notable changes to iyi-web are recorded here. The format follows
 - `iyi_web/token`: `random_bytes`, `encode_base64url` and a
   `decode_base64url?` that answers nil, not a panic, for text a client sent.
 
+### Fixed
+
+- `examples/cookies_and_context.iyi` answered every sign-in with `500` on
+  Windows, opening `/dev/urandom` itself; its tokens come from
+  `iyi_web/token`'s `random_hex`, which draws from `Random::Secure`.
+
 ### Security
 
 - `random_hex`, which names multipart boundaries and upload spool
