@@ -1,0 +1,173 @@
+# Rate limiting: at most `limit` requests per key in each `period` seconds,
+# counted in fixed windows. A key's window opens with its first request and
+# lasts `period` seconds; the request past the limit, and every one after
+# it until the window ends, is answered 429 with `Retry-After`, and the
+# chain stops there. Every answer carries where the key stands, in the
+# headers of the IETF draft (draft-ietf-httpapi-ratelimit-headers):
+#
+#   RateLimit-Limit: 60         the limit
+#   RateLimit-Remaining: 12     requests left in this window
+#   RateLimit-Reset: 41         seconds until it ends
+#
+# A fixed window lets a client send up to twice the limit across the
+# boundary of two windows; it costs two numbers a key and no timestamps,
+# and that burst is the price.
+#
+# The key is the client's address (`Request#remote_address`) unless a block
+# chooses one. Behind a reverse proxy every request comes from the proxy's
+# address, so all clients would share one allowance: key on the header the
+# proxy writes instead - but only a proxy you run, since any client can send
+# `X-Forwarded-For` itself. A block that answers nil leaves the request
+# unlimited:
+#
+#   RateLimitHandler.new(limit: 100, period: 60) do |ctx|
+#     forwarded = ctx.request.headers["X-Forwarded-For"]?
+#     forwarded ? forwarded.split(",").last.strip : ctx.request.remote_address
+#   end
+#
+# A request over a unix socket has no address, and without a block all of
+# them share one allowance.
+#
+# Memory is bounded by `max_keys`. Keys are held in the order their windows
+# opened, so the ones whose windows have ended are dropped from the front
+# on every request, at no cost when there are none; with `max_keys` windows
+# all still open, the oldest is dropped to make room, and that key starts
+# over. An attacker who cycles through more addresses than that in one
+# period is therefore not limited per address; size `max_keys` for the
+# clients one period sees.
+#
+# The counters are this handler's alone and need no lock: a server's
+# connection tasks share one thread, switching only where one parks on a
+# socket or a sleep (SPEC.md III.4), and nothing between reading a key's
+# count and writing it back parks.
+#
+# The clock is a block answering milliseconds, monotonic by default; a test
+# hands it one it moves itself.
+#
+# Not in the default stack: `use RateLimitHandler.new(limit: 60, period: 60)`.
+module iyi_web/rate_limit
+
+import std/time::{Time}
+import iyi_web/handler::{Handler}
+import iyi_web/context::{Context}
+
+# One key's window: when it opened, in the clock's milliseconds, and how
+# many requests it has counted.
+class RateWindow
+  property opened : Int64
+  property count : Int32
+
+  def initialize(@opened : Int64)
+    @count = 0
+  end
+end
+
+pub class RateLimitHandler < Handler
+  @limit : Int32
+  @period_ms : Int64
+  @max_keys : Int32
+  @clock : Proc(Int64)
+  @key : Proc(Context, String?)?
+  @windows : Hash(String, RateWindow)
+
+  # Keyed by the client's address.
+  def initialize(@limit : Int32 = 60, period : Int32 = 60, @max_keys : Int32 = 10000, @clock : Proc(Int64) = ->{ monotonic_ms })
+    super()
+    @period_ms = checked_period(@limit, period, @max_keys)
+    @key = nil
+    @windows = {} of String => RateWindow
+  end
+
+  # Keyed by what the block answers; nil is a request left unlimited.
+  def initialize(@limit : Int32 = 60, period : Int32 = 60, @max_keys : Int32 = 10000, @clock : Proc(Int64) = ->{ monotonic_ms }, &key : Context -> String?)
+    super()
+    @period_ms = checked_period(@limit, period, @max_keys)
+    @key = key
+    @windows = {} of String => RateWindow
+  end
+
+  pub def limit : Int32
+    @limit
+  end
+
+  # Keys with a window currently held.
+  pub def tracked : Int32
+    @windows.size
+  end
+
+  pub def call(ctx : Context) : Nil
+    return call_next(ctx) unless applies?(ctx)
+    key = key_of(ctx)
+    return call_next(ctx) unless key
+
+    now = @clock.call
+    expire(now)
+    window = window_for(key, now)
+    window.count = window.count + 1 if window.count <= @limit
+
+    headers = ctx.response.headers
+    reset = seconds_left(window, now)
+    headers["RateLimit-Limit"] = @limit.to_s
+    headers["RateLimit-Remaining"] = (window.count >= @limit ? 0 : @limit - window.count).to_s
+    headers["RateLimit-Reset"] = reset.to_s
+    if window.count > @limit
+      headers["Retry-After"] = reset.to_s
+      ctx.response.content_type = "text/plain; charset=utf-8"
+      ctx.halt(429, "Too Many Requests")
+      return
+    end
+    call_next(ctx)
+  end
+
+  private def key_of(ctx : Context) : String?
+    if chosen = @key
+      chosen.call(ctx)
+    else
+      ctx.request.remote_address || ""
+    end
+  end
+
+  # The period in milliseconds, once the settings are known to make sense.
+  private def checked_period(limit : Int32, period : Int32, max_keys : Int32) : Int64
+    raise "rate limit must be at least 1" if limit < 1
+    raise "rate limit period must be at least 1 second" if period < 1
+    raise "rate limit max_keys must be at least 1" if max_keys < 1
+    period.to_i64 * 1000_i64
+  end
+
+  # The key's open window, or a new one at the back of the table. A window
+  # that has ended was already dropped by `expire`.
+  private def window_for(key : String, now : Int64) : RateWindow
+    if current = @windows[key]?
+      return current
+    end
+    @windows.shift if @windows.size >= @max_keys
+    created = RateWindow.new(now)
+    @windows[key] = created
+    created
+  end
+
+  # Windows open in the order they were added, so every one that has ended
+  # is at the front.
+  private def expire(now : Int64) : Nil
+    while key = @windows.first_key?
+      window = @windows[key]
+      break if now - window.opened < @period_ms
+      @windows.delete(key)
+    end
+  end
+
+  # Whole seconds until *window* ends, rounded up and at least 1, so a
+  # client that waits that long is never told to wait again.
+  private def seconds_left(window : RateWindow, now : Int64) : Int64
+    left = window.opened + @period_ms - now
+    seconds = (left + 999_i64) // 1000_i64
+    seconds < 1_i64 ? 1_i64 : seconds
+  end
+end
+
+# The monotonic clock in milliseconds, the rate limiter's default.
+pub def monotonic_ms : Int64
+  now = Time.monotonic
+  now.total_seconds_i64 * 1000_i64 + (now.nanoseconds // 1000000).to_i64
+end

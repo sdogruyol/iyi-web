@@ -43,6 +43,11 @@ All notable changes to iyi-web are recorded here. The format follows
   `X-Request-Id` that is a short plain token, replaces any other with a
   UUID v4, echoes it, stores it under `"request_id"`, and the request log
   line ends with it.
+- `RateLimitHandler` (new `iyi_web/rate_limit`): `limit` requests per
+  `period` seconds per client address or per key a block chooses, in fixed
+  windows; `RateLimit-Limit`/`-Remaining`/`-Reset` on every answer, `429`
+  with `Retry-After` past the limit; at most `max_keys` windows held; an
+  injectable millisecond clock.
 - `Request#remote_address` (the client's IP, nil over a unix socket) and
   `Request#tls?`, filled in by the server.
 - `Handler#applies?`: `only` and `exclude` together, an empty `only`

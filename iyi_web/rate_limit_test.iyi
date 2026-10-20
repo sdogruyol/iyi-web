@@ -1,0 +1,177 @@
+# Rate limiting on a clock the test moves: the limit's worth of requests,
+# then 429 with `Retry-After` until the window ends, a fresh allowance
+# after it, one allowance per key, and a table that never outgrows
+# `max_keys`.
+module iyi_web/rate_limit_test
+
+import iyi_web/rate_limit::{RateLimitHandler}
+import iyi_web/handler::{Handler, chain}
+import iyi_web/context::{Context}
+import iyi_web/request::{Request}
+import iyi_web/harness::*
+import iyi_web/spec::*
+
+class FakeClock
+  property now : Int64
+
+  def initialize
+    @now = 1_000_000_i64
+  end
+
+  def advance(ms : Int64) : Nil
+    @now = @now + ms
+  end
+end
+
+class Hits
+  property count : Int32
+
+  def initialize
+    @count = 0
+  end
+end
+
+def limited(handler : RateLimitHandler, hits : Hits) : Handler
+  chain([handler, routes { |r|
+    r.get "/" do |env|
+      hits.count = hits.count + 1
+      "ok"
+    end
+    r.get "/health" do |env|
+      "up"
+    end
+  }])
+end
+
+def from(address : String?, path : String = "/") : Request
+  req = http_request("GET", path)
+  req.remote_address = address
+  req
+end
+
+def header(ctx : Context, name : String) : String
+  ctx.response.headers[name]? || "(none)"
+end
+
+describe "RateLimitHandler" do
+  it "allows the limit, then answers 429 with Retry-After without running the route" do
+    clock = FakeClock.new
+    hits = Hits.new
+    app = limited(RateLimitHandler.new(limit: 3, period: 60, clock: ->{ clock.now }), hits)
+
+    remaining = [] of String
+    3.times do
+      ctx = dispatch(app, from("10.0.0.1"))
+      assert ctx.response.status_code == 200
+      assert header(ctx, "RateLimit-Limit") == "3"
+      assert header(ctx, "RateLimit-Reset") == "60"
+      assert header(ctx, "Retry-After") == "(none)"
+      remaining << header(ctx, "RateLimit-Remaining")
+    end
+    assert remaining == ["2", "1", "0"]
+    assert hits.count == 3
+
+    clock.advance(20_500_i64)
+    refused = dispatch(app, from("10.0.0.1"))
+    assert refused.response.status_code == 429
+    assert refused.response.body == "Too Many Requests"
+    assert header(refused, "Retry-After") == "40"
+    assert header(refused, "RateLimit-Remaining") == "0"
+    assert header(refused, "RateLimit-Reset") == "40"
+    assert hits.count == 3
+  end
+
+  it "keeps refusing until the window ends, then allows again" do
+    clock = FakeClock.new
+    hits = Hits.new
+    app = limited(RateLimitHandler.new(limit: 2, period: 10, clock: ->{ clock.now }), hits)
+    2.times { dispatch(app, from("10.0.0.1")) }
+
+    clock.advance(9_999_i64)
+    last = dispatch(app, from("10.0.0.1"))
+    assert last.response.status_code == 429
+    # Rounded up: a client told 0 would come straight back.
+    assert header(last, "Retry-After") == "1"
+
+    clock.advance(1_i64)
+    fresh = dispatch(app, from("10.0.0.1"))
+    assert fresh.response.status_code == 200
+    assert header(fresh, "RateLimit-Remaining") == "1"
+    assert header(fresh, "RateLimit-Reset") == "10"
+    assert hits.count == 3
+  end
+
+  it "gives every address its own allowance" do
+    clock = FakeClock.new
+    hits = Hits.new
+    app = limited(RateLimitHandler.new(limit: 1, period: 60, clock: ->{ clock.now }), hits)
+    assert dispatch(app, from("10.0.0.1")).response.status_code == 200
+    assert dispatch(app, from("10.0.0.1")).response.status_code == 429
+    assert dispatch(app, from("10.0.0.2")).response.status_code == 200
+    assert dispatch(app, from("::1")).response.status_code == 200
+  end
+
+  it "puts requests without an address in one shared allowance" do
+    clock = FakeClock.new
+    app = limited(RateLimitHandler.new(limit: 1, period: 60, clock: ->{ clock.now }), Hits.new)
+    assert dispatch(app, from(nil)).response.status_code == 200
+    assert dispatch(app, from(nil)).response.status_code == 429
+  end
+
+  it "keys on what the block answers, and leaves a nil key unlimited" do
+    clock = FakeClock.new
+    handler = RateLimitHandler.new(limit: 1, period: 60, clock: ->{ clock.now }) do |ctx|
+      ctx.request.headers["X-Forwarded-For"]?
+    end
+    app = limited(handler, Hits.new)
+    first = from("192.0.2.1")
+    first.headers["X-Forwarded-For"] = "203.0.113.5"
+    assert dispatch(app, first).response.status_code == 200
+    second = from("192.0.2.1")
+    second.headers["X-Forwarded-For"] = "203.0.113.6"
+    assert dispatch(app, second).response.status_code == 200
+    again = from("192.0.2.1")
+    again.headers["X-Forwarded-For"] = "203.0.113.5"
+    assert dispatch(app, again).response.status_code == 429
+
+    3.times do
+      unkeyed = dispatch(app, from("192.0.2.1"))
+      assert unkeyed.response.status_code == 200
+      assert header(unkeyed, "RateLimit-Limit") == "(none)"
+    end
+  end
+
+  it "drops windows that have ended and never holds more than max_keys" do
+    clock = FakeClock.new
+    handler = RateLimitHandler.new(limit: 1, period: 60, max_keys: 3, clock: ->{ clock.now })
+    app = limited(handler, Hits.new)
+    ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"].each do |address|
+      dispatch(app, from(address))
+      clock.advance(1_i64)
+    end
+    assert handler.tracked == 3
+    # .1 was dropped to make room, so it starts over; .5 is still counted.
+    assert dispatch(app, from("10.0.0.1")).response.status_code == 200
+    assert dispatch(app, from("10.0.0.5")).response.status_code == 429
+
+    clock.advance(60_000_i64)
+    dispatch(app, from("10.0.0.9"))
+    assert handler.tracked == 1
+  end
+
+  it "counts only the paths it is for" do
+    clock = FakeClock.new
+    handler = RateLimitHandler.new(limit: 1, period: 60, clock: ->{ clock.now })
+    handler.exclude ["/health"]
+    app = limited(handler, Hits.new)
+    3.times { assert dispatch(app, from("10.0.0.1", "/health")).response.body == "up" }
+    assert dispatch(app, from("10.0.0.1")).response.status_code == 200
+    assert dispatch(app, from("10.0.0.1")).response.status_code == 429
+  end
+
+  it "refuses settings that cannot limit anything" do
+    assert panics? { RateLimitHandler.new(limit: 0) }
+    assert panics? { RateLimitHandler.new(period: 0) }
+    assert panics? { RateLimitHandler.new(max_keys: 0) }
+  end
+end
