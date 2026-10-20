@@ -117,6 +117,9 @@ router.post "/upload" do |env|
   upload = env.params.files["file"]?
   upload ? upload.path + "|" + upload.read : "none"
 end
+router.get "/peer" do |env|
+  (env.request.remote_address || "nil") + " tls=" + env.request.tls?.to_s
+end
 router.error 500 do |env, err|
   raise "page failed" if env.request.path == "/boom-twice"
   if env.request.path == "/boom-json"
@@ -177,6 +180,20 @@ group do |g|
         if dated = date
           assert dated.includes?("GMT")
         end
+      end
+
+      it "gives the request the client's address, the same on every request of a connection" do
+        peer = exchange(port, close_request("GET", "/peer"))
+        assert http_body(peer) == "127.0.0.1 tls=false"
+
+        client = IyiSocket.connect("127.0.0.1", port).or_panic
+        client.write("GET /peer HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+        first = read_frame(client)
+        client.write(close_request("GET", "/peer")).or_panic
+        second = read_frame(client)
+        client.close
+        assert http_body(first) == "127.0.0.1 tls=false"
+        assert http_body(second) == "127.0.0.1 tls=false"
       end
 
       it "percent-decodes a url param over TCP" do

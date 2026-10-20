@@ -98,6 +98,9 @@ end
 router.ws "/echo" do |socket, env|
   socket.on_message { |text| socket.send(text) }
 end
+router.get "/peer" do |env|
+  (env.request.remote_address || "nil") + " tls=" + env.request.tls?.to_s
+end
 
 cfg = config
 cfg.logging = false
@@ -116,6 +119,11 @@ group do |g|
         home = fetch(port, "/")
         assert status_line(home) == "HTTP/1.1 200 OK"
         assert http_body(home) == "secure home"
+      end
+
+      it "marks a request that came over TLS, with the client's address" do
+        peer = fetch(port, "/peer")
+        assert http_body(peer) == "127.0.0.1 tls=true"
       end
 
       it "serves a second request on a keep-alive TLS connection" do

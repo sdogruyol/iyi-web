@@ -29,6 +29,9 @@ end
 router.get "/big" do |env|
   "x" * (32 * 1024 * 1024)
 end
+router.get "/peer" do |env|
+  (env.request.remote_address || "nil") + " tls=" + env.request.tls?.to_s
+end
 
 # The connection's bytes until the server closes it.
 def read_all(client : IyiSocket) : String
@@ -337,6 +340,18 @@ describe "Server addresses" do
     end
   end
 
+  it "gives a request its client's IPv6 address" do
+    server = Server.new(chain([RouteHandler.new(router)]), quiet_config)
+    port = server.bind("::1", 0)
+    serve(server) do |running|
+      client = IyiSocket.connect("::1", port).or_panic
+      client.write("GET /peer HTTP/1.1\r\nHost: [::1]\r\nConnection: close\r\n\r\n").or_panic
+      answer = read_all(client)
+      client.close
+      assert http_body(answer) == "::1 tls=false"
+    end
+  end
+
   it "serves on a unix socket and removes its file at shutdown" do
     path = File.tempfile("iyi-web", ".sock")
     File.delete(path)
@@ -353,6 +368,12 @@ describe "Server addresses" do
       client.close
       assert status_line(answer) == "HTTP/1.1 200 OK"
       assert http_body(answer) == "home"
+      # A unix socket's peer has no network address.
+      peer = IyiSocket.connect_unix(path).or_panic
+      peer.write("GET /peer HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").or_panic
+      described = read_all(peer)
+      peer.close
+      assert http_body(described) == "nil tls=false"
     end
     assert File.info?(path).nil?
   end

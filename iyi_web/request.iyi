@@ -24,7 +24,12 @@ impl Error for ParseError
 end
 
 pub class Request
+  @remote_address : String?
+  @tls : Bool
+
   def initialize(@method : String, @path : String, @query_string : String, @version : String, @headers : Headers, @body : String)
+    @remote_address = nil
+    @tls = false
   end
 
   # `std/http`'s request as this type: path percent-decoded, query left
@@ -95,6 +100,31 @@ pub class Request
   pub def host : String
     @headers["host"]? || ""
   end
+
+  # The client's address as the connection saw it: dotted IPv4, or IPv6 as
+  # RFC 5952 writes it, without the port. Nil for a request that came over
+  # a unix socket - its peer has no network address, and the path it may
+  # have bound is not one either - and for one built in a test that did not
+  # set it. Behind a reverse proxy this is the proxy's address; the
+  # client's is in whatever header that proxy writes (`X-Forwarded-For`,
+  # `Forwarded`), which only a proxy you run can be trusted to have set.
+  pub def remote_address : String?
+    @remote_address
+  end
+
+  pub def remote_address=(value : String?) : String?
+    @remote_address = value
+  end
+
+  # Whether the request came over TLS to this server. A proxy that
+  # terminated TLS in front of it makes this false.
+  pub def tls? : Bool
+    @tls
+  end
+
+  pub def tls=(value : Bool) : Bool
+    @tls = value
+  end
 end
 
 # One pass of `std/http`'s parser: a request, a refusal, or "not yet".
@@ -153,7 +183,10 @@ pub def parse_incoming(text : String) : Incoming
 end
 
 pub def with_body(request : Request, body : String) : Request
-  Request.new(request.method, request.path, request.query_string, request.version, request.headers, body)
+  copy = Request.new(request.method, request.path, request.query_string, request.version, request.headers, body)
+  copy.remote_address = request.remote_address
+  copy.tls = request.tls?
+  copy
 end
 
 private def wire_headers_valid?(headers : Hash(String, String)) : Bool

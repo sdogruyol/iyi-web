@@ -270,8 +270,10 @@ A malformed `multipart/form-data` body gets `400`. More file parts than
 ## Requests
 
 `env.request` exposes `method`, `path`, `query_string`, `headers`, `body`,
-`content_type`, `content_length`, `host` and `version`. Header lookups ignore
-case:
+`content_type`, `content_length`, `host` and `version`, plus `remote_address`,
+the client's IP address as the connection saw it (nil over a unix socket, and
+the proxy's address behind a reverse proxy), and `tls?`, whether the request
+came over TLS to this server. Header lookups ignore case:
 
 ```iyi
 get "/agent" do |env|
@@ -1057,7 +1059,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/dsl` | Routes, filters, `error`, `mount`, `use`, `sse`, `ws`, `render`, `run` and the setting shorthands |
 | `web/iyi_web/router` | `Router`, `RouteHandler` |
 | `web/iyi_web/context` | `Context` |
-| `web/iyi_web/request` | `Request` |
+| `web/iyi_web/request` | `Request` (with `remote_address` and `tls?`) |
 | `web/iyi_web/response` | `Response` |
 | `web/iyi_web/params` | `Params` |
 | `web/iyi_web/multipart` | `FileUpload` and the `multipart/form-data` parser |

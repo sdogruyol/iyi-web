@@ -63,6 +63,17 @@ describe "parse_head" do
     assert with_body(req, "xx").body == "xx"
   end
 
+  it "has no client address or TLS until the server says so, and with_body keeps both" do
+    req = parsed("GET / HTTP/1.1\r\nHost: localhost")
+    assert req.remote_address.nil?
+    assert !req.tls?
+    req.remote_address = "192.0.2.7"
+    req.tls = true
+    copy = with_body(req, "body")
+    assert copy.remote_address == "192.0.2.7"
+    assert copy.tls?
+  end
+
   it "defaults keep-alive from the HTTP version" do
     assert parsed("GET / HTTP/1.1\r\nHost: localhost").keep_alive?
     assert !parsed("GET / HTTP/1.0\r\nHost: localhost").keep_alive?
