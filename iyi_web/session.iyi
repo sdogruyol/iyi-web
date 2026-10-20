@@ -1,0 +1,378 @@
+# Sessions kept in a cookie, Kemal's kemal-session with its cookie engine,
+# or Rack::Session::Cookie: the server stores nothing, and the client holds
+# the session sealed under a key only the server knows.
+#
+#   use SessionHandler.new(Program.env("SESSION_SECRET") || raise "SESSION_SECRET is not set")
+#
+#   post "/sign-in" do |env|
+#     session(env).regenerate
+#     session(env)["user"] = env.params.body["name"]? || ""
+#     env.redirect("/", 303)
+#   end
+#
+# The cookie is AES-256-GCM, not only a signature: a signed cookie, as
+# Rack's was before rack-session 2, shows the client what it carries, and
+# this does not. The key is derived with HKDF-SHA256 from the secret, so
+# the secret itself may be any 32 bytes or more and is never a cipher key
+# directly; the nonce is 12 bytes of `Random::Secure` for every cookie
+# written, which keeps a repeat improbable for far more cookies than one
+# key will seal.
+# The cookie's name is the additional data, so a value set for another
+# cookie of this application does not open as a session.
+#
+# What is sealed is JSON: the session id, when it was issued and when it
+# expires, and the values. The expiry is checked here, not only by the
+# browser's `Max-Age`, so a cookie copied off a machine stops working when
+# it lapses, whatever the copy does with its attributes. A cookie that is
+# not base64url, does not open under any of the secrets, does not parse,
+# or has lapsed is an empty session, never a panic: the client wrote it.
+#
+# A response carries `Set-Cookie` only when the session changed, was read
+# under an old secret (and is sealed again under the current one), or was
+# cleared (and the cookie is deleted). It is written after the route has
+# run, so a route that streams - `env.response.flush` sends the headers
+# early - must call `save_session(env)` before its first flush; a change
+# made once the headers are out cannot reach the client, and is reported
+# on the error stream instead of being lost without a word.
+module iyi_web/session
+
+import std/aead::{AesGcm}
+import std/crypto::{HKDF}
+import std/digest::{SHA256}
+import std/json::{JSON, Any}
+import std/time::{Time}
+import iyi_web/handler::{Handler}
+import iyi_web/headers::{Headers}
+import iyi_web/context::{Context}
+import iyi_web/token::{random_bytes, encode_base64url, decode_base64url?}
+
+# Most bytes of `name=value` a browser keeps for one cookie (RFC 6265
+# §6.1 asks for at least this many, and Chrome, Firefox and Safari keep no
+# more).
+pub MAX_COOKIE_SIZE = 4096
+
+# Shortest secret `SessionHandler` takes: 256 bits, the AES key it derives.
+pub MIN_SECRET_SIZE = 32
+
+# Where `SessionHandler` leaves the request's `Session` in `env`.
+SESSION_STORE_KEY = "iyi_web.session"
+
+# The format's first byte, inside the cookie and in the additional data, so
+# a later format can tell its cookies from these.
+COOKIE_VERSION = "\u{1}"
+
+NONCE_SIZE = 12
+TAG_SIZE = 16
+
+# One request's session. Values are strings (`[]`, `[]=`) or anything
+# `JSON.to_json` writes (`set`, read back as `JSON::Any` with `json?`).
+pub class Session
+  @data : Hash(String, Any)
+  @id : String
+  @issued_at : Int64
+  @changed : Bool
+  @rekey : Bool
+  @from_cookie : Bool
+  @owner : SessionHandler
+
+  def initialize(@owner : SessionHandler, @data : Hash(String, Any), @id : String, @issued_at : Int64, @from_cookie : Bool, @rekey : Bool)
+    @changed = false
+  end
+
+  def self.empty(owner : SessionHandler, from_cookie : Bool) : Session
+    Session.new(owner, {} of String => Any, "", 0_i64, from_cookie, false)
+  end
+
+  # The string stored under *key*; nil when there is none, or when the
+  # value there is not a string.
+  pub def []?(key : String) : String?
+    value = @data[key]?
+    value ? value.as_s? : nil
+  end
+
+  pub def [](key : String) : String
+    self[key]? || raise "no string in the session under #{key.inspect}"
+  end
+
+  # Setting the value a key already holds is not a change, and writes no
+  # cookie.
+  pub def []=(key : String, value : String) : String
+    put(key, Any.new(value))
+    value
+  end
+
+  # Any value `JSON.to_json` writes: numbers, booleans, arrays, hashes, a
+  # `derive serializable` type. It reads back as the JSON it became.
+  pub def set(key : String, value : T) : Nil forall T
+    put(key, JSON.parse(JSON.to_json(value)))
+  end
+
+  pub def json?(key : String) : Any?
+    @data[key]?
+  end
+
+  pub def has_key?(key : String) : Bool
+    @data.has_key?(key)
+  end
+
+  # Whether there was anything to delete.
+  pub def delete(key : String) : Bool
+    return false unless @data.has_key?(key)
+    @data.delete(key)
+    @changed = true
+    true
+  end
+
+  pub def keys : Array(String)
+    @data.keys
+  end
+
+  pub def size : Int32
+    @data.size
+  end
+
+  pub def empty? : Bool
+    @data.empty?
+  end
+
+  # Drops every value and the id: the response deletes the cookie, and a
+  # value set afterwards starts a new session. Sign-out.
+  pub def clear : Nil
+    @data = {} of String => Any
+    @id = ""
+    @changed = true
+  end
+
+  # A new id and a new issue time, with the values kept. Call it when the
+  # user signs in, so an id seen before then - planted, or read over a
+  # shoulder - is not the signed-in session's.
+  pub def regenerate : Nil
+    @id = new_id
+    @changed = true
+  end
+
+  # 16 random bytes in base64url, made when first asked for: a key for
+  # whatever the application keeps about this session elsewhere.
+  pub def id : String
+    @id = new_id if @id.empty?
+    @id
+  end
+
+  # Whether the response will set or delete the cookie.
+  pub def changed? : Bool
+    @changed || @rekey
+  end
+
+  def from_cookie? : Bool
+    @from_cookie
+  end
+
+  def issued_at : Int64
+    @issued_at
+  end
+
+  def data : Hash(String, Any)
+    @data
+  end
+
+  # Only a read under an old secret: sealed again with the issue time it
+  # had, so moving to a new secret does not lengthen a session's life.
+  def rekey_only? : Bool
+    @rekey && !@changed
+  end
+
+  # Written: the response carries the cookie, and nothing is owed until
+  # the next change.
+  def written(issued_at : Int64, present : Bool) : Nil
+    @issued_at = issued_at
+    @from_cookie = present
+    @changed = false
+    @rekey = false
+  end
+
+  def owner : SessionHandler
+    @owner
+  end
+
+  private def put(key : String, value : Any) : Nil
+    return if @data[key]? == value
+    @data[key] = value
+    @changed = true
+  end
+
+  private def new_id : String
+    encode_base64url(random_bytes(16))
+  end
+end
+
+# Reads the session cookie before the rest of the chain runs and writes it
+# after, when it changed. *secret* seals new cookies; *old_secrets* still
+# open cookies sealed under them, which are then sealed again under
+# *secret*, so a secret can be replaced without signing everyone out.
+# *max_age* is seconds, both the cookie's `Max-Age` and the server's own
+# limit on a cookie's age.
+pub class SessionHandler < Handler
+  @ciphers : Array(AesGcm)
+  @cookie_name : String
+  @max_age : Int32
+  @path : String
+  @domain : String
+  @secure : Bool
+  @http_only : Bool
+  @same_site : String
+  @clock : Proc(Int64)
+
+  def initialize(secret : String, old_secrets : Array(String) = [] of String, @cookie_name : String = "iyi_web.session", @max_age : Int32 = 14 * 86400, @path : String = "/", @domain : String = "", @secure : Bool = false, @http_only : Bool = true, @same_site : String = "Lax")
+    super()
+    raise "SessionHandler: invalid cookie name #{@cookie_name.inspect}" unless Headers.valid_name?(@cookie_name)
+    raise "SessionHandler: max_age must be at least one second, not #{@max_age}" if @max_age < 1
+    unless @same_site.in?("Strict", "Lax", "None", "")
+      raise "SessionHandler: same_site must be \"Strict\", \"Lax\", \"None\" or \"\", not #{@same_site.inspect}"
+    end
+    # Browsers drop a `SameSite=None` cookie that is not also `Secure`.
+    raise "SessionHandler: same_site \"None\" needs secure: true" if @same_site == "None" && !@secure
+    @ciphers = [] of AesGcm
+    @ciphers << cipher_for(secret)
+    old_secrets.each { |old| @ciphers << cipher_for(old) }
+    @clock = -> { Time.utc.to_unix }
+  end
+
+  pub def cookie_name : String
+    @cookie_name
+  end
+
+  pub def max_age : Int32
+    @max_age
+  end
+
+  # Unix seconds now. The wall clock unless replaced, which tests do to
+  # see a cookie lapse without waiting for it.
+  pub def clock=(clock : Proc(Int64)) : Proc(Int64)
+    @clock = clock
+  end
+
+  pub def call(ctx : Context) : Nil
+    current = load(ctx)
+    ctx.set(SESSION_STORE_KEY, current)
+    call_next(ctx)
+    commit(ctx, current)
+  end
+
+  # Writes `Set-Cookie` for *session* when it changed, or the deletion when
+  # it was cleared; nothing when it did not. A response whose headers have
+  # gone out takes no more: the change is reported on the error stream.
+  # A cookie longer than `MAX_COOKIE_SIZE` is a panic naming its size,
+  # since a browser would drop it and the session with it, silently.
+  pub def commit(ctx : Context, session : Session) : Nil
+    return unless session.changed?
+    if ctx.response.headers_sent?
+      STDERR.puts "iyi_web/session: #{ctx.request.method} #{ctx.request.path} changed the session after its headers were sent; call save_session(env) before flushing"
+      return
+    end
+    if session.empty?
+      ctx.delete_cookie(@cookie_name, @path, @domain) if session.from_cookie?
+      session.written(0_i64, false)
+      return
+    end
+    now = @clock.call
+    issued = session.rekey_only? ? session.issued_at : now
+    value = seal(session, issued)
+    size = @cookie_name.bytesize + 1 + value.bytesize
+    if size > MAX_COOKIE_SIZE
+      raise "iyi_web/session: the session cookie would be #{size} bytes, more than the #{MAX_COOKIE_SIZE} a browser keeps; keep an id in the session and the data on the server"
+    end
+    ctx.set_cookie(@cookie_name, value, path: @path, http_only: @http_only, secure: @secure, max_age: (issued + @max_age.to_i64 - now).to_i32, same_site: @same_site, domain: @domain)
+    session.written(issued, true)
+  end
+
+  # The session in *value*, a cookie this handler wrote, as of now; an
+  # empty one for anything else.
+  pub def open(value : String) : Session
+    bytes = decode_base64url?(value)
+    return Session.empty(self, true) unless bytes
+    return Session.empty(self, true) if bytes.bytesize < 1 + NONCE_SIZE + TAG_SIZE
+    return Session.empty(self, true) unless bytes[0, 1] == COOKIE_VERSION
+    nonce = bytes[1, NONCE_SIZE]
+    sealed = bytes[1 + NONCE_SIZE, bytes.bytesize - 1 - NONCE_SIZE]
+    aad = additional_data
+    index = 0
+    while index < @ciphers.size
+      plain = @ciphers[index].open(nonce, sealed, aad)
+      if plain.is_a?(String)
+        return parse(plain, index > 0)
+      end
+      index = index + 1
+    end
+    Session.empty(self, true)
+  end
+
+  # *session* sealed as a cookie value, issued at *issued_at*.
+  pub def seal(session : Session, issued_at : Int64) : String
+    envelope = {} of String => Any
+    envelope["id"] = Any.new(session.id)
+    envelope["iat"] = Any.new(issued_at)
+    envelope["exp"] = Any.new(issued_at + @max_age.to_i64)
+    envelope["data"] = Any.new(session.data)
+    nonce = random_bytes(NONCE_SIZE)
+    sealed = @ciphers[0].seal(nonce, JSON.to_json(envelope), additional_data)
+    encode_base64url(COOKIE_VERSION + nonce + sealed)
+  end
+
+  private def load(ctx : Context) : Session
+    value = ctx.cookies[@cookie_name]?
+    return Session.empty(self, false) unless value
+    open(value)
+  end
+
+  # Expired by the time sealed in it, or by this handler's *max_age* from
+  # when it was issued, whichever comes first: a `max_age` shortened since
+  # applies to cookies already out.
+  private def parse(text : String, rekey : Bool) : Session
+    root = JSON.parse?(text)
+    fields = root ? root.as_h? : nil
+    return Session.empty(self, true) unless fields
+    id = string_field(fields, "id")
+    issued = int_field(fields, "iat")
+    expires = int_field(fields, "exp")
+    held = fields["data"]?
+    data = held ? held.as_h? : nil
+    return Session.empty(self, true) unless id && issued && expires && data
+    now = @clock.call
+    return Session.empty(self, true) if now >= expires || now >= issued + @max_age.to_i64
+    Session.new(self, data, id, issued, true, rekey)
+  end
+
+  private def additional_data : String
+    COOKIE_VERSION + @cookie_name
+  end
+
+  private def string_field(fields : Hash(String, Any), name : String) : String?
+    value = fields[name]?
+    value ? value.as_s? : nil
+  end
+
+  private def int_field(fields : Hash(String, Any), name : String) : Int64?
+    value = fields[name]?
+    value ? value.as_i64? : nil
+  end
+
+  private def cipher_for(secret : String) : AesGcm
+    if secret.bytesize < MIN_SECRET_SIZE
+      raise "SessionHandler: a secret must be at least #{MIN_SECRET_SIZE} bytes, not #{secret.bytesize}: use 32 random bytes or more, such as `Random::Secure.hex(32)`"
+    end
+    AesGcm.new(HKDF.derive(SHA256, secret, "iyi_web/session", "AES-256-GCM cookie key", 32))
+  end
+end
+
+# The request's session. Panics when no `SessionHandler` ran for it, which
+# is the application's mistake, not the client's.
+pub def session(env : Context) : Session
+  env.get?(SESSION_STORE_KEY, Session) || raise "session: no SessionHandler ran for #{env.request.path}; add one with `use SessionHandler.new(secret)`"
+end
+
+# Writes the session's cookie now, if it changed, instead of after the
+# route: for a route that streams, before its first `env.response.flush`.
+pub def save_session(env : Context) : Nil
+  current = session(env)
+  current.owner.commit(env, current)
+end

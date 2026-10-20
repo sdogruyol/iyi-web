@@ -34,6 +34,7 @@ a route returns is checked when the program compiles.
 - Static files with `ETag`, `304 Not Modified`, byte ranges, gzip at any size
   and precompressed `.gz` copies, streamed from disk
 - File downloads, cookies, redirects and early responses with `halt`
+- Encrypted cookie sessions with secret rotation
 - Response compression, CORS and HTML form method override
 - Templates with layouts, compiled into the program
 - Command-line flags for host, port and TLS
@@ -389,7 +390,8 @@ end
 `Time`); with neither `max_age` nor `expires` it makes a session cookie.
 Values are percent-encoded where cookies do not allow a character and
 decoded when read, so any string round-trips. `delete_cookie` needs the same
-`path` and `domain` the cookie was set with.
+`path` and `domain` the cookie was set with. To keep values between requests
+without a store of your own, use a [session](#sessions).
 
 ### Files
 
@@ -707,6 +709,65 @@ import routes/health::*
 mount health_routes
 ```
 
+## Sessions
+
+`SessionHandler` keeps the session in a cookie, as kemal-session's cookie
+engine and `Rack::Session::Cookie` do: the server stores nothing. The cookie
+is encrypted with AES-256-GCM under a key derived from your secret, so the
+client can neither read nor alter what it holds, and it carries its issue and
+expiry times, so a copied cookie stops working on the server when it lapses.
+
+```iyi
+import web/iyi_web/session::{SessionHandler, session}
+
+use SessionHandler.new(Program.env("SESSION_SECRET") || raise "SESSION_SECRET is not set")
+
+post "/sign-in" do |env|
+  session(env).regenerate
+  session(env)["user"] = env.params.body["name"]? || ""
+  env.redirect("/", 303)
+end
+
+get "/" do |env|
+  user = session(env)["user"]?
+  user ? "Signed in as " + user : "Signed out"
+end
+
+post "/sign-out" do |env|
+  session(env).clear
+  env.redirect("/", 303)
+end
+```
+
+The secret must be at least 32 bytes; a shorter one stops the program when
+the handler is made. `SessionHandler.new` also takes:
+
+| Option | Default | |
+|---|---|---|
+| `old_secrets` | `[] of String` | Secrets being retired. A cookie sealed under one is read, and sent back sealed under the current secret, so a secret can be replaced without signing anyone out. |
+| `cookie_name` | `"iyi_web.session"` | |
+| `max_age` | `14 * 86400` | Seconds. The cookie's `Max-Age`, and the server's own limit on a cookie's age. |
+| `path`, `domain` | `"/"`, `""` | |
+| `secure` | `false` | Set it behind HTTPS. |
+| `http_only` | `true` | |
+| `same_site` | `"Lax"` | `"None"` needs `secure: true`. |
+
+`session(env)` answers the request's `Session`: `[]`, `[]?` and `[]=` for
+strings, `set(key, value)` for anything `JSON.to_json` writes (read back as
+`JSON::Any` with `json?(key)`), `delete`, `has_key?`, `keys`, `clear`, and
+`id`, a random id for anything kept about the session elsewhere.
+`regenerate` gives the session a new id and keeps its values: call it at
+sign-in. A cookie that was altered, has lapsed, or was sealed under a secret
+that is no longer listed is an empty session.
+
+The response sets the cookie only when the session changed, and deletes it
+when the session was cleared. A cookie larger than the 4096 bytes browsers
+keep is refused with a `500`: keep an id in the session and the data on the
+server. The cookie is written after the route returns, so a route that
+streams calls `save_session(env)` before its first `env.response.flush`; a
+change made after the headers went out cannot reach the client, and is
+reported on the error stream.
+
 ## Middleware
 
 Requests pass through request logging, static files, the middleware added with
@@ -731,6 +792,7 @@ before request logging.
 | `CompressHandler` | `web/iyi_web/compress` | Compresses textual responses of 860 bytes or more with gzip or deflate when `Accept-Encoding` allows it. `gzip true` adds it. |
 | `CORSHandler` | `web/iyi_web/cors` | Sets `Access-Control-Allow-Origin` and answers preflight requests with `204`. Takes `origin` (default `*`), `methods`, `headers` (default `*`) and `max_age` (seconds as a string, default `"86400"`). |
 | `OverrideMethodHandler` | `web/iyi_web/override` | Treats a form `POST` with `_method` set to `PUT`, `PATCH` or `DELETE` as that method. |
+| `SessionHandler` | `web/iyi_web/session` | Keeps an encrypted session in a cookie. See [Sessions](#sessions). |
 | `LogHandler` | `web/iyi_web/log` | Writes one line per request to `config.logger`. Added by default; `logging false` removes it. |
 | `StaticHandler` | `web/iyi_web/static` | Serves the public folder. Added by default; `serve_static false` removes it. |
 
@@ -1082,6 +1144,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/static` | `StaticHandler` |
 | `web/iyi_web/log` | `LogHandler`, `Logger`, `StdoutLogger` |
 | `web/iyi_web/harness` | `http_request`, `form_request`, `dispatch`, `routes` |
+| `web/iyi_web/session` | `SessionHandler`, `Session`, `session`, `save_session` |
 | `web/iyi_web/token` | `random_hex`, `random_bytes`, `encode_base64url`, `decode_base64url?`: random tokens nobody can guess, and base64url for carrying them |
 
 ## Examples

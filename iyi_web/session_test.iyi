@@ -1,0 +1,301 @@
+# Cookie sessions: what goes out comes back, what was altered, lapsed or
+# sealed under a secret no longer held comes back empty, and a response
+# sets the cookie only when there is something new to say.
+module iyi_web/session_test
+
+import std/time::{Time}
+import iyi_web/session::*
+import iyi_web/handler::{chain, Handler}
+import iyi_web/request::{Request}
+import iyi_web/response::{Response}
+import iyi_web/context::{Context}
+import iyi_web/params::{Params}
+import iyi_web/harness::*
+import iyi_web/spec::*
+
+SECRET = "0123456789abcdef0123456789abcdef"
+NEXT_SECRET = "fedcba9876543210fedcba9876543210-next"
+NAME = "iyi_web.session"
+
+def app(handler : SessionHandler) : Handler
+  chain([handler, routes { |r|
+    r.get "/read" do |env|
+      session(env)["user"]? || "none"
+    end
+    r.post "/sign-in" do |env|
+      session(env)["user"] = "ada"
+      "in"
+    end
+    r.post "/sign-out" do |env|
+      session(env).clear
+      "out"
+    end
+    r.post "/count" do |env|
+      current = session(env).json?("count")
+      count = current ? current.as_i64 : 0_i64
+      session(env).set("count", count + 1)
+      (count + 1).to_s
+    end
+    r.post "/big" do |env|
+      session(env)["blob"] = "x" * 5000
+      "big"
+    end
+    r.post "/regenerate" do |env|
+      before = session(env).id
+      session(env).regenerate
+      before == session(env).id ? "same" : "new"
+    end
+  }])
+end
+
+def with_cookie(method : String, path : String, value : String) : Request
+  request = http_request(method, path)
+  request.headers["Cookie"] = NAME + "=" + value
+  request
+end
+
+# Every `Set-Cookie` the response carries for the session cookie.
+def session_cookies(ctx) : Array(String)
+  found = [] of String
+  ctx.response.headers.each do |name, value|
+    found << value if name.downcase == "set-cookie" && value.starts_with?(NAME + "=")
+  end
+  found
+end
+
+# The value of the one session `Set-Cookie`.
+def issued_value(ctx) : String
+  cookies = session_cookies(ctx)
+  assert cookies.size == 1
+  line = cookies[0]
+  ending = line.index(';') || line.bytesize
+  line[NAME.bytesize + 1, ending - NAME.bytesize - 1]
+end
+
+def signed_in(handler : SessionHandler) : String
+  issued_value(dispatch(app(handler), "POST", "/sign-in"))
+end
+
+def read_back(handler : SessionHandler, value : String) : String
+  dispatch(app(handler), with_cookie("GET", "/read", value)).response.body
+end
+
+def fixed_clock(handler : SessionHandler, at : Int64) : Nil
+  handler.clock = -> { at }
+end
+
+describe "SessionHandler" do
+  it "reads back what a response sealed" do
+    handler = SessionHandler.new(SECRET)
+    value = signed_in(handler)
+    assert read_back(handler, value) == "ada"
+    # Sealed, not signed: the value is not in the cookie to read.
+    assert !value.includes?("ada")
+  end
+
+  it "keeps values of other JSON types" do
+    handler = SessionHandler.new(SECRET)
+    first = dispatch(app(handler), "POST", "/count")
+    assert first.response.body == "1"
+    second = dispatch(app(handler), with_cookie("POST", "/count", issued_value(first)))
+    assert second.response.body == "2"
+  end
+
+  it "seals every cookie under a fresh nonce" do
+    handler = SessionHandler.new(SECRET)
+    assert signed_in(handler) != signed_in(handler)
+  end
+
+  it "writes the cookie with its attributes" do
+    ctx = dispatch(app(SessionHandler.new(SECRET)), "POST", "/sign-in")
+    line = session_cookies(ctx)[0]
+    assert line.includes?("; Path=/")
+    assert line.includes?("; HttpOnly")
+    assert line.includes?("; SameSite=Lax")
+    assert line.includes?("; Max-Age=1209600")
+    assert !line.includes?("; Secure")
+  end
+
+  it "takes secure, domain and its own name and lifetime" do
+    handler = SessionHandler.new(SECRET, cookie_name: "app", max_age: 3600, secure: true, domain: "example.com", same_site: "Strict", http_only: false)
+    ctx = dispatch(app(handler), "POST", "/sign-in")
+    line = ""
+    ctx.response.headers.each { |name, value| line = value if name.downcase == "set-cookie" }
+    assert line.starts_with?("app=")
+    assert line.includes?("; Secure")
+    assert line.includes?("; Domain=example.com")
+    assert line.includes?("; SameSite=Strict")
+    assert line.includes?("; Max-Age=3600")
+    assert !line.includes?("HttpOnly")
+  end
+
+  it "sets no cookie when the session did not change" do
+    handler = SessionHandler.new(SECRET)
+    value = signed_in(handler)
+    assert session_cookies(dispatch(app(handler), with_cookie("GET", "/read", value))).empty?
+    # Writing the value it already holds is no change either.
+    assert session_cookies(dispatch(app(handler), with_cookie("POST", "/sign-in", value))).empty?
+    # Nor does a request that has no session and makes none.
+    assert session_cookies(dispatch(app(handler), "GET", "/read")).empty?
+  end
+
+  it "deletes the cookie when the session is cleared" do
+    handler = SessionHandler.new(SECRET)
+    ctx = dispatch(app(handler), with_cookie("POST", "/sign-out", signed_in(handler)))
+    cookies = session_cookies(ctx)
+    assert cookies.size == 1
+    assert cookies[0].includes?("Max-Age=0")
+    # Signing out with no session has no cookie to delete.
+    assert session_cookies(dispatch(app(handler), "POST", "/sign-out")).empty?
+  end
+
+  it "gives a new id on regenerate and keeps the values" do
+    handler = SessionHandler.new(SECRET)
+    ctx = dispatch(app(handler), with_cookie("POST", "/regenerate", signed_in(handler)))
+    assert ctx.response.body == "new"
+    assert read_back(handler, issued_value(ctx)) == "ada"
+  end
+
+  it "ignores a cookie that was altered" do
+    handler = SessionHandler.new(SECRET)
+    value = signed_in(handler)
+    middle = value.bytesize // 2
+    flipped = value[middle, 1] == "A" ? "B" : "A"
+    altered = value[0, middle] + flipped + value[middle + 1, value.bytesize - middle - 1]
+    assert read_back(handler, altered) == "none"
+    assert read_back(handler, value[0, value.bytesize - 1]) == "none"
+    assert read_back(handler, value + "AAAA") == "none"
+  end
+
+  it "ignores a cookie that is not one of its own" do
+    handler = SessionHandler.new(SECRET)
+    assert read_back(handler, "") == "none"
+    assert read_back(handler, "!!not base64!!") == "none"
+    assert read_back(handler, "A") == "none"
+    assert read_back(handler, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") == "none"
+    # Another secret's cookie, and this secret's under another name.
+    assert read_back(handler, signed_in(SessionHandler.new(NEXT_SECRET))) == "none"
+    other = dispatch(app(SessionHandler.new(SECRET, cookie_name: "other")), "POST", "/sign-in")
+    line = ""
+    other.response.headers.each { |name, value| line = value if name.downcase == "set-cookie" }
+    assert read_back(handler, line[6, (line.index(';') || line.bytesize) - 6]) == "none"
+  end
+
+  it "answers an altered cookie with no new cookie when nothing changes" do
+    handler = SessionHandler.new(SECRET)
+    assert session_cookies(dispatch(app(handler), with_cookie("GET", "/read", "garbage"))).empty?
+  end
+
+  it "ignores a cookie that has lapsed" do
+    handler = SessionHandler.new(SECRET, max_age: 60)
+    now = Time.utc.to_unix
+    fixed_clock(handler, now)
+    value = signed_in(handler)
+    fixed_clock(handler, now + 59)
+    assert read_back(handler, value) == "ada"
+    fixed_clock(handler, now + 60)
+    assert read_back(handler, value) == "none"
+  end
+
+  it "holds cookies already out to a max_age shortened since" do
+    long = SessionHandler.new(SECRET)
+    now = Time.utc.to_unix
+    fixed_clock(long, now)
+    value = signed_in(long)
+    short = SessionHandler.new(SECRET, max_age: 60)
+    fixed_clock(short, now + 61)
+    assert read_back(short, value) == "none"
+  end
+
+  it "reads a cookie sealed under an old secret and seals it under the new one" do
+    old = SessionHandler.new(SECRET)
+    now = Time.utc.to_unix
+    fixed_clock(old, now)
+    value = signed_in(old)
+
+    rotated = SessionHandler.new(NEXT_SECRET, [SECRET])
+    fixed_clock(rotated, now + 100)
+    ctx = dispatch(app(rotated), with_cookie("GET", "/read", value))
+    assert ctx.response.body == "ada"
+    line = session_cookies(ctx)[0]
+    # Sealed again with the issue time it had: rotation does not lengthen it.
+    assert line.includes?("; Max-Age=" + (1209600 - 100).to_s)
+    reissued = issued_value(ctx)
+
+    only_new = SessionHandler.new(NEXT_SECRET)
+    fixed_clock(only_new, now + 100)
+    assert read_back(only_new, reissued) == "ada"
+    assert read_back(only_new, value) == "none"
+    # The re-issued cookie keeps its first expiry.
+    fixed_clock(only_new, now + 1209600)
+    assert read_back(only_new, reissued) == "none"
+  end
+
+  it "refuses a cookie larger than a browser keeps" do
+    group do |g|
+      task = g.spawn do
+        dispatch(app(SessionHandler.new(SECRET)), "POST", "/big")
+        nil
+      end
+      assert task.value.is_a?(Panicked)
+    end
+  end
+
+  it "refuses a secret shorter than 32 bytes" do
+    group do |g|
+      short = g.spawn do
+        SessionHandler.new("too short")
+        nil
+      end
+      old = g.spawn do
+        SessionHandler.new(SECRET, ["0123456789abcdef0123456789abcde"])
+        nil
+      end
+      none = g.spawn do
+        SessionHandler.new(SECRET, same_site: "None")
+        nil
+      end
+      assert short.value.is_a?(Panicked)
+      assert old.value.is_a?(Panicked)
+      assert none.value.is_a?(Panicked)
+    end
+    SessionHandler.new(SECRET)
+  end
+
+  it "writes the cookie early with save_session, and not again" do
+    handler = SessionHandler.new(SECRET)
+    writes = [] of String
+    ctx = streamed(handler, writes, true)
+    assert writes[0].includes?("Set-Cookie: " + NAME + "=")
+    assert session_cookies(ctx).size == 1
+    assert read_back(handler, issued_value(ctx)) == "ada"
+  end
+
+  it "drops a change made after the headers went out, without a panic" do
+    writes = [] of String
+    ctx = streamed(SessionHandler.new(SECRET), writes, false)
+    assert writes[0].starts_with?("HTTP/1.1 200")
+    assert !writes[0].includes?("Set-Cookie")
+    assert session_cookies(ctx).empty?
+  end
+end
+
+# A route that sets a value and flushes, saving the session first when
+# *save* says so, on a response whose writes land in *writes*.
+def streamed(handler : SessionHandler, writes : Array(String), save : Bool) : Context
+  app = chain([handler, routes { |r|
+    r.get "/stream" do |env|
+      session(env)["user"] = "ada"
+      save_session(env) if save
+      env.response.print("part")
+      env.response.flush
+      ""
+    end
+  }])
+  request = http_request("GET", "/stream")
+  response = Response.new
+  response.attach(->(bytes : String) { writes << bytes; nil }, "HTTP/1.1", true, false)
+  ctx = Context.new(request, response, Params.from(request, {} of String => String))
+  app.call(ctx)
+  ctx
+end

@@ -8,6 +8,17 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ### Added
 
+- Cookie sessions, kemal-session's cookie engine (new `iyi_web/session`):
+  `use SessionHandler.new(secret)` and `session(env)["user"] = name`. The
+  cookie is AES-256-GCM under a key HKDF derives from the secret (32 bytes
+  or more, a shorter one refused), with a fresh `Random::Secure` nonce, and
+  carries its issue and expiry times, checked on the server. An altered,
+  lapsed or foreign cookie is an empty session. `old_secrets` rotates the
+  secret: a cookie sealed under an old one is read and re-sealed under the
+  new one with its first expiry. The cookie is set only when the session
+  changed and deleted when it is cleared; one over 4096 bytes is refused.
+  `regenerate` gives a new id, `set`/`json?` keep any JSON value, and
+  `save_session(env)` writes the cookie before a streamed response flushes.
 - `iyi_web/token`: `random_bytes`, `encode_base64url` and a
   `decode_base64url?` that answers nil, not a panic, for text a client sent.
 - `Request#remote_address` (the client's IP, nil over a unix socket) and
