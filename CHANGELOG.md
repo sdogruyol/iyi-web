@@ -10,6 +10,8 @@ All notable changes to iyi-web are recorded here. The format follows
 
 - `iyi_web/token`: `random_bytes`, `encode_base64url` and a
   `decode_base64url?` that answers nil, not a panic, for text a client sent.
+- `Handler#applies?`: `only` and `exclude` together, an empty `only`
+  meaning every request.
 
 ### Fixed
 

@@ -60,6 +60,14 @@ pub class Handler
     rules_match?(@exclude, ctx)
   end
 
+  # Whether *ctx* is one this handler is for: no `only` rules, or one that
+  # matches, and no `exclude` rule that matches. The built-in handlers that
+  # honour the rules ask this; an `only` left empty means every request.
+  pub def applies?(ctx : Context) : Bool
+    return false if exclude_match?(ctx)
+    @only.empty? || only_match?(ctx)
+  end
+
   private def rules_match?(rules : Array(Tuple(String, String)), ctx : Context) : Bool
     method = ctx.request.method
     path = ctx.request.path

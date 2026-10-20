@@ -736,7 +736,8 @@ To write your own, subclass `Handler`, override `call`, and pass the request
 on with `call_next`. A handler that does not call `call_next` ends the chain.
 `only` and `exclude` record which paths and methods a handler is for, using
 the filter path syntax; `only_match?` and `exclude_match?` answer for the
-current request:
+current request, and `applies?` combines them the way the built-in handlers
+do (an empty `only` meaning every path):
 
 ```iyi
 import web/iyi_web/handler::{Handler}
