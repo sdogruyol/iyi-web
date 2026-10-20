@@ -1,54 +1,60 @@
-# Names nobody can guess: multipart boundaries, and the directories
-# uploads are spooled into.
+# Names nobody can guess: multipart boundaries, the directories uploads
+# are spooled into, session ids and CSRF tokens. Tokens that travel in
+# cookies, headers and form fields are unpadded base64url, which needs no
+# escaping in any of the three.
 module iyi_web/token
 
-import std/file::{File}
+import std/base64::{Base64}
 import std/random::{Random}
 
 # *count* random bytes as `2 * count` lower-case hex digits.
-pub def random_hex(count : Int32) : String
-  hex(random_bytes(count))
-end
-
-# `File.readable?`, not `File.exists?`: `exists?` does not open the path,
-# so a device that is there but may not be read - a sandbox's - answers
-# true, and the open below would panic. wasm32 has no such path to ask
-# about.
 #
-# Where there is no `/dev/urandom` - Windows, wasm32 - the bytes come from
-# `std/random` seeded by `Random.new`, which reads the platform's own
-# entropy (`RtlGenRandom` on Windows; the clocks on wasm32, which has none).
-private def random_bytes(count : Int32) : String
-  {% if !flag?(:wasm32) %}
-    if File.readable?("/dev/urandom")
-      bytes = ""
-      File.open("/dev/urandom", "r", count) do |io|
-        bytes = io.read_bytes(count)
-      end
-      return bytes if bytes.bytesize == count
-    end
-  {% end %}
-
-  rng = Random.new
-  String.new(count) do |target|
-    index = 0
-    while index < count
-      target[index] = (rng.next_u & 255_u32).to_u8
-      index = index + 1
-    end
-  end
+# Every byte is `Random::Secure`'s, the operating system's entropy source
+# asked afresh on each call (`getrandom`, `arc4random_buf`, `RtlGenRandom`,
+# WASI's `random_get`). This read `/dev/urandom` itself and, where there was
+# none, drew from `Random.new`: a PCG seeded once from the platform, whose
+# state a few outputs give away, so on Windows the names were only as
+# secret as the first one sent.
+pub def random_hex(count : Int32) : String
+  Random::Secure.hex(count)
 end
 
-private def hex(bytes : String) : String
-  digits = "0123456789abcdef"
-  source = bytes.to_unsafe
-  String.new(bytes.bytesize * 2) do |target|
-    index = 0
-    while index < bytes.bytesize
-      byte = source[index]
-      target[index * 2] = digits.to_unsafe[(byte >> 4).to_i32]
-      target[index * 2 + 1] = digits.to_unsafe[(byte & 15_u8).to_i32]
-      index = index + 1
-    end
+# *count* bytes from `Random::Secure`, as the byte string std/aead and
+# std/base64 take.
+pub def random_bytes(count : Int32) : String
+  bytes = Random::Secure.random_bytes(count)
+  String.new(count) { |target| target.copy_from(bytes.to_unsafe, count) }
+end
+
+# *bytes* in the URL-safe alphabet without `=` padding.
+pub def encode_base64url(bytes : String) : String
+  text = Base64.urlsafe_encode(bytes)
+  size = text.bytesize
+  while size > 0 && text.to_unsafe[size - 1] == 61_u8
+    size = size - 1
   end
+  text[0, size]
+end
+
+# The bytes behind unpadded base64url, or nil for text that is not that.
+# `Base64.decode` panics on a byte outside its alphabets, and these strings
+# come from clients, so the text is checked here first: only `A-Z a-z 0-9
+# - _`, and not one character past a whole group, which cannot encode a
+# byte.
+pub def decode_base64url?(text : String) : String?
+  return nil if text.bytesize % 4 == 1
+  source = text.to_unsafe
+  index = 0
+  while index < text.bytesize
+    return nil unless base64url_byte?(source[index])
+    index = index + 1
+  end
+  Base64.decode(text)
+end
+
+private def base64url_byte?(byte : UInt8) : Bool
+  return true if byte >= 65_u8 && byte <= 90_u8
+  return true if byte >= 97_u8 && byte <= 122_u8
+  return true if byte >= 48_u8 && byte <= 57_u8
+  byte == 45_u8 || byte == 95_u8
 end

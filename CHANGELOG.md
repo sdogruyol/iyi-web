@@ -6,6 +6,18 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `iyi_web/token`: `random_bytes`, `encode_base64url` and a
+  `decode_base64url?` that answers nil, not a panic, for text a client sent.
+
+### Security
+
+- `random_hex`, which names multipart boundaries and upload spool
+  directories, draws from `Random::Secure` on every platform. Where there
+  was no `/dev/urandom`, as on Windows, it drew from a PCG seeded once at
+  start-up, whose later outputs a few earlier ones give away.
+
 ## [0.3.0] - 2026-10-19
 
 Requires iyi 0.18.0 or later, for its TLS server, streaming compressor and

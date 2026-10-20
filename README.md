@@ -1079,6 +1079,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/static` | `StaticHandler` |
 | `web/iyi_web/log` | `LogHandler`, `Logger`, `StdoutLogger` |
 | `web/iyi_web/harness` | `http_request`, `form_request`, `dispatch`, `routes` |
+| `web/iyi_web/token` | `random_hex`, `random_bytes`, `encode_base64url`, `decode_base64url?`: random tokens nobody can guess, and base64url for carrying them |
 
 ## Examples
 
