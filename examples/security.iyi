@@ -1,0 +1,42 @@
+# Security middleware: a request id on every response and log line, the
+# browser's defences switched on by response headers, a rate limit per
+# client address, and Basic authentication in front of /admin. Run with
+# `iyi run examples/security.iyi`; the admin password is ADMIN_PASSWORD,
+# else "secret".
+#
+#   curl -i localhost:3000/
+#   curl -i -H 'X-Request-Id: trace-42' localhost:3000/
+#   curl -i localhost:3000/admin
+#   curl -i -u admin:secret localhost:3000/admin
+#   for i in 1 2 3 4 5 6; do curl -s -o /dev/null -w '%{http_code}\n' localhost:3000/; done
+module examples/security
+
+import iyi_web/dsl::*
+import iyi_web/basic_auth::{BasicAuthHandler}
+import iyi_web/rate_limit::{RateLimitHandler}
+import iyi_web/request_id::{RequestIdHandler}
+import iyi_web/security_headers::{SecurityHeadersHandler}
+
+# Handlers run in the order they are added. The id comes first, so even a
+# refused request has one to be reported by; the rate limit comes before
+# authentication, so guessing passwords counts against it too.
+use RequestIdHandler.new
+use SecurityHeadersHandler.new(content_security_policy: "default-src 'self'")
+
+# Five requests per client address every ten seconds. Behind a reverse
+# proxy, pass a block that keys on the header the proxy sets instead.
+use RateLimitHandler.new(limit: 5, period: 10)
+
+admin = BasicAuthHandler.new("admin", Program.env("ADMIN_PASSWORD") || "secret", realm: "Admin")
+admin.only ["/admin", "/admin/*"], "*"
+use admin
+
+get "/" do |env|
+  "Hello, " + (env.request.remote_address || "unix client") + ". Your request id is " + env.get("request_id").to_s + ".\n"
+end
+
+get "/admin" do |env|
+  "Signed in as " + env.get("basic_auth.username").to_s + ".\n"
+end
+
+run

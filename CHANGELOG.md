@@ -52,6 +52,8 @@ All notable changes to iyi-web are recorded here. The format follows
   `Request#tls?`, filled in by the server.
 - `Handler#applies?`: `only` and `exclude` together, an empty `only`
   meaning every request.
+- `examples/security.iyi`: all four handlers in front of a page and an
+  `/admin` area.
 
 ### Changed
 
