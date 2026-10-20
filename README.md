@@ -826,6 +826,7 @@ before request logging.
 | `CSRFHandler` | `web/iyi_web/csrf` | Refuses unsafe requests without the session's CSRF token with `403`. See [CSRF](#csrf). |
 | `LogHandler` | `web/iyi_web/log` | Writes one line per request to `config.logger`. Added by default; `logging false` removes it. |
 | `StaticHandler` | `web/iyi_web/static` | Serves the public folder. Added by default; `serve_static false` removes it. |
+| `SecurityHeadersHandler` | `web/iyi_web/security_headers` | Sets `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Cross-Origin-Opener-Policy` and, when given, `Content-Security-Policy` and `Strict-Transport-Security`. See [Security](#security). |
 | `BasicAuthHandler` | `web/iyi_web/basic_auth` | HTTP Basic authentication; `401` with a challenge otherwise. See [Security](#security). |
 
 To write your own, subclass `Handler`, override `call`, and pass the request
@@ -1176,6 +1177,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/static` | `StaticHandler` |
 | `web/iyi_web/log` | `LogHandler`, `Logger`, `StdoutLogger` |
 | `web/iyi_web/basic_auth` | `BasicAuthHandler`, `basic_credentials` |
+| `web/iyi_web/security_headers` | `SecurityHeadersHandler` |
 | `web/iyi_web/harness` | `http_request`, `form_request`, `dispatch`, `routes` |
 | `web/iyi_web/session` | `SessionHandler`, `Session`, `session`, `save_session` |
 | `web/iyi_web/csrf` | `CSRFHandler`, `csrf_token`, `csrf_tag` |

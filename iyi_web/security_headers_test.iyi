@@ -1,0 +1,89 @@
+# Security headers: the defaults, each one replaced or left out, HSTS only
+# over TLS, and a route's own value winning over the handler's.
+module iyi_web/security_headers_test
+
+import iyi_web/security_headers::{SecurityHeadersHandler}
+import iyi_web/handler::{Handler, chain}
+import iyi_web/harness::*
+import iyi_web/spec::*
+
+def secured(handler : SecurityHeadersHandler) : Handler
+  chain([handler, routes { |r|
+    r.get "/" do |env|
+      "home"
+    end
+    r.get "/embed" do |env|
+      env.response.headers["X-Frame-Options"] = "ALLOW-FROM https://partner.example"
+      env.response.headers.delete("Cross-Origin-Opener-Policy")
+      "embeddable"
+    end
+    r.get "/raw" do |env|
+      "raw"
+    end
+  }])
+end
+
+describe "SecurityHeadersHandler" do
+  it "sends the defaults and no CSP or HSTS unless asked" do
+    headers = dispatch(secured(SecurityHeadersHandler.new), "GET", "/").response.headers
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert headers["X-Frame-Options"] == "SAMEORIGIN"
+    assert headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+    assert headers["Cross-Origin-Opener-Policy"] == "same-origin"
+    assert !headers.has_key?("Content-Security-Policy")
+    assert !headers.has_key?("Strict-Transport-Security")
+  end
+
+  it "replaces a default and leaves out one set to nil" do
+    handler = SecurityHeadersHandler.new(frame_options: "DENY", referrer_policy: nil, content_security_policy: "default-src 'self'")
+    headers = dispatch(secured(handler), "GET", "/").response.headers
+    assert headers["X-Frame-Options"] == "DENY"
+    assert !headers.has_key?("Referrer-Policy")
+    assert headers["Content-Security-Policy"] == "default-src 'self'"
+    assert headers["X-Content-Type-Options"] == "nosniff"
+  end
+
+  it "lets a route overwrite or drop a header it set" do
+    headers = dispatch(secured(SecurityHeadersHandler.new), "GET", "/embed").response.headers
+    assert headers["X-Frame-Options"] == "ALLOW-FROM https://partner.example"
+    assert !headers.has_key?("Cross-Origin-Opener-Policy")
+    assert headers["X-Content-Type-Options"] == "nosniff"
+  end
+
+  it "sends HSTS only over TLS or behind a proxy that says https" do
+    app = secured(SecurityHeadersHandler.new(strict_transport_security: "max-age=63072000; includeSubDomains"))
+    plain = dispatch(app, "GET", "/").response.headers
+    assert !plain.has_key?("Strict-Transport-Security")
+
+    tls = http_request("GET", "/")
+    tls.tls = true
+    assert dispatch(app, tls).response.headers["Strict-Transport-Security"] == "max-age=63072000; includeSubDomains"
+
+    proxied = http_request("GET", "/")
+    proxied.headers["X-Forwarded-Proto"] = "HTTPS"
+    assert dispatch(app, proxied).response.headers.has_key?("Strict-Transport-Security")
+
+    downgraded = http_request("GET", "/")
+    downgraded.headers["X-Forwarded-Proto"] = "http"
+    assert !dispatch(app, downgraded).response.headers.has_key?("Strict-Transport-Security")
+  end
+
+  it "covers a 404 as well" do
+    ctx = dispatch(secured(SecurityHeadersHandler.new), "GET", "/missing")
+    assert ctx.response.status_code == 404
+    assert ctx.response.headers["X-Content-Type-Options"] == "nosniff"
+  end
+
+  it "skips excluded paths" do
+    handler = SecurityHeadersHandler.new
+    handler.exclude ["/raw"]
+    app = secured(handler)
+    assert !dispatch(app, "GET", "/raw").response.headers.has_key?("X-Frame-Options")
+    assert dispatch(app, "GET", "/").response.headers.has_key?("X-Frame-Options")
+  end
+
+  it "refuses a value no header can carry when it is made" do
+    assert panics? { SecurityHeadersHandler.new(content_security_policy: "default-src 'self'\r\nSet-Cookie: x=1") }
+    assert panics? { SecurityHeadersHandler.new(strict_transport_security: "max-age=1\n") }
+  end
+end

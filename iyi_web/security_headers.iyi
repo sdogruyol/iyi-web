@@ -1,0 +1,92 @@
+# Response headers that switch on the browser's own defences, as helmet
+# does for Express; Kemal has no built-in for them. The defaults:
+#
+#   X-Content-Type-Options: nosniff
+#   X-Frame-Options: SAMEORIGIN
+#   Referrer-Policy: strict-origin-when-cross-origin
+#   Cross-Origin-Opener-Policy: same-origin
+#
+# plus `Content-Security-Policy` and `Strict-Transport-Security` when they
+# are given. Each is a named argument: a value replaces the default, nil
+# leaves the header out.
+#
+# The headers are written before the rest of the chain runs, not after.
+# A route that sets one of them itself then simply overwrites it - a page
+# that must be framed sets its own `X-Frame-Options`, or deletes it - and
+# a response that streams (`env.response.flush`, server-sent events) still
+# carries them: its headers leave with the first flush, before any
+# handler after it could add one. The cost is that a response rebuilt from
+# nothing goes without them; the server's page for a handler that
+# panicked is the one such response.
+#
+# `Strict-Transport-Security` is only sent on a request that came over
+# TLS, or that a TLS-terminating proxy marked `X-Forwarded-Proto: https`:
+# RFC 6797 7.2 keeps it off plain HTTP. A client can forge that header,
+# but a browser ignores the policy on a plain-HTTP response anyway (8.1),
+# so the forgery gains nothing.
+#
+# Static files are served before `use` handlers; to cover them too, put
+# this handler at the front: `use SecurityHeadersHandler.new, 0`.
+module iyi_web/security_headers
+
+import iyi_web/handler::{Handler}
+import iyi_web/context::{Context}
+import iyi_web/headers::{Headers}
+
+pub class SecurityHeadersHandler < Handler
+  @always : Array(Tuple(String, String))
+  @hsts : String?
+
+  def initialize(content_type_options : String? = "nosniff",
+                 frame_options : String? = "SAMEORIGIN",
+                 referrer_policy : String? = "strict-origin-when-cross-origin",
+                 cross_origin_opener_policy : String? = "same-origin",
+                 content_security_policy : String? = nil,
+                 strict_transport_security : String? = nil)
+    super()
+    @always = [] of Tuple(String, String)
+    keep("X-Content-Type-Options", content_type_options)
+    keep("X-Frame-Options", frame_options)
+    keep("Referrer-Policy", referrer_policy)
+    keep("Cross-Origin-Opener-Policy", cross_origin_opener_policy)
+    keep("Content-Security-Policy", content_security_policy)
+    if hsts = strict_transport_security
+      checked("Strict-Transport-Security", hsts)
+    end
+    @hsts = strict_transport_security
+  end
+
+  # The headers every response gets, in the order they are written.
+  pub def headers : Array(Tuple(String, String))
+    @always
+  end
+
+  pub def call(ctx : Context) : Nil
+    return call_next(ctx) unless applies?(ctx)
+    response_headers = ctx.response.headers
+    @always.each { |pair| response_headers[pair[0]] = pair[1] }
+    if hsts = @hsts
+      response_headers["Strict-Transport-Security"] = hsts if secure?(ctx)
+    end
+    call_next(ctx)
+  end
+
+  private def secure?(ctx : Context) : Bool
+    return true if ctx.request.tls?
+    proto = ctx.request.headers["X-Forwarded-Proto"]?
+    !proto.nil? && proto.strip.downcase == "https"
+  end
+
+  private def keep(name : String, value : String?) : Nil
+    if value
+      checked(name, value)
+      @always << {name, value}
+    end
+  end
+
+  # A value no header may carry is the application's mistake: refused when
+  # the handler is made, not on the first request.
+  private def checked(name : String, value : String) : Nil
+    raise "invalid value for #{name}: control characters such as CR and LF are not allowed" unless Headers.valid_value?(value)
+  end
+end

@@ -33,6 +33,12 @@ All notable changes to iyi-web are recorded here. The format follows
   `WWW-Authenticate: Basic realm="...", charset="UTF-8"` for missing,
   refused or malformed credentials (base64 that does not decode is a `401`,
   not a panic); the user name stored under `"basic_auth.username"`.
+- `SecurityHeadersHandler` (new `iyi_web/security_headers`):
+  `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` and
+  `Cross-Origin-Opener-Policy` by default, `Content-Security-Policy` and
+  `Strict-Transport-Security` when given (HSTS only over TLS or behind
+  `X-Forwarded-Proto: https`); each replaceable or left out with `nil`, set
+  before the route so the route's own value wins.
 - `Request#remote_address` (the client's IP, nil over a unix socket) and
   `Request#tls?`, filled in by the server.
 - `Handler#applies?`: `only` and `exclude` together, an empty `only`
