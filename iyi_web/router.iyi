@@ -15,7 +15,8 @@ import iyi_web/status::*
 import iyi_web/event_stream::{EventStream}
 import iyi_web/websocket::{WebSocket}
 import iyi_web/config::{Config, config}
-import iyi_web/failure::{StatusError, render_error_type_page, render_failure_page}
+import iyi_web/failure::{StatusError, render_error_type_page, render_failure_page, render_client_error_page}
+import iyi_web/validation::{BodyError}
 
 alias HandlerProc = Context -> String
 
@@ -193,10 +194,10 @@ pub class Router
 
   # The page for an error of type *type*, or of a subclass of it: Kemal's
   # `error MyException`. It takes an error a route answers, and a panic in
-  # a route as `Panicked` (or `Error`). The response is a 500 unless the
-  # block sets another status. Pages for types are tried in the order they
-  # were registered, and the first that matches renders, before any
-  # `error 500`.
+  # a route as `Panicked` (or `Error`). The response has the error's status,
+  # 500 unless it is an `HttpError`, unless the block sets another. Pages
+  # for types are tried in the order they were registered, and the first
+  # that matches renders, before any `error` page for the status.
   pub def error(type : E.class, &block : Context, E -> B) : Nil forall E : Error, B : IntoBody
     @error_types[E.to_s] = ->(ctx : Context, failure : Error) : String? {
       failure.is_a?(E) ? block.call(ctx, failure).into_body : nil
@@ -427,8 +428,10 @@ pub class RouteHandler < Handler
       end
     end
 
+    # The `BodyError` `env.params.json_as` would answer, so a page for that
+    # type, or for 400, takes it.
     unless ctx.params.json_valid?
-      render_error(ctx, 400)
+      render_failure(ctx, BodyError.new(400, "malformed JSON: " + (ctx.params.json_error || "")))
       drop_head_body(ctx)
       return
     end
@@ -577,17 +580,22 @@ pub class RouteHandler < Handler
   end
 
   # An error a route answered gets the first page registered for its
-  # type, as a 500 unless that page sets another status. With none, it
-  # gets the 500 page, told the error; the built-in one shows the message
-  # only under `show_exceptions`, as for a panic.
+  # type, with its status: an `HttpError`'s own, else 500, unless that
+  # page sets another. With none, it gets the page for that status, told
+  # the error. Without one either, the built-in page: an `HttpError` below
+  # 500 is the client's and shows its message; any other shows it only
+  # under `show_exceptions`, as for a panic.
   private def render_failure(ctx : Context, failure : Error) : Nil
-    ctx.response.status_code = 500
+    status = failure.is_a?(HttpError) ? failure.status : 500
+    ctx.response.status_code = status
     ctx.response.set_body("")
     return if render_error_type_page(ctx, failure, @error_types)
-    if page = @error_handlers[500]?
+    if page = @error_handlers[status]?
       render_page(ctx, page, failure)
+    elsif failure.is_a?(HttpError) && status < 500
+      render_client_error_page(ctx, failure)
     else
-      render_failure_page(ctx, failure.message, @config.show_exceptions?)
+      render_failure_page(ctx, failure.message, @config.show_exceptions?, status)
     end
   end
 

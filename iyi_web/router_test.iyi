@@ -2,12 +2,79 @@
 # filter on one path cannot rewrite the assertions on another.
 module iyi_web/router_test
 
+import std/json::{serializable}
 import iyi_web/router::{Router, RouteHandler}
 import iyi_web/harness::*
 import iyi_web/context::{Context}
 import iyi_web/config::{Config}
 import iyi_web/failure::{StatusError}
+import iyi_web/request::{Request}
+import iyi_web/status::{HttpError}
+import iyi_web/validation::{BodyError, Validate, Validator}
 import iyi_web/spec::*
+
+struct Draft
+  getter title : String
+  getter stars : Int32
+  derive serializable
+end
+
+impl Validate for Draft
+  def validate(v : Validator) : Nil
+    v.length("title", title, min: 3)
+    v.range("stars", stars, min: 1, max: 5)
+  end
+end
+
+struct Teapot
+end
+
+impl Error for Teapot
+  def message : String
+    "short and stout"
+  end
+end
+
+impl HttpError for Teapot
+  def status : Int32
+    418
+  end
+end
+
+struct Outage
+end
+
+impl Error for Outage
+  def message : String
+    "database at 10.0.0.5 is down"
+  end
+end
+
+impl HttpError for Outage
+  def status : Int32
+    503
+  end
+end
+
+def json_post(path : String, body : String) : Request
+  http_request("POST", path, "", body, "application/json")
+end
+
+# POST /drafts reads a `Draft`; the block adds pages.
+def drafts_app(& : Router -> Nil) : RouteHandler
+  router = Router.new
+  router.post "/drafts" do |env|
+    env["route"] = "ran"
+    draft = env.params.json_as(Draft)
+    draft.is_a?(BodyError) ? draft : "saved " + draft.title
+  end
+  yield router
+  RouteHandler.new(router)
+end
+
+def drafts_app : RouteHandler
+  drafts_app { |r| }
+end
 
 struct Missing
   getter what : String
@@ -872,6 +939,123 @@ describe "Router" do
       handler = RouteHandler.new(root)
       assert dispatch(handler, "GET", "/api/x").response.body == "api item"
       assert dispatch(handler, "GET", "/y").response.body == "root invalid"
+    end
+  end
+
+  describe "typed bodies and errors that carry a status" do
+    it "reads a JSON body into the route's type" do
+      ctx = dispatch(drafts_app, json_post("/drafts", %({"title":"Notes","stars":4})))
+      assert ctx.response.status_code == 200
+      assert ctx.response.body == "saved Notes"
+    end
+
+    it "answers JSON that does not parse with 400 and where it stopped, before the route" do
+      ctx = dispatch(drafts_app, json_post("/drafts", "{\"title\":\"Notes\",}"))
+      assert ctx.response.status_code == 400
+      assert ctx.response.content_type == "application/json; charset=utf-8"
+      assert ctx.response.body.starts_with?(%({"error":"malformed JSON: ))
+      assert ctx.response.body.includes?("line 1, column")
+      assert ctx["route"]?.nil?
+    end
+
+    it "answers a missing field or one of the wrong kind with 422, naming it" do
+      missing = dispatch(drafts_app, json_post("/drafts", %({"title":"Notes"})))
+      assert missing.response.status_code == 422
+      assert missing.response.body == %({"error":"invalid body: stars is required","fields":{"stars":"is required"}})
+      assert missing.response.headers["x-content-type-options"] == "nosniff"
+      wrong = dispatch(drafts_app, json_post("/drafts", %({"title":["Notes"],"stars":"4"})))
+      assert wrong.response.status_code == 422
+      assert wrong.response.body.ends_with?(%("fields":{"title":"must be a string","stars":"must be an integer"}}))
+    end
+
+    it "answers failed validation with 422 and every field's message" do
+      ctx = dispatch(drafts_app, json_post("/drafts", %({"title":"No","stars":9})))
+      assert ctx.response.status_code == 422
+      assert ctx.response.body == %({"error":"invalid body: title must be at least 3 characters, stars must be between 1 and 5","fields":{"title":"must be at least 3 characters","stars":"must be between 1 and 5"}})
+    end
+
+    it "answers a body that is not JSON with 415, in plain text for a client that did not ask for JSON" do
+      ctx = dispatch(drafts_app, form_request("POST", "/drafts", "title=Notes&stars=4"))
+      assert ctx.response.status_code == 415
+      assert ctx.response.content_type == "text/plain; charset=utf-8"
+      assert ctx.response.body == "expected a JSON body (Content-Type: application/json)\n"
+      html = json_post("/drafts", %({"title":"Notes"}))
+      html.headers["Accept"] = "text/html"
+      assert dispatch(drafts_app, html).response.content_type == "text/plain; charset=utf-8"
+      asks = form_request("POST", "/drafts", "title=Notes")
+      asks.headers["Accept"] = "application/json"
+      assert dispatch(drafts_app, asks).response.body == %({"error":"expected a JSON body (Content-Type: application/json)"})
+    end
+
+    it "lets the page for the status, then the page for the type, take the error first" do
+      by_status = drafts_app do |r|
+        r.error 422 do |env, err|
+          "422: " + err.message
+        end
+      end
+      ctx = dispatch(by_status, json_post("/drafts", %({"title":"Notes"})))
+      assert ctx.response.status_code == 422
+      assert ctx.response.body == "422: invalid body: stars is required"
+
+      by_type = drafts_app do |r|
+        r.error 422 do |env, err|
+          "status page"
+        end
+        r.error BodyError do |env, err|
+          env.json({"problems" => err.fields})
+        end
+      end
+      typed = dispatch(by_type, json_post("/drafts", %({"title":"Notes"})))
+      assert typed.response.status_code == 422
+      assert typed.response.body == %({"problems":{"stars":"is required"}})
+    end
+
+    it "gives the body that does not parse to the page for 400, told why" do
+      handler = drafts_app do |r|
+        r.error 400 do |env, err|
+          err.is_a?(BodyError) ? "bad: " + err.message : "other"
+        end
+      end
+      ctx = dispatch(handler, json_post("/drafts", "[1,"))
+      assert ctx.response.status_code == 400
+      assert ctx.response.body.starts_with?("bad: malformed JSON: ")
+    end
+
+    it "answers a returned StatusError or HttpError with its own status" do
+      handler = routes do |r|
+        r.get "/gone" do |env|
+          StatusError.new(404)
+        end
+        r.get "/teapot" do |env|
+          Teapot.new
+        end
+        r.error 404 do |env, err|
+          "missing: " + err.message
+        end
+      end
+      gone = dispatch(handler, "GET", "/gone")
+      assert gone.response.status_code == 404
+      assert gone.response.body == "missing: 404 Not Found"
+      teapot = dispatch(handler, http_request("GET", "/teapot"))
+      assert teapot.response.status_code == 418
+      assert teapot.response.body == "short and stout\n"
+    end
+
+    it "hides the message of an HttpError from 500 up unless show_exceptions" do
+      router = Router.new
+      router.get "/db" do |env|
+        Outage.new
+      end
+      settings = Config.new
+      settings.show_exceptions = false
+      hidden = dispatch(RouteHandler.new(router, settings), "GET", "/db")
+      assert hidden.response.status_code == 503
+      assert hidden.response.body.includes?("<h1>503 Service Unavailable</h1>")
+      assert !hidden.response.body.includes?("10.0.0.5")
+      settings.show_exceptions = true
+      shown = dispatch(RouteHandler.new(router, settings), "GET", "/db")
+      assert shown.response.status_code == 503
+      assert shown.response.body.includes?("<pre>database at 10.0.0.5 is down</pre>")
     end
   end
 

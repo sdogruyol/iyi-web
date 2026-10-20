@@ -26,3 +26,25 @@ pub def phrase(code : Int32) : String
   else          HTTP.reason_for(code)
   end
 end
+
+# An `Error` that knows the status it answers with. A route that returns
+# one gets that status instead of 500, and the pages for it: `error` for
+# its type, then `error` for its status. Kemal reaches the same place by
+# raising `Kemal::Exceptions::CustomException` subclasses.
+#
+# Below 500 the error is the client's, so the built-in page shows its
+# `message` and `fields`; write them for the client. From 500 up it is the
+# server's, and the built-in page shows the message only under
+# `show_exceptions`, as for any other error.
+#
+# It lives here and not in `iyi_web/failure` because the body readers
+# below the context return one, and `failure` is above the context.
+pub trait HttpError : Error
+  abstract def status : Int32
+
+  # Messages by field name for the client: what a body that failed
+  # validation got wrong. Empty for an error about the whole request.
+  def fields : Hash(String, String)
+    {} of String => String
+  end
+end

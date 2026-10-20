@@ -10,10 +10,12 @@
 # whose body cannot be read gets a 400 (or a 413 for a breached upload
 # limit) rather than a route reading empty tables. Uploaded files live in
 # temporary files until `cleanup`, which the server calls once the
-# response is written.
+# response is written. `json_as` reads a JSON body into a type of the
+# application's own instead of `JSON::Any` (`iyi_web/validation`).
 module iyi_web/params
 
-import std/json::{JSON, Any}
+import std/json::{Any, Parser}
+import iyi_web/validation::{BodyError, decode_json}
 import iyi_web/codec::*
 import iyi_web/request::{Request}
 import iyi_web/multipart::{FileUpload, Multipart, MultipartError, multipart_boundary, parse_multipart}
@@ -28,6 +30,8 @@ pub class Params
   @media_type : String
   @content_type : String
   @json : Hash(String, Any)
+  @json_root : Any?
+  @json_error : String?
   @json_state : Int32
   @files : Hash(String, FileUpload)
   @all_files : Hash(String, Array(FileUpload))
@@ -42,6 +46,8 @@ pub class Params
     @query_pairs = query_pairs || pairs_of(@query)
     @body_pairs = body_pairs || pairs_of(@body)
     @json = {} of String => Any
+    @json_root = nil
+    @json_error = nil
     @json_state = 0
     @files = {} of String => FileUpload
     @all_files = {} of String => Array(FileUpload)
@@ -108,6 +114,33 @@ pub class Params
     @json_state != 2
   end
 
+  # Why a declared JSON body does not parse, with the line and column; nil
+  # when it does, or when the body is not declared JSON.
+  pub def json_error : String?
+    parse_json
+    @json_error
+  end
+
+  # The JSON body read into *type*, a type with `derive serializable` or
+  # anything else `JSON.from_json` reads, checked by its `validate` when
+  # it implements `Validate`. Never panics: a body that cannot be the type
+  # is a `BodyError`, answered 415 when the request does not declare JSON,
+  # 400 when it does not parse, 422 naming the fields that are missing, of
+  # the wrong kind, or failed validation (`iyi_web/validation`). A route
+  # that returns the error sends that status.
+  pub def json_as(type : T.class) : T | BodyError forall T
+    unless json_media_type?(@media_type)
+      return BodyError.new(415, "expected a JSON body (Content-Type: application/json)")
+    end
+    parse_json
+    if failure = @json_error
+      return BodyError.new(400, "malformed JSON: " + failure)
+    end
+    root = @json_root
+    return BodyError.new(400, "malformed JSON: the body is empty") unless root
+    decode_json(@raw_body, root, type)
+  end
+
   # Uploaded files by field name. A later file under the same name
   # replaces an earlier one; names ending in `[]` are in `all_files`.
   pub def files : Hash(String, FileUpload)
@@ -161,11 +194,14 @@ pub class Params
     @json_state = 1
     return unless json_media_type?(@media_type)
     return if @raw_body.empty?
-    parsed = JSON.parse?(@raw_body)
-    unless parsed
+    parser = Parser.new(@raw_body)
+    parsed = parser.parse
+    if failure = parser.error
+      @json_error = failure
       @json_state = 2
       return
     end
+    @json_root = parsed
     if members = parsed.as_h?
       @json = members
     elsif parsed.as_a?

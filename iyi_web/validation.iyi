@@ -1,0 +1,421 @@
+# Reading a JSON request body into an application's own type, and checking
+# what it says.
+#
+# Kemal leaves this to the application: `env.params.json` hands over
+# `JSON::Any`, and `Note.from_json(env.request.body)` raises on a body of
+# the wrong shape, which the application rescues or lets become a 500.
+# iyi has no rescue. `JSON.from_json` panics on what it refuses, a panic is
+# caught only where a task's value is read, and it is printed to the error
+# stream when it is: a client could fill the server's log one bad body at a
+# time. So the parsed body is first checked against the type the way
+# `derive serializable` reads it, and every field it would refuse is named,
+# all of them rather than the first. Only a body that passes is read, and
+# that read still runs in a task of its own, so whatever the check does not
+# model (a field `converter:`) is a 422 too and never a panic in the route.
+module iyi_web/validation
+
+import std/json::{JSON, Any, Parser}
+import std/regex::{Regex}
+import iyi_web/status::{HttpError}
+
+# The body could not be read into the type a route asked for: 400 for JSON
+# that does not parse, 415 for a body that is not JSON, 422 for JSON of the
+# wrong shape or that failed validation. `fields` holds a message per field
+# for the last two, keyed by the field's path (`title`, `author.name`,
+# `tags[1]`), in the order they were found.
+pub class BodyError
+  getter status : Int32
+  getter fields : Hash(String, String)
+  @message : String
+
+  def initialize(@status : Int32, @message : String, @fields : Hash(String, String) = {} of String => String)
+  end
+
+  # 422 for these per-field messages, with a message that lists them.
+  def self.invalid(fields : Hash(String, String)) : BodyError
+    parts = [] of String
+    fields.each { |field, message| parts << field + " " + message }
+    BodyError.new(422, "invalid body: " + parts.join(", "), fields)
+  end
+end
+
+impl Error for BodyError
+  def message : String
+    @message
+  end
+end
+
+impl HttpError for BodyError
+  def status : Int32
+    @status
+  end
+
+  def fields : Hash(String, String)
+    @fields
+  end
+end
+
+# Collects what is wrong with a value, one message per field. The first
+# rule a field fails is the one reported: a blank title is "is required",
+# not also "must be at least 3 characters". Every rule but `required`
+# passes over a nil value, so an optional field is checked only when it was
+# sent. Strings are measured in characters.
+pub class Validator
+  @errors : Hash(String, String)
+
+  def initialize
+    @errors = {} of String => String
+  end
+
+  # Messages by field, in the order the fields failed.
+  pub def errors : Hash(String, String)
+    @errors
+  end
+
+  pub def valid? : Bool
+    @errors.empty?
+  end
+
+  # Whether *field* has failed a rule already.
+  pub def failed?(field : String) : Bool
+    @errors.has_key?(field)
+  end
+
+  # Records *message* for *field*, unless the field already has one. The
+  # rule an application writes itself:
+  #
+  #     v.add("ends_at", "must be after starts_at") if ends_at < starts_at
+  pub def add(field : String, message : String) : Nil
+    @errors[field] = message unless @errors.has_key?(field)
+  end
+
+  # A nil, a string of nothing but whitespace, or an empty array.
+  pub def required(field : String, value : String?) : Nil
+    add(field, "is required") if value.nil? || value.strip.empty?
+  end
+
+  pub def required(field : String, value : Array(T)?) : Nil forall T
+    add(field, "is required") if value.nil? || value.empty?
+  end
+
+  pub def required(field : String, value : T) : Nil forall T
+    add(field, "is required") if value.nil?
+  end
+
+  # A string's length in characters, from *min* to *max* inclusive.
+  pub def length(field : String, value : String?, min : Int32? = nil, max : Int32? = nil) : Nil
+    return unless value
+    size = value.size
+    if low = min
+      return add(field, "must be at least " + count(low, "character")) if size < low
+    end
+    if high = max
+      add(field, "must be at most " + count(high, "character")) if size > high
+    end
+  end
+
+  # An array's size, from *min* to *max* items inclusive.
+  pub def length(field : String, value : Array(T)?, min : Int32? = nil, max : Int32? = nil) : Nil forall T
+    return unless value
+    size = value.size
+    if low = min
+      return add(field, "must have at least " + count(low, "item")) if size < low
+    end
+    if high = max
+      add(field, "must have at most " + count(high, "item")) if size > high
+    end
+  end
+
+  # A number from *min* to *max* inclusive. The bounds are of the value's
+  # type: `v.range("stars", stars, min: 1, max: 5)` for an `Int32`,
+  # `min: 0.0` for a `Float64`.
+  pub def range(field : String, value : N?, min : N? = nil, max : N? = nil) : Nil forall N
+    return if value.nil?
+    low = min
+    high = max
+    if low && high
+      add(field, "must be between " + low.to_s + " and " + high.to_s) if value < low || value > high
+    elsif low
+      add(field, "must be at least " + low.to_s) if value < low
+    elsif high
+      add(field, "must be at most " + high.to_s) if value > high
+    end
+  end
+
+  # A string *pattern* matches. The pattern may match anywhere in the
+  # string: anchor it with `\A` and `\z` to match the whole of it.
+  pub def format(field : String, value : String?, pattern : Regex, message : String = "is invalid") : Nil
+    return unless value
+    add(field, message) unless pattern.match?(value)
+  end
+
+  # A value that is one of *choices*.
+  pub def one_of(field : String, value : T?, choices : Array(T)) : Nil forall T
+    return if value.nil?
+    add(field, "must be one of: " + choices.join(", ")) unless choices.includes?(value)
+  end
+
+  private def count(n : Int32, noun : String) : String
+    n.to_s + " " + noun + (n == 1 ? "" : "s")
+  end
+end
+
+# A type that checks its own values once a body has been read into it.
+# `read_json` and `env.params.json_as` run it, and answer a 422 with the
+# field messages when it records any:
+#
+#     impl Validate for Note
+#       def validate(v : Validator) : Nil
+#         v.required("title", title)
+#         v.length("title", title, max: 80)
+#         v.range("stars", stars, min: 1, max: 5)
+#       end
+#     end
+#
+# Only the value read is asked; a type it holds is checked by its
+# `validate`, which may call the inner value's with the same validator.
+pub trait Validate
+  abstract def validate(v : Validator) : Nil
+end
+
+# *text* read into *type*: a type with `derive serializable`, or anything
+# else `JSON.from_json` reads, such as `Array(Note)`. Answers a
+# `BodyError`, never panics: 400 when *text* is not JSON, with the line and
+# column; 422 naming every field that is missing, null where it may not
+# be, or of the wrong kind, and the field messages of a `Validate` type.
+pub def read_json(text : String, type : T.class) : T | BodyError forall T
+  parser = Parser.new(text)
+  root = parser.parse
+  if refusal = parser.error
+    return BodyError.new(400, "malformed JSON: " + refusal)
+  end
+  decode_json(text, root, type)
+end
+
+# `read_json` for a *text* already parsed into *root*.
+pub def decode_json(text : String, root : Any, type : T.class) : T | BodyError forall T
+  errors = {} of String => String
+  check_value(root, type, "", errors)
+  unless errors.empty?
+    if whole = errors[""]?
+      return BodyError.new(422, "the body " + whole)
+    end
+    return BodyError.invalid(errors)
+  end
+  value = read_isolated(text, type)
+  return BodyError.new(422, "invalid body: " + value.message) if value.is_a?(Panicked)
+  if value.is_a?(Validate)
+    validator = Validator.new
+    value.validate(validator)
+    return BodyError.invalid(validator.errors) unless validator.valid?
+  end
+  value
+end
+
+# The read, in a task of its own: a refusal the check let through is
+# caught as the task's `Panicked` rather than ending the route.
+private def read_isolated(text : String, type : T.class) : T | Panicked forall T
+  group do |g|
+    task = g.spawn { JSON.from_json(text, T) }
+    task.value
+  end
+end
+
+private def refuse(errors : Hash(String, String), path : String, message : String) : Nil
+  errors[path] = message unless errors.has_key?(path)
+end
+
+private def member_path(path : String, key : String) : String
+  path.empty? ? key : path + "." + key
+end
+
+# What follows mirrors `JSON.read_value`, one overload per type it reads,
+# and records a refusal where it would panic.
+
+private def check_value(any : Any, type : Nil.class, path : String, errors : Hash(String, String)) : Nil
+  refuse(errors, path, "must be null") unless any.raw.nil?
+end
+
+private def check_value(any : Any, type : Bool.class, path : String, errors : Hash(String, String)) : Nil
+  refuse(errors, path, "must be true or false") unless any.raw.is_a?(Bool)
+end
+
+private def check_value(any : Any, type : Int32.class, path : String, errors : Hash(String, String)) : Nil
+  check_integer(any, -2147483648_i64, 2147483647_i64, path, errors)
+end
+
+private def check_value(any : Any, type : Int64.class, path : String, errors : Hash(String, String)) : Nil
+  refuse(errors, path, "must be an integer") unless any.raw.is_a?(Int64)
+end
+
+private def check_value(any : Any, type : UInt8.class, path : String, errors : Hash(String, String)) : Nil
+  check_integer(any, 0_i64, 255_i64, path, errors)
+end
+
+# An integer past Int64 is held as a float; a whole one in range is let
+# through, and the read, which sees its digits, has the last word.
+private def check_value(any : Any, type : UInt64.class, path : String, errors : Hash(String, String)) : Nil
+  raw = any.raw
+  if raw.is_a?(Int64)
+    refuse(errors, path, "must be an integer from 0 to 18446744073709551615") if raw < 0_i64
+  elsif raw.is_a?(Float64)
+    refuse(errors, path, "must be an integer from 0 to 18446744073709551615") unless raw >= 0.0 && raw <= 18446744073709551615.0 && raw == raw.floor
+  else
+    refuse(errors, path, "must be an integer")
+  end
+end
+
+private def check_value(any : Any, type : Float64.class, path : String, errors : Hash(String, String)) : Nil
+  raw = any.raw
+  refuse(errors, path, "must be a number") unless raw.is_a?(Int64) || raw.is_a?(Float64)
+end
+
+private def check_value(any : Any, type : String.class, path : String, errors : Hash(String, String)) : Nil
+  refuse(errors, path, "must be a string") unless any.raw.is_a?(String)
+end
+
+private def check_value(any : Any, type : Any.class, path : String, errors : Hash(String, String)) : Nil
+end
+
+private def check_value(any : Any, type : Array(E).class, path : String, errors : Hash(String, String)) : Nil forall E
+  unless items = any.as_a?
+    refuse(errors, path, "must be an array")
+    return
+  end
+  items.each_with_index do |item, index|
+    check_value(item, E, path + "[" + index.to_s + "]", errors)
+  end
+end
+
+private def check_value(any : Any, type : Hash(String, V).class, path : String, errors : Hash(String, String)) : Nil forall V
+  unless members = any.as_h?
+    refuse(errors, path, "must be an object")
+    return
+  end
+  members.each do |key, member|
+    check_value(member, V, member_path(path, key), errors)
+  end
+end
+
+# A type that admits nil, an enum, or a type that reads itself: for a
+# `derive serializable` one, each field as its `initialize(pull)` reads it.
+# A field's type is asked of the field (`typeof`, never evaluated): written
+# out by name, a type of the application's own is not this module's to
+# name.
+private def check_value(any : Any, type : T.class, path : String, errors : Hash(String, String)) : Nil forall T
+  {% if T.nilable? %}
+    check_value(any, typeof(nil.as(T) || raise("")), path, errors) unless any.raw.nil?
+  {% elsif T < ::Enum %}
+    check_enum(any, T, path, errors)
+  {% else %}
+    unless members = any.as_h?
+      refuse(errors, path, "must be an object")
+      return
+    end
+    {% for ivar in T.instance_vars %}
+      {% ann = ivar.annotation(::Std::Json::JSON::Field) %}
+      {% unless ann && (ann[:ignore] || ann[:ignore_deserialize]) %}
+        {% key = ann && ann[:key] ? ann[:key] : ivar.name.stringify %}
+        if found = members[{{ key }}]?
+          {% if ann && ann[:converter] %}
+            # Read by the converter alone; its refusal is the read's.
+          {% elsif ivar.type.nilable? %}
+            check_value(found, typeof(T.allocate.@{{ ivar.name }}), member_path(path, {{ key }}), errors)
+          {% elsif ivar.has_default_value? %}
+            # A null keeps the default.
+            check_value(found, typeof(T.allocate.@{{ ivar.name }}), member_path(path, {{ key }}), errors) unless found.raw.nil?
+          {% else %}
+            if found.raw.nil?
+              refuse(errors, member_path(path, {{ key }}), "is required")
+            else
+              check_value(found, typeof(T.allocate.@{{ ivar.name }}), member_path(path, {{ key }}), errors)
+            end
+          {% end %}
+        else
+          {% unless ivar.type.nilable? || ivar.has_default_value? %}
+            refuse(errors, member_path(path, {{ key }}), "is required")
+          {% end %}
+        end
+      {% end %}
+    {% end %}
+  {% end %}
+end
+
+private def check_integer(any : Any, low : Int64, high : Int64, path : String, errors : Hash(String, String)) : Nil
+  raw = any.raw
+  if raw.is_a?(Int64)
+    refuse(errors, path, "must be an integer from " + low.to_s + " to " + high.to_s) if raw < low || raw > high
+  else
+    refuse(errors, path, "must be an integer")
+  end
+end
+
+# A member's name as `JSON` writes it, any case and underscores allowed,
+# or its value; a `@[Flags]` enum as an array of names.
+private def check_enum(any : Any, type : T.class, path : String, errors : Hash(String, String)) : Nil forall T
+  names = T.names.map { |name| enum_name(name) }.join(", ")
+  {% if T.annotation(Flags) %}
+    items = any.as_a?
+    unless items && items.all? { |item| enum_member?(item, T) && !item.as_s?.nil? }
+      refuse(errors, path, "must be an array of: " + names)
+    end
+  {% else %}
+    refuse(errors, path, "must be one of: " + names) unless enum_member?(any, T)
+  {% end %}
+end
+
+private def enum_member?(any : Any, type : T.class) : Bool forall T
+  raw = any.raw
+  return !T.from_value?(raw).nil? if raw.is_a?(Int64)
+  return false unless raw.is_a?(String)
+  wanted = enum_key(raw)
+  T.values.any? { |member| enum_key(member.to_s) == wanted }
+end
+
+# `JSON`'s matching: ASCII case and underscores do not count.
+private def enum_key(name : String) : String
+  bytes = name.to_unsafe
+  String.build do |text|
+    index = 0
+    while index < name.bytesize
+      byte = bytes[index]
+      if upper?(byte)
+        text << (byte + 32_u8).unsafe_chr
+      elsif byte != 95_u8
+        text << byte.unsafe_chr
+      end
+      index = index + 1
+    end
+  end
+end
+
+# `JSON`'s written name: `DarkRed` is `dark_red`, `HTTPCode` `http_code`.
+private def enum_name(name : String) : String
+  bytes = name.to_unsafe
+  String.build do |text|
+    index = 0
+    while index < name.bytesize
+      byte = bytes[index]
+      if upper?(byte)
+        if index > 0
+          before = bytes[index - 1]
+          small_after = index + 1 < name.bytesize && lower?(bytes[index + 1])
+          small_before = lower?(before) || (before >= 48_u8 && before <= 57_u8)
+          text << '_' if small_before || (upper?(before) && small_after)
+        end
+        text << (byte + 32_u8).unsafe_chr
+      else
+        text << byte.unsafe_chr
+      end
+      index = index + 1
+    end
+  end
+end
+
+private def upper?(byte : UInt8) : Bool
+  byte >= 65_u8 && byte <= 90_u8
+end
+
+private def lower?(byte : UInt8) : Bool
+  byte >= 97_u8 && byte <= 122_u8
+end

@@ -24,9 +24,12 @@ a route returns is checked when the program compiles.
   `QUERY`, with named and wildcard path segments
 - URL, query-string, form, JSON and `multipart/form-data` parameters, with
   file uploads
+- JSON bodies read into your own types, with validation and `400`/`422`
+  answers that name each bad field
 - Before and after filters for every route, a path pattern or a single method
 - Error pages per status code and per error type, automatic `404` and `405`
-  responses, and a `500` page for a route that panics
+  responses, a `500` page for a route that panics, and errors that carry
+  their own status
 - Composable routers with `mount` and `namespace`
 - Middleware for every request or for a path prefix
 - Streaming responses and server-sent events
@@ -220,7 +223,7 @@ end
 | Route segments (`:id`, `*path`) | `env.params.url` |
 | Query string | `env.params.query` |
 | `application/x-www-form-urlencoded` or `multipart/form-data` fields | `env.params.body` |
-| `application/json` and `application/*+json` bodies | `env.params.json` |
+| `application/json` and `application/*+json` bodies | `env.params.json`, or `env.params.json_as(T)` for a type of your own |
 | Uploaded files | `env.params.files`, `env.params.all_files` |
 
 `url`, `query` and `body` are `Hash(String, String)` tables of percent-decoded
@@ -244,7 +247,92 @@ end
 A JSON object's members are in `env.params.json`, a `Hash(String, JSON::Any)`;
 a top-level array is under the key `"_json"`. A request that declares JSON
 and sends something that does not parse gets `400 Bad Request` before the
-route runs.
+route runs, with the line and column where the body stopped making sense
+(see [Typed JSON bodies](#typed-json-bodies)).
+
+### Typed JSON bodies
+
+`env.params.json_as(T)` reads the body into a type with `derive serializable`
+(or anything `JSON.from_json` reads, such as `Array(Note)`), and answers
+`T | BodyError`. Return the error and the client gets its status:
+
+```iyi
+import std/json::{serializable}
+import web/iyi_web/validation::{BodyError, Validate, Validator}
+
+struct NoteInput
+  getter title : String
+  getter priority : Int32 = 3
+  getter tags : Array(String) = [] of String
+  derive serializable
+end
+
+post "/notes" do |env|
+  case input = env.params.json_as(NoteInput)
+  in BodyError
+    input
+  in NoteInput
+    env.status(201).json(save(input))
+  end
+end
+```
+
+`json_as` never panics on what the client sent. Kemal's
+`NoteInput.from_json(env.request.body)` raises on a body of the wrong shape;
+iyi's `JSON.from_json` panics, so the parsed body is first checked against
+the type the way `derive serializable` reads it, and every field it would
+refuse is reported at once:
+
+| Body | Status | `BodyError` |
+|---|---|---|
+| Not declared JSON (no `application/json` or `application/*+json`) | `415` | `expected a JSON body (...)` |
+| Empty, or not JSON | `400` | `malformed JSON: trailing comma in object at line 1, column 21` |
+| A required field missing or `null`, a value of the wrong kind, an integer out of range, an unknown enum member | `422` | `fields`: `{"title" => "is required", "tags[1]" => "must be a string"}` |
+| Failed the type's `Validate` rules | `422` | `fields`: one message per field |
+
+A field with a default may be left out, and keeps its default for a `null`; a
+field whose type admits `nil` may be left out or `null`. Nested fields are
+named by path: `author.name`, `tags[1]`, `[0].title` for an array body.
+
+Unless an `error` page takes it, a `BodyError` is answered with
+`{"error": message, "fields": {...}}` when the request sent JSON or its
+`Accept` asks for it, and with the message as plain text otherwise (see
+[Errors that carry a status](#errors-that-carry-a-status)). The messages are
+written for the client and shown in every environment.
+
+### Validation
+
+A type that implements `Validate` (`web/iyi_web/validation`) is checked once
+it has been read, and `json_as` answers `422` with every failing field:
+
+```iyi
+impl Validate for NoteInput
+  def validate(v : Validator) : Nil
+    v.required("title", title)
+    v.length("title", title, max: 80)
+    v.range("priority", priority, min: 1, max: 5)
+    v.length("tags", tags, max: 5)
+    v.add("title", "is taken") if title_taken?(title)
+  end
+end
+```
+
+| Rule | Fails when | Message |
+|---|---|---|
+| `required(field, value)` | `nil`, a blank string or an empty array | `is required` |
+| `length(field, value, min:, max:)` | a string has fewer or more characters, an array fewer or more items | `must be at least 3 characters`, `must have at most 5 items` |
+| `range(field, value, min:, max:)` | a number is outside the bounds, inclusive; the bounds are of the value's type | `must be between 1 and 5`, `must be at least 1` |
+| `format(field, value, regex, message = "is invalid")` | the regex does not match; it matches anywhere unless anchored with `\A` and `\z` | `is invalid` |
+| `one_of(field, value, choices)` | the value is not among the choices | `must be one of: free, pro` |
+| `add(field, message)` | always: a rule of your own | your message |
+
+Every rule but `required` passes over a `nil`, so an optional field is
+checked only when it was sent. A field keeps the first message it gets, so a
+blank title is `is required` and not also too short. `v.valid?`, `v.errors`
+and `v.failed?(field)` read what has been collected. Only the value read is
+validated: a type it holds is checked by the outer type's `validate`.
+`read_json(text, T)` does the same for a string that did not come from the
+request.
 
 ### File uploads
 
@@ -345,6 +433,33 @@ post "/api/echo" do |env|
   env.json(env.params.json)
 end
 ```
+
+A type with `derive serializable` writes itself, so `env.json` takes it, alone
+or in an `Array`, the same type `env.params.json_as` reads
+([Typed JSON bodies](#typed-json-bodies)):
+
+```iyi
+import std/json::{serializable}
+
+struct Note
+  getter id : Int32
+  getter title : String
+  derive serializable
+
+  def initialize(@id : Int32, @title : String)
+  end
+end
+
+get "/api/notes/:id" do |env|
+  env.json(Note.new(env.params.url["id"].to_i, "Groceries"))   # {"id":1,"title":"Groceries"}
+end
+```
+
+`JSON.to_json` refuses, when the program is compiled, a `Hash` whose values
+are of more than one type: `{"count" => 2, "notes" => notes}` is a
+`Hash(String, Int32 | Array(Note))`, and a union has no `to_json` of its own.
+Write such a document as a `derive serializable` struct with a field per key,
+or with `JSON.build`.
 
 ### Redirects and halting
 
@@ -648,10 +763,12 @@ end
 - `err` has the page's type. Pages are tried in the order they were
   registered, and a page for a type also takes its subclasses; `error Error`
   takes every error.
-- The response is a `500` unless the page sets another status. The route's
-  headers are kept, its body is dropped, and after filters do not run.
-- An error no page takes goes to the `error 500` page with it as `err`, then
-  to the built-in page.
+- The response is a `500`, or the status of an
+  [error that carries one](#errors-that-carry-a-status), unless the page sets
+  another. The route's headers are kept, its body is dropped, and after
+  filters do not run.
+- An error no page takes goes to the `error` page for that status (`error
+  500` for a plain error) with it as `err`, then to the built-in page.
 - A panic is offered to the type pages too, as a `Panicked`: `error Panicked`
   or `error Error` catches it before `error 500` does.
 
@@ -661,6 +778,49 @@ first page that takes it is used. Otherwise the built-in page shows the panic
 message in development and hides it in every other environment;
 `config.show_exceptions = true` or `false` overrides that. An error a route
 returned that no page takes is shown the same way.
+
+### Errors that carry a status
+
+An error type that also implements `HttpError` (`web/iyi_web/status`) is
+answered with its own status instead of `500`, which is what Kemal's
+`CustomException` subclasses are for:
+
+```iyi
+import web/iyi_web/status::{HttpError}
+
+struct Conflict
+end
+
+impl Error for Conflict
+  def message : String
+    "that title is taken"
+  end
+end
+
+impl HttpError for Conflict
+  def status : Int32
+    409
+  end
+end
+
+post "/notes" do |env|
+  title_taken?(env) ? Conflict.new : "created"
+end
+```
+
+The page for its type comes first, then the page for its status (`error
+409`), then the built-in page. Below `500` the error is the client's, so the
+built-in page shows its `message`, and its `fields` (a `Hash(String,
+String)`, empty unless the type defines it): `{"error": message, "fields":
+{...}}` for a request that sent JSON or whose `Accept` asks for it, the
+message as plain text otherwise; write those for the client. From `500` up,
+the message is shown only under `show_exceptions`, as above.
+
+`BodyError` ([Typed JSON bodies](#typed-json-bodies)) and `StatusError`
+(`web/iyi_web/failure`) are `HttpError`s: a route may return
+`StatusError.new(404)` and get the `error 404` page. A JSON body that does not
+parse is answered as the `BodyError` `json_as` would have returned, so
+`error BodyError` and `error 400` both take it.
 
 ## Routers
 
@@ -1235,7 +1395,8 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/context` | `Context` |
 | `web/iyi_web/request` | `Request` (with `remote_address` and `tls?`) |
 | `web/iyi_web/response` | `Response` |
-| `web/iyi_web/params` | `Params` |
+| `web/iyi_web/params` | `Params`, `json_as` |
+| `web/iyi_web/validation` | `BodyError`, `Validate`, `Validator`, `read_json`: typed JSON bodies and their checks |
 | `web/iyi_web/multipart` | `FileUpload` and the `multipart/form-data` parser |
 | `web/iyi_web/cookies` | `CookieJar` |
 | `web/iyi_web/headers` | `Headers` |
@@ -1248,7 +1409,8 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/templates` | `render`, `content_for`, `yield_content` |
 | `web/iyi_web/compress` | `CompressHandler` |
 | `web/iyi_web/content_coding` | `Accept-Encoding` negotiation, `Vary` and `ETag` helpers, `COMPRESS_MIN_SIZE` |
-| `web/iyi_web/failure` | `StatusError`, the built-in error page |
+| `web/iyi_web/failure` | `StatusError`, the built-in error pages |
+| `web/iyi_web/status` | `HttpError`, `phrase` |
 | `web/iyi_web/range` | `Range` header parsing and `206` responses |
 | `web/iyi_web/file_body` | `respond_file`, `respond_file_encoded`, `FILE_CHUNK_SIZE`: a file sent from disk, whole, by range or compressed |
 | `web/iyi_web/cors` | `CORSHandler` |
@@ -1280,6 +1442,7 @@ iyi run examples/json_api.iyi -- -p 8080
 |---|---|
 | `hello.iyi` | The smallest application |
 | `json_api.iyi` | CRUD over an in-memory store with `env.json`, `env.params.json`, status codes and `404` via `halt` |
+| `typed_json.iyi` | JSON bodies read into a type with `json_as`, `Validate` rules, `400`/`415`/`422` answers, and responses written from `derive serializable` types |
 | `forms_and_uploads.iyi` | Form fields, multipart uploads with limits, and `_method` override |
 | `templates.iyi` | Views in `examples/views/` with a layout, `content_for` and a partial |
 | `routers.iyi` | `Router`, `mount`, `namespace`, router filters and error pages |

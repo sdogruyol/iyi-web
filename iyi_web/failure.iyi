@@ -1,18 +1,22 @@
-# What an error page is told caused it, and the built-in 500 page.
+# What an error page is told caused it, and the built-in pages.
 #
 # Kemal hands every error handler an `Exception`. iyi has none: a failure is
 # a value of a type implementing the prelude's `Error`, so that is what a
 # `|env, err|` page gets: the `Panicked` a route's panic was caught as, the
 # error a route returned, or a `StatusError` when there is only a status,
-# such as the 404 for a path no route serves.
+# such as the 404 for a path no route serves. An error that implements
+# `HttpError` (`iyi_web/status`) carries the status it is answered with.
 module iyi_web/failure
 
 import std/html::{HTML}
+import std/json::{JSON}
 import iyi_web/context::{Context}
+import iyi_web/request::{Request}
 import iyi_web/status::*
 
 # An error status with no failure behind it: one the router answers itself
-# (404, 405, 400 ...), or one a filter or route set on the response.
+# (404, 405, 400 ...), or one a filter or route set on the response. A
+# route may return one too, `StatusError.new(404)`, and gets that status.
 pub struct StatusError
   getter status : Int32
 
@@ -23,6 +27,12 @@ end
 impl Error for StatusError
   def message : String
     status.to_s + " " + phrase(status)
+  end
+end
+
+impl HttpError for StatusError
+  def status : Int32
+    @status
   end
 end
 
@@ -42,11 +52,12 @@ pub def render_error_type_page(ctx : Context, failure : Error, pages : Hash(Stri
 end
 
 # Writes the built-in page for a failure no `error` handler answered: a
-# panic, or an error a route returned. *message* reaches the client only
-# when *show* is set, and then the page is locked down so a message that
-# echoes request data cannot run as script. The caller sets the status.
-pub def render_failure_page(ctx : Context, message : String, show : Bool) : Nil
-  title = "500 Internal Server Error"
+# panic, or an error a route returned, with *status* 500 unless it carries
+# another. *message* reaches the client only when *show* is set, and then
+# the page is locked down so a message that echoes request data cannot run
+# as script. The caller sets the status.
+pub def render_failure_page(ctx : Context, message : String, show : Bool, status : Int32 = 500) : Nil
+  title = status.to_s + " " + phrase(status)
   head = "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>" + title + "</title></head><body><h1>" + title + "</h1>"
   ctx.response.content_type = "text/html; charset=utf-8"
   unless show
@@ -58,4 +69,45 @@ pub def render_failure_page(ctx : Context, message : String, show : Bool) : Nil
                         HTML.escape(message) + "</pre></body></html>\n")
   ctx.response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'"
   ctx.response.headers["X-Content-Type-Options"] = "nosniff"
+end
+
+# Writes the built-in page for an `HttpError` below 500 no `error` handler
+# answered: the client's error, so its message and field messages are
+# shown in every environment. A request that sent JSON or asks for it gets
+# `{"error": message, "fields": {field: message}}`, `fields` left out when
+# there are none; any other gets the message as plain text. Neither is
+# HTML, so a message that echoes request data cannot run as script. The
+# caller sets the status.
+pub def render_client_error_page(ctx : Context, failure : HttpError) : Nil
+  ctx.response.headers["X-Content-Type-Options"] = "nosniff"
+  unless wants_json?(ctx.request)
+    ctx.response.content_type = "text/plain; charset=utf-8"
+    ctx.response.set_body(failure.message + "\n")
+    return
+  end
+  fields = failure.fields
+  body = JSON.build do |json|
+    json.object do
+      json.field("error", failure.message)
+      unless fields.empty?
+        json.field("fields") do
+          json.object do
+            fields.each { |field, message| json.field(field, message) }
+          end
+        end
+      end
+    end
+  end
+  ctx.response.content_type = "application/json; charset=utf-8"
+  ctx.response.set_body(body)
+end
+
+# An `Accept` that names JSON wins, one that names HTML loses, and with
+# neither a request that sent JSON is answered in JSON.
+private def wants_json?(request : Request) : Bool
+  accept = (request.headers["Accept"]? || "").downcase
+  return true if accept.includes?("json")
+  return false if accept.includes?("html")
+  type = request.content_type.downcase
+  type == "application/json" || (type.starts_with?("application/") && type.ends_with?("+json"))
 end

@@ -1,0 +1,238 @@
+# Typed JSON bodies: the check names every field `derive serializable`
+# would refuse, and a `Validate` type's own rules run on what was read.
+module iyi_web/validation_test
+
+import std/json::{JSON, Builder, PullParser, serializable}
+import std/regex::{Regex}
+import iyi_web/validation::*
+import iyi_web/spec::*
+
+enum Mood
+  Calm
+  DarkRed
+end
+
+struct Author
+  getter name : String
+  derive serializable
+end
+
+struct Note
+  getter title : String
+  getter stars : Int32
+  getter tags : Array(String) = [] of String
+  getter summary : String?
+  @[JSON::Field(key: "by")]
+  getter author : Author?
+  derive serializable
+end
+
+struct Moody
+  getter mood : Mood
+  getter count : UInt8 = 0_u8
+  derive serializable
+end
+
+# Reads only a word written in capitals; panics on any other.
+struct Shout
+  def self.from_json(pull : PullParser) : String
+    word = pull.read_string
+    raise word.inspect + " is not shouted" unless word == word.upcase
+    word
+  end
+
+  def self.to_json(value : String, json : Builder) : Nil
+    json.string(value)
+  end
+end
+
+struct Call
+  @[JSON::Field(converter: Shout)]
+  getter word : String
+  getter scores : Hash(String, Int32) = {} of String => Int32
+  derive serializable
+end
+
+class Signup
+  getter name : String
+  getter email : String
+  getter age : Int32?
+  getter plan : String = "free"
+  getter interests : Array(String) = [] of String
+  derive serializable
+end
+
+impl Validate for Signup
+  def validate(v : Validator) : Nil
+    v.required("name", name)
+    v.length("name", name, min: 2, max: 20)
+    v.format("email", email, /\A[^@\s]+@[^@\s]+\z/, "must be an email address")
+    v.range("age", age, min: 13, max: 130)
+    v.one_of("plan", plan, ["free", "pro"])
+    v.length("interests", interests, max: 2)
+    v.add("email", "is taken") if email == "taken@example.com"
+  end
+end
+
+def note_error(text : String) : BodyError
+  result = read_json(text, Note)
+  result.is_a?(BodyError) ? result : raise "read " + text + " as a Note"
+end
+
+def signup_error(text : String) : BodyError
+  result = read_json(text, Signup)
+  result.is_a?(BodyError) ? result : raise "read " + text + " as a Signup"
+end
+
+describe "read_json" do
+  it "reads a body that fits the type, defaults and nested types included" do
+    note = read_json(%({"title":"a","stars":3,"by":{"name":"ada"},"extra":[1]}), Note)
+    assert note.is_a?(Note)
+    if note.is_a?(Note)
+      assert note.title == "a"
+      assert note.stars == 3
+      assert note.tags.empty?
+      assert note.summary.nil?
+      author = note.author
+      assert author ? author.name == "ada" : false
+    end
+  end
+
+  it "answers 400 with the line and column for JSON that does not parse" do
+    error = note_error("{\"title\":\n  \"a\",}")
+    assert error.status == 400
+    assert error.message.starts_with?("malformed JSON: ")
+    assert error.message.includes?("line 2")
+    assert error.fields.empty?
+    assert note_error("").status == 400
+  end
+
+  it "answers 422 naming every missing or null required field" do
+    error = note_error(%({"title":null}))
+    assert error.status == 422
+    assert error.fields == {"title" => "is required", "stars" => "is required"}
+    assert error.message == "invalid body: title is required, stars is required"
+  end
+
+  it "names fields of the wrong kind by their path" do
+    error = note_error(%({"title":1,"stars":1.5,"tags":["x",2],"summary":false,"by":{"name":[]}}))
+    assert error.status == 422
+    assert error.fields["title"] == "must be a string"
+    assert error.fields["stars"] == "must be an integer"
+    assert error.fields["tags[1]"] == "must be a string"
+    assert !error.fields.has_key?("tags[0]")
+    assert error.fields["summary"] == "must be a string"
+    assert error.fields["by.name"] == "must be a string"
+  end
+
+  it "refuses an integer outside the field's type, and lets the bounds through" do
+    assert note_error(%({"title":"a","stars":2147483648})).fields["stars"] == "must be an integer from -2147483648 to 2147483647"
+    assert read_json(%({"title":"a","stars":-2147483648}), Note).is_a?(Note)
+    assert read_json(%({"mood":"calm","count":255}), Moody).is_a?(Moody)
+    over = read_json(%({"mood":"calm","count":256}), Moody)
+    assert over.is_a?(BodyError) && over.fields["count"] == "must be an integer from 0 to 255"
+  end
+
+  it "keeps a default for a null, and reads null into a field that admits nil" do
+    note = read_json(%({"title":"a","stars":1,"tags":null,"summary":null,"by":null}), Note)
+    assert note.is_a?(Note) && note.tags.empty?
+  end
+
+  it "answers a body that is not an object as a whole" do
+    error = note_error("[1]")
+    assert error.status == 422
+    assert error.message == "the body must be an object"
+    assert error.fields.empty?
+  end
+
+  it "reads arrays of the type and names an element's field" do
+    notes = read_json(%([{"title":"a","stars":1}]), Array(Note))
+    assert notes.is_a?(Array(Note)) && notes.size == 1
+    error = read_json(%([{"title":"a","stars":1},{"title":"b"}]), Array(Note))
+    assert error.is_a?(BodyError) && error.fields == {"[1].stars" => "is required"}
+  end
+
+  it "takes an enum member by name or value, and lists the members otherwise" do
+    assert read_json(%({"mood":"dark_red"}), Moody).is_a?(Moody)
+    assert read_json(%({"mood":"DarkRed"}), Moody).is_a?(Moody)
+    assert read_json(%({"mood":1}), Moody).is_a?(Moody)
+    bad = read_json(%({"mood":"purple"}), Moody)
+    assert bad.is_a?(BodyError) && bad.fields["mood"] == "must be one of: calm, dark_red"
+    unknown = read_json(%({"mood":7}), Moody)
+    assert unknown.is_a?(BodyError) && unknown.fields.has_key?("mood")
+  end
+
+  it "names an object's member by its key, and a nested type that is not an object" do
+    error = read_json(%({"word":"HEY","scores":{"ada":1,"bob":"2"}}), Call)
+    assert error.is_a?(BodyError) && error.fields == {"scores.bob" => "must be an integer"}
+    nested = note_error(%({"title":"a","stars":1,"by":"ada"}))
+    assert nested.fields == {"by" => "must be an object"}
+  end
+
+  it "answers a converter's refusal with 422 rather than a panic" do
+    call = read_json(%({"word":"HEY"}), Call)
+    assert call.is_a?(Call) && call.word == "HEY"
+    refused = read_json(%({"word":"hey"}), Call)
+    assert refused.is_a?(BodyError) && refused.status == 422
+    assert refused.is_a?(BodyError) && refused.message.includes?("\"hey\" is not shouted")
+    missing = read_json(%({}), Call)
+    assert missing.is_a?(BodyError) && missing.fields == {"word" => "is required"}
+  end
+end
+
+describe "Validate" do
+  it "answers a value that passes its rules" do
+    signup = read_json(%({"name":"Ada","email":"ada@example.com","age":36}), Signup)
+    assert signup.is_a?(Signup) && signup.age == 36
+  end
+
+  it "answers 422 with a message for every field that fails" do
+    error = signup_error(%({"name":" ","email":"nope","age":7,"plan":"gold","interests":["a","b","c"]}))
+    assert error.status == 422
+    assert error.fields == {
+      "name"      => "is required",
+      "email"     => "must be an email address",
+      "age"       => "must be between 13 and 130",
+      "plan"      => "must be one of: free, pro",
+      "interests" => "must have at most 2 items",
+    }
+  end
+
+  it "reports the first rule a field fails, and checks the bounds inclusively" do
+    error = signup_error(%({"name":"A","email":"taken@example.com","age":131}))
+    assert error.fields["name"] == "must be at least 2 characters"
+    assert error.fields["email"] == "is taken"
+    assert error.fields["age"] == "must be between 13 and 130"
+    assert read_json(%({"name":"Al","email":"a@b","age":13,"plan":"pro","interests":["a","b"]}), Signup).is_a?(Signup)
+    assert read_json(%({"name":"#{"x" * 20}","email":"a@b","age":130}), Signup).is_a?(Signup)
+    assert signup_error(%({"name":"#{"x" * 21}","email":"a@b"})).fields["name"] == "must be at most 20 characters"
+  end
+
+  it "does not run the rules on a body of the wrong shape" do
+    error = signup_error(%({"name":"Ada"}))
+    assert error.fields == {"email" => "is required"}
+  end
+end
+
+describe "Validator" do
+  it "passes over nil for every rule but required" do
+    v = Validator.new
+    v.length("a", nil.as(String?), min: 1)
+    v.range("b", nil.as(Int32?), min: 1)
+    v.format("c", nil.as(String?), /x/)
+    v.one_of("d", nil.as(String?), ["x"])
+    assert v.valid?
+    v.required("e", nil.as(Int32?))
+    v.required("f", [] of String)
+    assert v.errors == {"e" => "is required", "f" => "is required"}
+  end
+
+  it "uses one bound alone, and counts characters rather than bytes" do
+    v = Validator.new
+    v.range("low", 0.5, min: 1.0)
+    v.range("high", 9, max: 5)
+    v.length("word", "çok", max: 3)
+    v.length("one", "", min: 1)
+    assert v.errors == {"low" => "must be at least 1.0", "high" => "must be at most 5", "one" => "must be at least 1 character"}
+  end
+end

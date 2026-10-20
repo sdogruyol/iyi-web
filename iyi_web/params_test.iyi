@@ -2,10 +2,24 @@
 # most specific: url, then query, then body.
 module iyi_web/params_test
 
+import std/json::{serializable}
 import iyi_web/params::{Params}
 import iyi_web/request::{Request}
 import iyi_web/headers::{Headers}
+import iyi_web/validation::{BodyError}
 import iyi_web/spec::*
+
+struct Person
+  getter name : String
+  getter age : Int32
+  derive serializable
+end
+
+# The error `json_as(Person)` answers for *request*.
+def refusal(request : Request) : BodyError
+  result = Params.from(request, {} of String => String).json_as(Person)
+  result.is_a?(BodyError) ? result : raise "read a Person"
+end
 
 describe "Params" do
   it "starts with empty tables" do
@@ -93,11 +107,32 @@ describe "Params" do
     assert padded.json.empty?
   end
 
-  it "reports a JSON body that does not parse" do
+  it "reports a JSON body that does not parse, and where" do
     broken = Params.from(typed("application/json", "{\"a\":"), {} of String => String)
     assert !broken.json_valid?
     assert broken.json.empty?
+    assert (broken.json_error || "").includes?("line 1, column")
     assert Params.from(typed("application/json", ""), {} of String => String).json_valid?
+    assert Params.from(typed("application/json", "{}"), {} of String => String).json_error.nil?
+  end
+
+  it "reads a JSON body into a type with json_as" do
+    params = Params.from(typed("application/vnd.api+json", %({"name":"ada","age":36})), {} of String => String)
+    person = params.json_as(Person)
+    assert person.is_a?(Person) && person.name == "ada" && person.age == 36
+    assert params.json["name"].as_s == "ada"
+    people = Params.from(typed("application/json", %([{"name":"a","age":1}])), {} of String => String).json_as(Array(Person))
+    assert people.is_a?(Array(Person)) && people.size == 1
+  end
+
+  it "answers json_as with the status the body earns" do
+    assert refusal(typed("application/json", %({"name":"ada"}))).status == 422
+    assert refusal(typed("application/json", %({"name":"ada"}))).fields == {"age" => "is required"}
+    assert refusal(typed("application/json", "{\"name\":")).status == 400
+    assert refusal(typed("application/json", "")).message == "malformed JSON: the body is empty"
+    assert refusal(typed("application/x-www-form-urlencoded", "name=ada&age=36")).status == 415
+    assert refusal(typed("application/jsonp", %({"name":"ada","age":36}))).status == 415
+    assert refusal(Request.new("POST", "/", "", "HTTP/1.1", Headers.new, %({"name":"ada","age":36}))).status == 415
   end
 
   it "reads multipart fields and files, and deletes the files on cleanup" do

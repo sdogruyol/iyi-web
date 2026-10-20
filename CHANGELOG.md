@@ -28,6 +28,25 @@ All notable changes to iyi-web are recorded here. The format follows
   `decode_base64url?` that answers nil, not a panic, for text a client sent.
 - `examples/sessions_and_csrf.iyi`: sign-in and sign-out in a session, and
   forms guarded by `CSRFHandler`.
+- Typed JSON bodies (new `iyi_web/validation`): `env.params.json_as(T)` reads
+  the body into a `derive serializable` type and answers `T | BodyError`,
+  never a panic: `415` for a body not declared JSON, `400` for one that does
+  not parse, with the line and column, `422` naming every field that is
+  missing, `null`, of the wrong kind or out of range (`title`,
+  `author.name`, `tags[1]`). `read_json(text, T)` does the same for any
+  string.
+- Validation: a type that implements `Validate` gets `validate(v :
+  Validator)` run after the read, with `required`, `length`, `range`,
+  `format`, `one_of` and `add`; every failing field is answered in one
+  `422`.
+- `HttpError` (`iyi_web/status`): an `Error` that carries its status. A route
+  that returns one gets that status, its type's page, then its status's
+  page; below 500 the built-in page shows its message and `fields`, as
+  `{"error": ..., "fields": {...}}` to a JSON client and plain text to any
+  other. `BodyError` and `StatusError` implement it.
+- `Params#json_error`: why a declared JSON body does not parse.
+- `examples/typed_json.iyi`: notes read with `json_as`, validated, and
+  written from `derive serializable` types.
 - `BasicAuthHandler` (new `iyi_web/basic_auth`), kemal-basic-auth: one fixed
   user compared in constant time, or a verifier block; `401` with
   `WWW-Authenticate: Basic realm="...", charset="UTF-8"` for missing,
@@ -57,6 +76,14 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ### Changed
 
+- A route that returns a `StatusError` is answered with its status, not
+  `500`.
+- A declared JSON body that does not parse is answered as a `BodyError`:
+  `error BodyError` and `error Error` pages now take it before `error 400`,
+  and the built-in `400` says where the body broke, in JSON to a JSON
+  client.
+- `render_failure_page` takes the status to title the page with; it
+  defaults to 500.
 - `request_log_line` takes an optional request id, which `Logger#request`
   passes when `RequestIdHandler` stored one.
 
