@@ -1,0 +1,70 @@
+# The route table the microbenchmarks and the load server share: about a
+# hundred routes, shaped like a REST API rather than a list of literals, so
+# a lookup walks a tree as wide and as deep as an application's. Twenty
+# resources with five routes each (index, create, show, update, a nested
+# show), a handful of static pages, and a wildcard for assets.
+module bench/app
+
+import iyi_web/router::{Router}
+
+RESOURCES = %w(users posts comments tags orders invoices products carts
+  reviews sessions teams projects tasks files events alerts reports
+  settings tokens webhooks)
+
+# The paths `fill` registers, with their methods, in the radix tree's
+# "/METHOD/path" spelling, so the bare tree is measured on the same shape.
+pub def route_keys : Array(String)
+  keys = [] of String
+  RESOURCES.each do |name|
+    keys << "/GET/api/v1/" + name
+    keys << "/POST/api/v1/" + name
+    keys << "/GET/api/v1/" + name + "/:id"
+    keys << "/PUT/api/v1/" + name + "/:id"
+    keys << "/GET/api/v1/" + name + "/:id/items/:item"
+  end
+  keys << "/GET/"
+  keys << "/GET/json"
+  keys << "/GET/about"
+  keys << "/GET/health"
+  keys << "/GET/assets/*path"
+  keys
+end
+
+# The same routes on a Router, each answering a short body. `/` is the
+# hello-world page, `/json` a small object, `/api/v1/users/:id` echoes its
+# parameter: the three the load generator requests.
+pub def fill(r : Router) : Nil
+  RESOURCES.each do |name|
+    r.get "/api/v1/" + name do |env|
+      name
+    end
+    r.post "/api/v1/" + name do |env|
+      env.response.status_code = 201
+      name
+    end
+    r.get "/api/v1/" + name + "/:id" do |env|
+      name + " " + env.params.url["id"]
+    end
+    r.put "/api/v1/" + name + "/:id" do |env|
+      name + " " + env.params.url["id"]
+    end
+    r.get "/api/v1/" + name + "/:id/items/:item" do |env|
+      env.params.url["item"]
+    end
+  end
+  r.get "/" do |env|
+    "Hello World!"
+  end
+  r.get "/json" do |env|
+    env.json({"message" => "Hello, World!"})
+  end
+  r.get "/about" do |env|
+    "about"
+  end
+  r.get "/health" do |env|
+    "ok"
+  end
+  r.get "/assets/*path" do |env|
+    env.params.url["path"]
+  end
+end

@@ -79,3 +79,102 @@ jobs:
 
       - name: What the next release has to be
         run: iyi mod release
+
+  # Benchmarks (bench/, README, Benchmarks), on the latest iyi. A pull
+  # request runs its own benchmark programs against the base branch's
+  # library and against its own, on one runner, and compares them in the job
+  # summary; a push to master records its results as an artifact.
+  #
+  # Microbenchmarks are noisy on a shared machine. Measured on a busy
+  # Windows workstation, two runs of one binary at 0.5 s per case differed
+  # by up to 33% in a case; at 2 s per case and three rounds, by under 5%.
+  # So each case is timed for 2 s, the two sides run in alternating rounds
+  # (base, head, base, head, ...) so drift in the machine's speed lands on
+  # both, and bench/compare.iyi takes each side's median. A microbenchmark
+  # fails the job when its median is more than 30% slower and every head
+  # round is slower than every base round: well past what noise does that
+  # way, and well under what an accidental copy, allocation or linear scan
+  # on a hot path costs. Three rounds keep the job near ten minutes. The
+  # end-to-end numbers go through loopback and two processes' scheduling
+  # and move by more than that between identical runs, so they are
+  # reported and never gate.
+  bench:
+    runs-on: ubuntu-24.04
+    env:
+      ROUNDS: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: head
+
+      - name: Check out the base
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - name: Install iyi
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/iyilang/iyi/master/install.sh | IYI_PREFIX="$HOME/.iyi" sh
+          echo "$HOME/.iyi/bin" >> "$GITHUB_PATH"
+
+      - run: iyi version
+
+      # The base gets the pull request's bench/, so both sides time the same
+      # code paths the same way. A base whose library lacks what the new
+      # benchmarks call does not build; the head is then measured alone.
+      - name: Build
+        id: build
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            rm -rf base/bench
+            cp -r head/bench base/bench
+            if bash base/bench/run.sh --only-build; then
+              echo "base=built" >> "$GITHUB_OUTPUT"
+            else
+              echo "base=failed" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+          bash head/bench/run.sh --only-build
+          (cd head && iyi build bench/compare.iyi -o "$RUNNER_TEMP/compare")
+
+      - name: Benchmark
+        run: |
+          mkdir -p "$RUNNER_TEMP/bench"
+          for round in $(seq 1 "$ROUNDS"); do
+            if [ "${{ steps.build.outputs.base }}" = built ]; then
+              bash base/bench/run.sh --no-build --seconds 2 --out "$RUNNER_TEMP/bench/base-$round.json"
+            fi
+            bash head/bench/run.sh --no-build --seconds 2 --out "$RUNNER_TEMP/bench/head-$round.json"
+          done
+
+      - name: Compare with the base
+        if: github.event_name == 'pull_request'
+        run: |
+          heads=$(ls "$RUNNER_TEMP"/bench/head-*.json | paste -sd,)
+          if [ "${{ steps.build.outputs.base }}" != built ]; then
+            {
+              echo "The base does not build with this pull request's benchmarks, so nothing is compared. The results are in the bench-results artifact."
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
+            # Head against itself: the table, with no change to gate on.
+            "$RUNNER_TEMP/compare" "$heads" "$heads" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          bases=$(ls "$RUNNER_TEMP"/bench/base-*.json | paste -sd,)
+          set +e
+          "$RUNNER_TEMP/compare" --threshold 30 --e2e-threshold 30 "$bases" "$heads" > "$RUNNER_TEMP/comparison.md"
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/comparison.md"
+          cat "$RUNNER_TEMP/comparison.md" >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: ${{ runner.temp }}/bench/
+          if-no-files-found: ignore

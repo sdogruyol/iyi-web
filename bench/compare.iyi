@@ -1,0 +1,237 @@
+# Compares two sets of benchmark results, as `bench/run.sh` writes them,
+# and prints the comparison as a Markdown table (what CI appends to the job
+# summary). Exits 1 when a microbenchmark is slower than the threshold.
+#
+#   iyi build --release bench/compare.iyi -o compare
+#   ./compare base.json head.json
+#   ./compare --threshold 20 base-1.json,base-2.json head-1.json,head-2.json
+#
+# A side may be several result files, comma-separated: repeated runs of the
+# same build. Each case is summarised by its median run, which one run
+# caught by a collection, another process or a frequency change does not
+# move much.
+#
+# A microbenchmark fails the comparison when its median is more than
+# --threshold percent slower *and* every head run is slower than every base
+# run. The second condition is there because one run of an unchanged build
+# can be far off another on a busy machine: measured on Windows, two runs
+# of one binary at 0.5 s per case differed by up to 33% in a case. A real
+# regression is slower in every round, and CI alternates the rounds (base,
+# head, base, head, ...) so drift in the machine's speed lands on both
+# sides. With one run per side the condition is the threshold alone.
+#
+# Only the microbenchmarks gate. The end-to-end numbers go through the
+# loopback interface and the scheduler of two processes, and move by more
+# between two runs of one build than a real change usually moves them; they
+# are shown, and a slowdown past --e2e-threshold is marked, for a reader to
+# judge.
+module bench/compare
+
+import std/json::{JSON, Any}
+import std/format::{sprintf}
+import std/kernel::{abort}
+import std/text
+import std/float
+import std/enumerable
+
+USAGE = "usage: compare [--threshold PCT] [--e2e-threshold PCT] BASE[,BASE...] HEAD[,HEAD...]"
+
+class Options
+  property threshold : Float64 = 30.0
+  property e2e_threshold : Float64 = 30.0
+  property files = [] of String
+end
+
+def parse_options(args : Array(String)) : Options
+  options = Options.new
+  index = 0
+  while index < args.size
+    arg = args[index]
+    value = index + 1 < args.size ? args[index + 1] : ""
+    case arg
+    when "--threshold"
+      options.threshold = value.to_f? || abort("--threshold takes a number\n" + USAGE)
+      index += 2
+    when "--e2e-threshold"
+      options.e2e_threshold = value.to_f? || abort("--e2e-threshold takes a number\n" + USAGE)
+      index += 2
+    else
+      abort("unknown option " + arg + "\n" + USAGE) if arg.starts_with?("--")
+      options.files << arg
+      index += 1
+    end
+  end
+  abort(USAGE) unless options.files.size == 2
+  options
+end
+
+# One case's runs on one side.
+class Samples
+  # ns/op for a microbenchmark, req/s for an end-to-end target.
+  getter values = [] of Float64
+  # The end-to-end target's p99 latencies in µs; empty for a microbenchmark.
+  getter p99s = [] of Float64
+  # The most errors one end-to-end run saw.
+  property errors : Int32 = 0
+
+  def value : Float64
+    median(@values)
+  end
+
+  def p99 : Float64
+    median(@p99s)
+  end
+
+  def fastest_ns : Float64
+    @values.min
+  end
+
+  def slowest_ns : Float64
+    @values.max
+  end
+end
+
+def median(list : Array(Float64)) : Float64
+  return 0.0 if list.empty?
+  sorted = list.sorted
+  middle = sorted.size // 2
+  sorted.size.odd? ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2.0
+end
+
+class Side
+  getter micro = {} of String => Samples
+  getter e2e = {} of String => Samples
+  getter micro_order = [] of String
+  getter e2e_order = [] of String
+
+  def micro_samples(name : String) : Samples
+    @micro[name]? || begin
+      @micro_order << name
+      @micro[name] = Samples.new
+    end
+  end
+
+  def e2e_samples(name : String) : Samples
+    @e2e[name]? || begin
+      @e2e_order << name
+      @e2e[name] = Samples.new
+    end
+  end
+end
+
+def number(object : Any, key : String, file : String) : Float64
+  value = object[key]? || abort("compare: " + file + ": a result has no " + key)
+  if whole = value.as_i64?
+    return whole.to_f
+  end
+  value.as_f? || abort("compare: " + file + ": " + key + " is not a number")
+end
+
+def text(object : Any, key : String, file : String) : String
+  value = object[key]? || abort("compare: " + file + ": a result has no " + key)
+  value.as_s? || abort("compare: " + file + ": " + key + " is not a string")
+end
+
+def cases(document : Any, key : String, file : String) : Array(Any)
+  list = document[key]? || abort("compare: " + file + " has no \"" + key + "\" list")
+  list.as_a? || abort("compare: " + file + ": \"" + key + "\" is not a list")
+end
+
+def load(paths : String) : Side
+  side = Side.new
+  paths.split(',').each do |path|
+    next if path.empty?
+    abort("compare: no file " + path) unless File.exists?(path)
+    document = JSON.parse?(File.read(path)) || abort("compare: " + path + " is not JSON")
+    cases(document, "micro", path).each do |entry|
+      side.micro_samples(text(entry, "name", path)).values << number(entry, "ns_per_op", path)
+    end
+    cases(document, "e2e", path).each do |entry|
+      samples = side.e2e_samples(text(entry, "name", path))
+      samples.values << number(entry, "rps", path)
+      samples.p99s << number(entry, "p99_us", path)
+      errors = number(entry, "errors", path).to_i
+      samples.errors = errors if errors > samples.errors
+    end
+  end
+  side
+end
+
+def percent(change : Float64) : String
+  sprintf("%+.1f%%", change * 100.0)
+end
+
+# Head's names in head's order, then those only base has.
+def names(base_order : Array(String), head_order : Array(String)) : Array(String)
+  all = head_order.dup
+  base_order.each { |name| all << name unless all.includes?(name) }
+  all
+end
+
+options = parse_options(Program.args)
+base = load(options.files[0])
+head = load(options.files[1])
+abort("compare: neither side has any result") if base.micro.empty? && head.micro.empty? && base.e2e.empty? && head.e2e.empty?
+
+regressions = [] of String
+gate = options.threshold / 100.0
+
+puts "### Microbenchmarks"
+puts
+puts "Median of the runs on each side, in ns per operation; lower is faster. A case fails the job when its median is more than " + sprintf("%.0f", options.threshold) + "% slower and every head run is slower than every base run."
+puts
+puts "| case | base ns/op | head ns/op | change | |"
+puts "|---|---:|---:|---:|---|"
+names(base.micro_order, head.micro_order).each do |name|
+  was = base.micro[name]?
+  now = head.micro[name]?
+  if was && now
+    change = now.value / was.value - 1.0
+    verdict = ""
+    if change > gate && now.fastest_ns > was.slowest_ns
+      verdict = "**slower**"
+      regressions << name + " " + percent(change)
+    elsif change > gate
+      verdict = "slower? (runs overlap)"
+    elsif change < -gate
+      verdict = "faster"
+    end
+    puts sprintf("| %s | %.1f | %.1f | %s | %s |", name, was.value, now.value, percent(change), verdict)
+  elsif now
+    puts sprintf("| %s | | %.1f | | new |", name, now.value)
+  elsif was
+    puts sprintf("| %s | %.1f | | | removed |", name, was.value)
+  end
+end
+
+unless base.e2e.empty? && head.e2e.empty?
+  e2e_gate = options.e2e_threshold / 100.0
+  puts
+  puts "### End to end"
+  puts
+  puts "Median of the runs on each side; higher req/s is faster. Not gating: a slowdown past " + sprintf("%.0f", options.e2e_threshold) + "% is marked for a reader to judge. Errors are the most one run saw."
+  puts
+  puts "| target | base req/s | head req/s | change | base p99 µs | head p99 µs | errors | |"
+  puts "|---|---:|---:|---:|---:|---:|---:|---|"
+  names(base.e2e_order, head.e2e_order).each do |name|
+    was = base.e2e[name]?
+    now = head.e2e[name]?
+    if was && now
+      change = was.value > 0.0 ? now.value / was.value - 1.0 : 0.0
+      verdict = change < -e2e_gate ? "slower?" : ""
+      puts sprintf("| %s | %.0f | %.0f | %s | %.1f | %.1f | %d / %d | %s |", name, was.value, now.value, percent(change), was.p99, now.p99, was.errors, now.errors, verdict)
+    elsif now
+      puts sprintf("| %s | | %.0f | | | %.1f | %d | new |", name, now.value, now.p99, now.errors)
+    elsif was
+      puts sprintf("| %s | %.0f | | | %.1f | | %d | removed |", name, was.value, was.p99, was.errors)
+    end
+  end
+end
+
+puts
+if regressions.empty?
+  puts "No microbenchmark is more than " + sprintf("%.0f", options.threshold) + "% slower in every run."
+else
+  puts "**" + regressions.size.to_s + " microbenchmark(s) more than " + sprintf("%.0f", options.threshold) + "% slower in every run:** " + regressions.join(", ")
+  exit(1)
+end

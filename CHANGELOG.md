@@ -47,6 +47,17 @@ All notable changes to iyi-web are recorded here. The format follows
 - `Params#json_error`: why a declared JSON body does not parse.
 - `examples/typed_json.iyi`: notes read with `json_as`, validated, and
   written from `derive serializable` types.
+- Benchmarks (`bench/`): `bench/micro.iyi` times route lookup over about a
+  hundred routes, request-head parsing, query/form/JSON parameters, the
+  header table and whole dispatches through `RouteHandler` and
+  `handler_chain`; `bench/load.iyi` is a keep-alive load generator (no `wrk`,
+  Linux and Windows) reporting req/s, p50/p99 latency and errors against
+  `bench/server.iyi`. `bash bench/run.sh` builds both with `--release` and
+  writes `bench/results.json`; `bench/compare.iyi` turns two sets of result
+  files into a Markdown table of medians and exits 1 when a microbenchmark
+  is more than 30% slower in every run. CI's new `bench` job compares a pull
+  request with its base in the job summary, failing on such a regression,
+  and keeps master's results as an artifact.
 - `BasicAuthHandler` (new `iyi_web/basic_auth`), kemal-basic-auth: one fixed
   user compared in constant time, or a verifier block; `401` with
   `WWW-Authenticate: Basic realm="...", charset="UTF-8"` for missing,

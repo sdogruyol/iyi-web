@@ -1,0 +1,20 @@
+# The application `bench/load.iyi` measures: the hundred routes of
+# `bench/app.iyi` behind the chain `run` serves, with request logging and
+# static files off so the numbers are the framework's and not the
+# console's or the disk's. Takes `run`'s flags; `bash bench/run.sh` starts
+# it on its own port.
+#
+#   iyi build --release bench/server.iyi -o server
+#   ./server -p 3900
+#   curl localhost:3900/
+#   curl localhost:3900/json
+#   curl localhost:3900/api/v1/users/42
+module bench/server
+
+import iyi_web/dsl::*
+import bench/app::{fill}
+
+fill(app)
+logging(false)
+serve_static(false)
+run

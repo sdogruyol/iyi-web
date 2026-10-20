@@ -10,3 +10,7 @@
 # Local binaries
 /bin/
 /tmp/
+
+# Benchmark builds and results (bench/run.sh)
+/bench/.build/
+/bench/results*.json

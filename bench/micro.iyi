@@ -1,0 +1,255 @@
+# Microbenchmarks of the paths every request takes: route lookup, reading a
+# request head off the wire, parsing parameters, the header table, and a
+# whole dispatch through the router and through the chain `run` serves.
+# Build it with --release; `bash bench/run.sh` does, and runs it.
+#
+#   iyi build --release bench/micro.iyi -o micro
+#   ./micro                          # every case, one second each
+#   ./micro --seconds 3 --warmup 1   # longer, steadier samples
+#   ./micro --filter radix           # the cases whose name contains "radix"
+#   ./micro --json micro.jsonl       # also one JSON object per case
+#
+# Each case is checked once before it is timed, so a benchmark that stopped
+# doing what its name says (a lookup that misses, a parse that refuses)
+# aborts instead of reporting a fast nothing. Timing is `std/benchmark`'s
+# ips: warm up, then repeated 100 ms batches; the mean of the batches' rates
+# is ops/s, and their spread is the ± column.
+module bench/micro
+
+import std/benchmark::{Benchmark}
+import std/format::{sprintf}
+import std/time::{Span}
+import std/kernel::{abort}
+import std/text
+import iyi_web/radix::{Tree, Match}
+import iyi_web/router::{Router, RouteHandler}
+import iyi_web/intake::{Intake}
+import iyi_web/request::{Request}
+import iyi_web/params::{Params}
+import iyi_web/headers::{Headers}
+import iyi_web/context::{Context}
+import iyi_web/log::{Logger}
+import iyi_web/harness::*
+import iyi_web/dsl::*
+import bench/app::*
+
+# Takes the request lines the LogHandler formats and drops them, so the
+# chain case pays for logging without timing a console.
+class DiscardLogger < Logger
+  pub def write(message : String) : Nil
+  end
+end
+
+class Options
+  property seconds : Float64 = 1.0
+  property warmup : Float64 = 0.3
+  property filter : String = ""
+  property json : String = ""
+end
+
+def parse_options(args : Array(String)) : Options
+  options = Options.new
+  index = 0
+  while index < args.size
+    flag = args[index]
+    value = index + 1 < args.size ? args[index + 1] : ""
+    case flag
+    when "--seconds" then options.seconds = value.to_f? || abort("--seconds takes a number")
+    when "--warmup"  then options.warmup = value.to_f? || abort("--warmup takes a number")
+    when "--filter"  then options.filter = value
+    when "--json"    then options.json = value
+    else
+      abort("unknown option " + flag + "\nusage: micro [--seconds S] [--warmup S] [--filter TEXT] [--json FILE]")
+    end
+    index += 2
+  end
+  options
+end
+
+def check(ok : Bool, what : String) : Nil
+  abort("bench/micro: " + what) unless ok
+end
+
+# The URL parameters of a match, or an abort when the path did not match.
+def matched(match : Match(T) | Nil, what : String) : Hash(String, String) forall T
+  abort("bench/micro: " + what + " did not match") unless match
+  match.params
+end
+
+def span(seconds : Float64) : Span
+  Span.nanoseconds((seconds * 1_000_000_000.0).to_i64)
+end
+
+# What the requests look like on the wire. A browser's GET carries about
+# this many fields; the POST is a small form.
+GET_WIRE = "GET /api/v1/users/42?expand=posts&limit=10 HTTP/1.1\r\n" \
+           "Host: example.com\r\n" \
+           "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0\r\n" \
+           "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n" \
+           "Accept-Language: en-US,en;q=0.5\r\n" \
+           "Accept-Encoding: gzip, deflate, br\r\n" \
+           "Connection: keep-alive\r\n" \
+           "Cookie: session=0123456789abcdef; theme=dark\r\n" \
+           "Upgrade-Insecure-Requests: 1\r\n" \
+           "\r\n"
+
+FORM_BODY = "name=Ada+Lovelace&email=ada%40example.com&age=36&tags=math&tags=poetry&bio=First+programmer"
+
+POST_WIRE = "POST /api/v1/users HTTP/1.1\r\n" \
+            "Host: example.com\r\n" \
+            "Content-Type: application/x-www-form-urlencoded\r\n" \
+            "Content-Length: #{FORM_BODY.bytesize}\r\n" \
+            "\r\n" + FORM_BODY
+
+QUERY = "q=web+framework&page=3&per_page=50&sort=-created_at&filter%5Bstatus%5D=open&tag=a&tag=b&tag=c"
+
+JSON_BODY = %({"name":"Ada Lovelace","email":"ada@example.com","age":36,"admin":false,"tags":["math","poetry"],"address":{"city":"London","zip":"W1"}})
+
+options = parse_options(Program.args)
+
+tree = Tree(String).new
+route_keys.each { |key| check(tree.add(key, key), "duplicate route " + key) }
+check(!tree.find("/GET/api/v1/webhooks").nil?, "radix static")
+check(matched(tree.find("/GET/api/v1/webhooks/7/items/9"), "radix param")["item"] == "9", "radix param")
+check(matched(tree.find("/GET/assets/css/site/main.css"), "radix wildcard")["path"] == "css/site/main.css", "radix wildcard")
+check(tree.find("/GET/api/v1/nothing/here").nil?, "radix miss")
+
+route_handler = routes { |r| fill(r) }
+check(matched(route_handler.lookup("GET", "/api/v1/webhooks/7"), "router lookup")["id"] == "7", "router lookup")
+check(!route_handler.lookup("HEAD", "/api/v1/webhooks/7").nil?, "router lookup HEAD")
+
+intake = Intake.new("", 1 << 20)
+intake.append(GET_WIRE)
+check(intake.take.is_a?(Tuple(Request, String, Bool)), "intake GET")
+intake.reset("", 1 << 20)
+intake.append(POST_WIRE)
+posted = intake.take
+check(posted.is_a?(Tuple(Request, String, Bool)) && posted[0].body == FORM_BODY, "intake POST")
+
+query_request = http_request("GET", "/search", QUERY)
+form = form_request("POST", "/api/v1/users", FORM_BODY)
+json_request = http_request("POST", "/api/v1/users", "", JSON_BODY, "application/json")
+no_url = {} of String => String
+check(Params.from(query_request, no_url).query_all("tag").size == 3, "query params")
+check(Params.from(form, no_url).body["email"] == "ada@example.com", "form params")
+check(Params.from(json_request, no_url).json["address"]["city"].as_s == "London", "json params")
+
+check(dispatch(route_handler, "GET", "/").response.body == "Hello World!", "dispatch hello")
+check(dispatch(route_handler, "GET", "/api/v1/users/42").response.body == "users 42", "dispatch param")
+check(dispatch(route_handler, "GET", "/json").response.body == %({"message":"Hello, World!"}), "dispatch json")
+check(dispatch(route_handler, "GET", "/nowhere").response.status_code == 404, "dispatch 404")
+
+# The chain `run` serves, as configured out of the box except for where
+# the log lines go and for static files: with no public folder there is
+# nothing to serve, and a stat per request would time the disk.
+fill(app)
+logger DiscardLogger.new
+logging(true)
+serve_static(false)
+whole = handler_chain
+check(dispatch(whole, "GET", "/api/v1/users/42").response.body == "users 42", "chain param")
+
+# Whatever a case computes goes here, so no optimiser can call it unused.
+sink = 0_i64
+
+job = Benchmark::IPS::Job.new(span(options.seconds), span(options.warmup))
+cases = [] of String
+
+# Registers a case unless the filter leaves it out.
+def register(job : Benchmark::IPS::Job, cases : Array(String), filter : String, name : String, &block : ->) : Nil
+  return unless filter.empty? || name.includes?(filter)
+  cases << name
+  job.report(name, &block)
+  nil
+end
+
+register job, cases, options.filter, "radix.static" do
+  found = tree.find("/GET/api/v1/webhooks")
+  sink += found ? 1 : 0
+end
+register job, cases, options.filter, "radix.param" do
+  found = tree.find("/GET/api/v1/webhooks/7/items/9")
+  sink += found ? found.params.size : 0
+end
+register job, cases, options.filter, "radix.wildcard" do
+  found = tree.find("/GET/assets/css/site/main.css")
+  sink += found ? found.params.size : 0
+end
+register job, cases, options.filter, "radix.miss" do
+  sink += tree.find("/GET/api/v1/nothing/here") ? 1 : 0
+end
+register job, cases, options.filter, "router.lookup" do
+  found = route_handler.lookup("GET", "/api/v1/webhooks/7")
+  sink += found ? found.params.size : 0
+end
+register job, cases, options.filter, "router.lookup_head" do
+  found = route_handler.lookup("HEAD", "/api/v1/webhooks/7")
+  sink += found ? found.params.size : 0
+end
+register job, cases, options.filter, "intake.get" do
+  intake.reset("", 1 << 20)
+  intake.append(GET_WIRE)
+  sink += intake.take ? 1 : 0
+end
+register job, cases, options.filter, "intake.post_form" do
+  intake.reset("", 1 << 20)
+  intake.append(POST_WIRE)
+  sink += intake.take ? 1 : 0
+end
+register job, cases, options.filter, "params.query" do
+  sink += Params.from(query_request, no_url).query.size
+end
+register job, cases, options.filter, "params.form" do
+  sink += Params.from(form, no_url).body.size
+end
+register job, cases, options.filter, "params.json" do
+  sink += Params.from(json_request, no_url).json.size
+end
+register job, cases, options.filter, "headers.build" do
+  headers = Headers.new
+  headers["Content-Type"] = "text/html; charset=utf-8"
+  headers["Content-Length"] = "1234"
+  headers["Cache-Control"] = "no-cache"
+  headers["X-Request-Id"] = "0123456789abcdef"
+  headers.add("Set-Cookie", "a=1; Path=/")
+  headers.add("Set-Cookie", "b=2; Path=/")
+  headers["Vary"] = "Accept-Encoding"
+  sink += headers["content-type"].bytesize
+end
+register job, cases, options.filter, "headers.lookup" do
+  headers = json_request.headers
+  sink += (headers["content-type"]? || "").bytesize + (headers["HOST"]? || "").bytesize + (headers["x-missing"]? ? 1 : 0)
+end
+register job, cases, options.filter, "dispatch.hello" do
+  sink += dispatch(route_handler, "GET", "/").response.body.bytesize
+end
+register job, cases, options.filter, "dispatch.param" do
+  sink += dispatch(route_handler, "GET", "/api/v1/users/42").response.body.bytesize
+end
+register job, cases, options.filter, "dispatch.json" do
+  sink += dispatch(route_handler, "GET", "/json").response.body.bytesize
+end
+register job, cases, options.filter, "dispatch.not_found" do
+  sink += dispatch(route_handler, "GET", "/nowhere").response.status_code
+end
+register job, cases, options.filter, "chain.param" do
+  sink += dispatch(whole, "GET", "/api/v1/users/42").response.body.bytesize
+end
+
+abort("bench/micro: no case matches --filter " + options.filter) if cases.empty?
+
+job.execute
+
+width = 0
+job.items.each { |item| width = item.label.size if item.label.size > width }
+puts "case".ljust(width) + sprintf(" %14s %12s %8s", "ops/s", "ns/op", "±%")
+lines = ""
+job.items.each do |item|
+  ns = item.mean > 0.0 ? 1_000_000_000.0 / item.mean : 0.0
+  puts item.label.ljust(width) + sprintf(" %14.0f %12.1f %7.1f%%", item.mean, ns, item.relative_stddev)
+  lines += sprintf(%({"kind":"micro","name":"%s","ops_per_sec":%.1f,"ns_per_op":%.2f,"rsd_pct":%.2f}\n), item.label, item.mean, ns, item.relative_stddev)
+end
+# Printed, so the work above is observably used.
+puts "(checksum " + sink.to_s + ")"
+
+File.write(options.json, lines) unless options.json.empty?

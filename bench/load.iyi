@@ -1,0 +1,239 @@
+# An HTTP/1.1 load generator, so the end-to-end numbers need nothing but
+# iyi: no wrk, which Windows does not have. Each of N tasks holds one
+# keep-alive connection and sends a request, reads the whole response,
+# and sends the next, for a fixed time per target. The first second (by
+# default) warms the server and the connections up and is not counted.
+#
+#   iyi build --release bench/load.iyi -o load
+#   ./load --port 3900                                  # hello, json, param
+#   ./load --port 3900 --connections 64 --duration 10
+#   ./load --port 3900 --target users=/api/v1/users/7   # one target of your own
+#   ./load --port 3900 --json e2e.jsonl                 # also one JSON object per target
+#
+# Latency is measured from just before the request is written to when the
+# last byte of its response has been read, on the client's clock. Tasks
+# share one thread (SPEC.md III.4.5), as the server's do, so the client
+# costs about what the server does per request: what it reports is the
+# rate one core of client drives, which is comparable between two builds
+# of the server on the same machine, not a ceiling for the framework.
+#
+# An error is a connection refused or cut, or a response that is not a
+# 200 with a Content-Length. A connection that errs is closed and opened
+# again, so one bad response does not end the run.
+module bench/load
+
+import std/socket::{IyiSocket}
+import std/time::{Time}
+import std/format::{sprintf}
+import std/kernel::{abort}
+import std/text
+
+class Options
+  property host : String = "127.0.0.1"
+  property port : Int32 = 3900
+  property connections : Int32 = 32
+  property duration : Float64 = 5.0
+  property warmup : Float64 = 1.0
+  property wait : Float64 = 15.0
+  property json : String = ""
+  property targets : Array(Tuple(String, String)) = [] of Tuple(String, String)
+end
+
+USAGE = "usage: load [--host H] [--port P] [--connections N] [--duration S] [--warmup S] [--wait S] [--target NAME=PATH]... [--json FILE]"
+
+def parse_options(args : Array(String)) : Options
+  options = Options.new
+  index = 0
+  while index < args.size
+    flag = args[index]
+    value = index + 1 < args.size ? args[index + 1] : ""
+    case flag
+    when "--host"        then options.host = value
+    when "--port"        then options.port = value.to_i? || abort("--port takes a number")
+    when "--connections" then options.connections = value.to_i? || abort("--connections takes a number")
+    when "--duration"    then options.duration = value.to_f? || abort("--duration takes a number")
+    when "--warmup"      then options.warmup = value.to_f? || abort("--warmup takes a number")
+    when "--wait"        then options.wait = value.to_f? || abort("--wait takes a number")
+    when "--json"        then options.json = value
+    when "--target"
+      equals = value.index('=') || abort("--target takes NAME=PATH")
+      options.targets << {value[0, equals], value[equals + 1, value.bytesize - equals - 1]}
+    else
+      abort("unknown option " + flag + "\n" + USAGE)
+    end
+    index += 2
+  end
+  abort("--connections must be at least 1") if options.connections < 1
+  if options.targets.empty?
+    options.targets << {"hello", "/"}
+    options.targets << {"json", "/json"}
+    options.targets << {"param", "/api/v1/users/42"}
+  end
+  options
+end
+
+def now_ns : Int64
+  Time.monotonic.total_nanoseconds.to_i64
+end
+
+def seconds_ns(seconds : Float64) : Int64
+  (seconds * 1_000_000_000.0).to_i64
+end
+
+# What one target's run counted. Tasks share the thread, so they add to
+# one record without a lock.
+class Tally
+  getter latencies : Array(Int64) = [] of Int64
+  property errors : Int32 = 0
+  property first_error : String = ""
+
+  def error(what : String) : Nil
+    @errors += 1
+    @first_error = what if @first_error.empty?
+  end
+end
+
+# The first response in *buffer* when all of it is there: its length, and
+# whether the server closes the connection after it (it does after
+# `max_keepalive_requests`). Nil while more has to arrive, or the reason it
+# is not a response this client takes.
+def response_size(buffer : String) : Tuple(Int32, Bool) | String | Nil
+  ending = buffer.index("\r\n\r\n")
+  return nil unless ending
+  return "not HTTP/1.1: " + buffer[0, buffer.bytesize < 40 ? buffer.bytesize : 40] unless buffer.starts_with?("HTTP/1.1 ")
+  status = buffer[9, 3]
+  return "status " + status unless status == "200"
+  length = -1
+  close = false
+  head = buffer[0, ending]
+  head.split("\r\n").each do |line|
+    colon = line.index(':')
+    if colon
+      name = line[0, colon].downcase
+      value = line[colon + 1, line.bytesize - colon - 1].strip
+      length = value.to_i? || -1 if name == "content-length"
+      close = value.downcase == "close" if name == "connection"
+    end
+  end
+  return "no Content-Length" if length < 0
+  total = ending + 4 + length
+  buffer.bytesize >= total ? {total, close} : nil
+end
+
+# One connection's loop until *stop_at*: request, whole response, again.
+# Latencies after *count_from* go into *tally*.
+def drive(options : Options, request : String, count_from : Int64, stop_at : Int64, tally : Tally) : Nil
+  socket : IyiSocket? = nil
+  while now_ns < stop_at
+    unless open = socket
+      connected = IyiSocket.connect(options.host, options.port, 2000)
+      unless connected.is_a?(IyiSocket)
+        tally.error("connect: " + connected.message) if now_ns >= count_from
+        sleep(10)
+        next
+      end
+      socket = open = connected
+    end
+
+    started = now_ns
+    outcome = exchange(open, request)
+    finished = now_ns
+    if outcome.is_a?(String)
+      tally.error(outcome) if started >= count_from
+    elsif started >= count_from
+      tally.latencies << finished - started
+    end
+    # An error, or the server's `Connection: close`: open another.
+    unless outcome == true
+      open.close
+      socket = nil
+    end
+  end
+  if open = socket
+    open.close
+  end
+end
+
+# Writes *request* and reads its response off *socket*: true when it was a
+# whole 200 and the connection stays open, false when it was one and the
+# server closes the connection, the reason otherwise.
+def exchange(socket : IyiSocket, request : String) : Bool | String
+  written = socket.write(request)
+  return "write: " + written.message unless written.is_a?(Int32)
+  buffer = ""
+  while true
+    chunk = socket.read(16384)
+    return "read: " + chunk.message unless chunk.is_a?(String)
+    return "connection closed mid-response" if chunk.empty?
+    buffer = buffer.empty? ? chunk : buffer + chunk
+    got = response_size(buffer)
+    return got if got.is_a?(String)
+    if got
+      return "bytes after the response" if got[0] != buffer.bytesize
+      return !got[1]
+    end
+  end
+end
+
+# Waits until the server takes a connection, so a script can start it and
+# this side by side.
+def await_server(options : Options) : Nil
+  give_up = now_ns + seconds_ns(options.wait)
+  while true
+    connected = IyiSocket.connect(options.host, options.port, 1000)
+    if connected.is_a?(IyiSocket)
+      connected.close
+      return
+    end
+    abort("load: nothing answers on " + options.host + ":" + options.port.to_s + " (" + connected.message + ")") if now_ns >= give_up
+    sleep(100)
+  end
+end
+
+def percentile(sorted : Array(Int64), fraction : Float64) : Float64
+  return 0.0 if sorted.empty?
+  index = (sorted.size * fraction).to_i
+  index = sorted.size - 1 if index >= sorted.size
+  sorted[index].to_f
+end
+
+options = parse_options(Program.args)
+await_server(options)
+
+puts sprintf("%d connections, %.1fs per target after %.1fs of warm-up, against %s:%d", options.connections, options.duration, options.warmup, options.host, options.port)
+puts sprintf("%-10s %12s %10s %10s %10s %8s", "target", "req/s", "p50 µs", "p99 µs", "max µs", "errors")
+
+lines = ""
+failed = false
+options.targets.each do |target|
+  name, path = target
+  request = "GET " + path + " HTTP/1.1\r\nHost: " + options.host + "\r\nUser-Agent: iyi-web-bench\r\nAccept: */*\r\n\r\n"
+  tally = Tally.new
+  count_from = now_ns + seconds_ns(options.warmup)
+  stop_at = count_from + seconds_ns(options.duration)
+
+  group do |g|
+    options.connections.times do
+      g.spawn do
+        drive(options, request, count_from, stop_at, tally)
+        0
+      end
+    end
+  end
+
+  sorted = tally.latencies.sorted
+  rps = sorted.size.to_f / options.duration
+  p50 = percentile(sorted, 0.50) / 1000.0
+  p99 = percentile(sorted, 0.99) / 1000.0
+  max = (sorted.empty? ? 0.0 : sorted[sorted.size - 1].to_f) / 1000.0
+  puts sprintf("%-10s %12.0f %10.1f %10.1f %10.1f %8d", name, rps, p50, p99, max, tally.errors)
+  unless tally.first_error.empty?
+    puts "  first error: " + tally.first_error
+  end
+  failed = true if sorted.empty?
+  lines += sprintf(%({"kind":"e2e","name":"%s","rps":%.1f,"p50_us":%.1f,"p99_us":%.1f,"max_us":%.1f,"requests":%d,"errors":%d,"connections":%d}\n),
+    name, rps, p50, p99, max, sorted.size, tally.errors, options.connections)
+end
+
+File.write(options.json, lines) unless options.json.empty?
+exit(1) if failed
