@@ -129,6 +129,16 @@ get "/laid-out/:name" do |env|
   render "fixtures/views/with_content_for.eiy", "fixtures/views/layout_with_yield.eiy"
 end
 
+# A controller renders from a method, outside any route block, and this
+# file imports `iyi_web/dsl` and not `std/eiy`.
+def controller_page(name : String) : String
+  render "fixtures/views/with_content_for.eiy", "fixtures/views/layout_with_yield.eiy"
+end
+
+get "/controller/:name" do |env|
+  controller_page(env.params.url["name"])
+end
+
 get "/big-text" do |env|
   env.text("x" * 2000)
 end
@@ -230,6 +240,7 @@ describe "iyi_web/dsl" do
     laid = dispatch(handler, "GET", "/laid-out/ada").response.body
     assert laid.includes?("<head><title>Page of ada</title>\n</head>")
     assert laid.includes?("<body>Hello ada\n</body>")
+    assert dispatch(handler, "GET", "/controller/ada").response.body == laid
   end
 
   it "compresses responses with gzip true" do

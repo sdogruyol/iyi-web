@@ -1164,7 +1164,8 @@ end
 
 Templates use iyi's `.eiy` format: `<%= expr %>` prints a value and
 `<% code %>` runs iyi code. They are compiled into the program, and see the
-local variables where `render` is written.
+local variables where `render` is written: a route block, or a method, as a
+controller's `def show(name : String) : String` with `render` inside.
 
 - `render "view.eiy"` returns the rendered text. `render "view.eiy",
   "layout.eiy"` renders the view, then the layout with the view as `content`.

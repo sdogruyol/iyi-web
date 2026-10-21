@@ -23,6 +23,10 @@
 module iyi_web/templates
 
 import std/eiy::{Eiy}
+# `render` expands in the caller's file and names `Std::Eiy` there, so the
+# caller must reach it through an import: re-exported here, for a file
+# that imports this module or `iyi_web/dsl`.
+pub import std/eiy
 
 # The `content_for` blocks of one `render(view, layout)`, by key. Each render
 # makes its own, so two renders never see each other's blocks.
