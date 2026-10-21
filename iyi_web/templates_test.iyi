@@ -14,6 +14,10 @@ def page_for(name : String) : String
   render "fixtures/views/page.eiy"
 end
 
+def framed_page_for(name : String) : String
+  render "fixtures/views/with_content_for.eiy", "fixtures/views/layout_with_yield.eiy"
+end
+
 WITH_META = "<head><title>Page of world</title>\n</head>\n<body>Hello world\n</body>\n<aside>[]</aside>\n"
 
 describe "render" do
@@ -39,6 +43,7 @@ describe "render" do
 
   it "renders inside a method of a file that does not import std/eiy" do
     assert page_for("world") == "Hello world\n"
+    assert framed_page_for("world") == WITH_META
   end
 
   it "reads an absolute path as itself" do
