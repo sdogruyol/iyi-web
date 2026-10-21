@@ -35,6 +35,7 @@ pub class Config
   @show_exceptions : Bool?
   @max_file_uploads : Int32
   @max_multipart_form_field_size : Int32
+  @reject_unreadable_body : Bool
   @route_on_raw_path : Bool
   @max_ranges : Int32
   @static_dir_index : Bool
@@ -74,6 +75,7 @@ pub class Config
     @show_exceptions = nil
     @max_file_uploads = 128
     @max_multipart_form_field_size = 8 * 1024 * 1024
+    @reject_unreadable_body = true
     @route_on_raw_path = false
     @max_ranges = 16
     @static_dir_index = true
@@ -299,6 +301,20 @@ pub class Config
 
   pub def max_multipart_form_field_size=(value : Int32) : Int32
     @max_multipart_form_field_size = value
+  end
+
+  # Whether a request whose body cannot be read - a JSON body that does not
+  # parse, a malformed `multipart/form-data` one, more files or a larger
+  # field than the upload limits allow - gets its 400 or 413 before its
+  # route runs. Off, the route runs, and `params.json_valid?`,
+  # `params.json_error` and `params.body_error` say what went wrong, as
+  # Kemal, which raised only when a route first read the body.
+  pub def reject_unreadable_body : Bool
+    @reject_unreadable_body
+  end
+
+  pub def reject_unreadable_body=(value : Bool) : Bool
+    @reject_unreadable_body = value
   end
 
   # Whether routes and filters match the path as the request line sent it,

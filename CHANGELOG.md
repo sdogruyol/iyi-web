@@ -14,6 +14,11 @@ All notable changes to iyi-web are recorded here. The format follows
   routes match the raw path, and each captured segment is decoded after
   the match, as in Kemal, so `/files/a%2Fb` reaches `/files/:name` with
   `name` = `a/b`.
+- `config.reject_unreadable_body` (on by default): off, a route runs with
+  a malformed JSON or multipart body, or one over the upload limits, and
+  reads what went wrong from `params.json_valid?`, `params.json_error` and
+  `params.body_error`, as Kemal ran the route and raised only when it read
+  the body.
 - Cookie sessions, kemal-session's cookie engine (new `iyi_web/session`):
   `use SessionHandler.new(secret)` and `session(env)["user"] = name`. The
   cookie is AES-256-GCM under a key HKDF derives from the secret (32 bytes

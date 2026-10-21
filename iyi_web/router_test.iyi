@@ -657,6 +657,26 @@ describe "Router" do
       assert ctx.response.body == "a/b"
     end
 
+    it "runs the route with a body it cannot read when reject_unreadable_body is off" do
+      router = Router.new
+      router.post "/items" do |env|
+        env.params.json_valid? ? "valid" : "invalid: #{env.params.json_error ? "with error" : "no error"}"
+      end
+      router.post "/upload" do |env|
+        (env.params.body_error || 0).to_s
+      end
+      settings = Config.new
+      settings.reject_unreadable_body = false
+      handler = RouteHandler.new(router, settings)
+
+      broken = dispatch(handler, http_request("POST", "/items", "", "{\"name\":", "application/json"))
+      assert broken.response.status_code == 200
+      assert broken.response.body == "invalid: with error"
+
+      multipart = dispatch(handler, http_request("POST", "/upload", "", "--XyZ\r\nno headers", "multipart/form-data; boundary=XyZ"))
+      assert multipart.response.status_code == 200
+      assert multipart.response.body == "400"
+    end
   end
 
   describe "halt and redirect" do

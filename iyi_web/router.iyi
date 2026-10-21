@@ -430,13 +430,13 @@ pub class RouteHandler < Handler
 
     # The `BodyError` `env.params.json_as` would answer, so a page for that
     # type, or for 400, takes it.
-    unless ctx.params.json_valid?
+    if @config.reject_unreadable_body && !ctx.params.json_valid?
       render_failure(ctx, BodyError.new(400, "malformed JSON: " + (ctx.params.json_error || "")))
       drop_head_body(ctx)
       return
     end
 
-    if unreadable = ctx.params.body_error
+    if @config.reject_unreadable_body && (unreadable = ctx.params.body_error)
       render_error(ctx, unreadable)
       drop_head_body(ctx)
       return
