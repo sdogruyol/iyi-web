@@ -368,7 +368,7 @@ pub class RouteHandler < Handler
     return if ctx.halted?
 
     method = ctx.request.method
-    path = routing_path(ctx)
+    path = ctx.routing_path
 
     if method == "QUERY" && !ctx.request.body.empty? && ctx.request.content_type.empty?
       render_error(ctx, 400)
@@ -409,7 +409,7 @@ pub class RouteHandler < Handler
     end
 
     route = match.payload
-    ctx.params.update_url(captured(match.params))
+    ctx.params.update_url(captured(ctx, match.params))
     ctx.matched(route.method, route.path)
 
     run_filters(ctx, :before, route.method, path)
@@ -505,22 +505,16 @@ pub class RouteHandler < Handler
     ["GET"] + allowed
   end
 
-  # The path routes and filters match: decoded, or as sent under
-  # `route_on_raw_path`.
-  private def routing_path(ctx : Context) : String
-    @config.route_on_raw_path ? ctx.request.raw_path : ctx.request.path
-  end
-
   # A match's segments as the route reads them: decoded either way.
-  private def captured(params : Hash(String, String)) : Hash(String, String)
-    @config.route_on_raw_path ? params.transform_values { |value| decode_path(value) } : params
+  private def captured(ctx : Context, params : Hash(String, String)) : Hash(String, String)
+    ctx.route_on_raw_path? ? params.transform_values { |value| decode_path(value) } : params
   end
 
   # An upgrade request on a `ws` route. False when it is not the route's to
   # answer: a method other than GET that an HTTP route on the path serves.
   private def serve_socket(ctx : Context, found : Match(SocketRoute)) : Bool
     method = ctx.request.method
-    path = routing_path(ctx)
+    path = ctx.routing_path
     unless method == "GET"
       return false if lookup(method, path)
       run_filters(ctx, :before, "ALL", path, true)
@@ -533,7 +527,7 @@ pub class RouteHandler < Handler
     end
 
     socket = found.payload
-    ctx.params.update_url(captured(found.params))
+    ctx.params.update_url(captured(ctx, found.params))
     ctx.matched("GET", socket.path)
     run_filters(ctx, :before, "GET", path)
     return true if ctx.halted?

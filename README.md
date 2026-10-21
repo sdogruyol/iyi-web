@@ -1202,6 +1202,8 @@ config.max_request_body_size = 1024 * 1024
 | `max_file_uploads` | `128` | |
 | `max_multipart_form_field_size` | `8 * 1024 * 1024` | |
 | `max_ranges` | `16` | |
+| `reject_unreadable_body` | `true` | |
+| `route_on_raw_path` | `false` | |
 | `shutdown_timeout` | `30` | |
 | `shutdown_message` | `true` | |
 | `read_timeout` | `60` | |
@@ -1223,6 +1225,20 @@ config.max_request_body_size = 1024 * 1024
   Crystal's server holds Kemal to. Neither is a setting.
 - `max_ranges` is the most ranges one `Range` header may ask for; `0` turns
   range requests off.
+- `reject_unreadable_body` answers a JSON body that does not parse with `400`,
+  and a malformed multipart one or one past the upload limits with `400` or
+  `413`, before the route runs. Off, the route runs, as Kemal ran it, and
+  reads what went wrong from `params.json_valid?`, `params.json_error` and
+  `params.body_error`: an authentication check in the route then answers
+  first.
+- `route_on_raw_path` matches routes, filters, handlers' `only`/`exclude` and
+  `use "/prefix"` against the path as sent, percent-encoded, and decodes each
+  captured segment afterwards, as Kemal does: `/files/a%2Fb` reaches
+  `/files/:name` with `name` = `a/b`. Off, the path is decoded first, so the
+  same request is `/files/a/b`. Every handler and the router see the same
+  path either way, so a rule cannot exempt a request the router routes
+  elsewhere. Static files are looked up by the decoded path. The path as sent
+  is `env.request.raw_path`.
 - `websocket_allowed_origins` lists origins such as `"https://example.com"`;
   `"*"` admits every request and `"null"` a sandboxed page.
 - `websocket_max_message_size` counts a fragmented message whole.
@@ -1379,9 +1395,12 @@ iyi test
 A test is a `*_test.iyi` program that exits non-zero on failure, and
 `iyi test` runs every one in the project. A test that uses iyi-web sits beside
 `iyi.mod`, like the entry file. `http_request` and `form_request` build
-requests with a query string, a body or a content type. `handler_chain` from
-`web/iyi_web/dsl` is the whole application as `run` serves it (logging, static
-files, middleware and routes), for tests that need more than one router.
+requests with a query string, a body or a content type. `dispatch` gives the
+request the process `config`'s per-request settings, as the server does
+(`dispatch(handler, request, settings)` takes another `Config`).
+`handler_chain` from `web/iyi_web/dsl` is the whole application as `run`
+serves it (logging, static files, middleware and routes), for tests that need
+more than one router.
 
 ## Modules
 

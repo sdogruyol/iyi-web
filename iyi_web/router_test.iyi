@@ -645,16 +645,22 @@ describe "Router" do
       router.get "/files/:name" do |env|
         env.params.url["name"]
       end
+      router.get "/files/:dir/:name" do |env|
+        env.params.url["dir"] + "|" + env.params.url["name"]
+      end
       sent = http_request("GET", "/files/a/b")
       sent.raw_path = "/files/a%2Fb"
+      handler = RouteHandler.new(router)
 
-      assert dispatch(RouteHandler.new(router, Config.new), sent).response.status_code == 404
+      decoded = dispatch(handler, sent, Config.new)
+      assert decoded.response.body == "a|b"
 
       settings = Config.new
       settings.route_on_raw_path = true
-      ctx = dispatch(RouteHandler.new(router, settings), sent)
+      ctx = dispatch(handler, sent, settings)
       assert ctx.response.status_code == 200
       assert ctx.response.body == "a/b"
+      assert ctx.route_pattern == "/files/:name"
     end
 
     it "runs the route with a body it cannot read when reject_unreadable_body is off" do

@@ -4,6 +4,9 @@ module iyi_web/handler_test
 import iyi_web/handler::{Handler, chain}
 import iyi_web/harness::*
 import iyi_web/context::{Context}
+import iyi_web/config::{Config}
+import iyi_web/request::{Request}
+import iyi_web/path::{PathHandler}
 import iyi_web/spec::*
 
 class StampHandler < Handler
@@ -46,6 +49,31 @@ class AdminOnly < Handler
     return call_next(ctx) if exclude_match?(ctx)
     ctx.halt(401, "admin")
   end
+end
+
+# Refuses every request it applies to, as `CSRFHandler` refuses an unsafe
+# one without a token.
+class Guard < Handler
+  pub def call(ctx : Context) : Nil
+    if applies?(ctx)
+      ctx.halt(403, "guarded")
+    else
+      call_next(ctx)
+    end
+  end
+end
+
+def raw_settings : Config
+  settings = Config.new
+  settings.route_on_raw_path = true
+  settings
+end
+
+# A request whose path came off the wire as *raw*, decoded to *decoded*.
+def sent_as(method : String, decoded : String, raw : String) : Request
+  request = http_request(method, decoded)
+  request.raw_path = raw
+  request
 end
 
 describe "Handler" do
@@ -111,5 +139,49 @@ describe "Handler" do
     assert dispatch(handler, "HEAD", "/admin/users").response.status_code == 401
     assert dispatch(handler, "GET", "/admin/health").response.body == "healthy"
     assert dispatch(handler, "GET", "/public").response.body == "public"
+  end
+
+  # Under `route_on_raw_path` the router reads `/hooks%2Fx/delete` as
+  # `/:org/delete` with `org` = `hooks/x`. Read decoded, the same request
+  # is `/hooks/x/delete`, which `exclude ["/hooks/*"]` lets past the guard:
+  # a forged POST reached the route the guard protects.
+  it "matches only and exclude against the path the router routes on" do
+    guard = Guard.new
+    guard.exclude ["/hooks/*"], "*"
+    handler = chain([guard, routes { |r|
+      r.post "/:org/delete" do |env|
+        "deleted " + env.params.url["org"]
+      end
+      r.post "/hooks/:name" do |env|
+        "hook " + env.params.url["name"]
+      end
+    }])
+
+    forged = dispatch(handler, sent_as("POST", "/hooks/x/delete", "/hooks%2Fx/delete"), raw_settings)
+    assert forged.response.status_code == 403
+    hook = dispatch(handler, sent_as("POST", "/hooks/x", "/hooks/x"), raw_settings)
+    assert hook.response.body == "hook x"
+
+    # Decoded, the router agrees the request is under `/hooks`.
+    decoded = dispatch(handler, sent_as("POST", "/hooks/x/delete", "/hooks%2Fx/delete"), Config.new)
+    assert decoded.response.status_code == 404
+  end
+
+  it "scopes use(path, handler) by the path the router routes on" do
+    handler = chain([PathHandler.new("/admin", Guard.new), routes { |r|
+      r.get "/:page" do |env|
+        "page " + env.params.url["page"]
+      end
+      r.get "/admin/:page" do |env|
+        "admin " + env.params.url["page"]
+      end
+    }])
+
+    # One segment to the router, so not under `/admin` to the guard either.
+    flat = dispatch(handler, sent_as("GET", "/admin/panel", "/admin%2Fpanel"), raw_settings)
+    assert flat.response.body == "page admin/panel"
+    nested = dispatch(handler, sent_as("GET", "/admin/a/b", "/admin/a%2Fb"), raw_settings)
+    assert nested.response.status_code == 403
+    assert dispatch(handler, sent_as("GET", "/admin/panel", "/admin%2Fpanel"), Config.new).response.status_code == 403
   end
 end

@@ -10,10 +10,14 @@ All notable changes to iyi-web are recorded here. The format follows
 
 - `Request#raw_path`: the path as the request line sent it, before
   percent-decoding (`path` for a request built in-process).
-- `config.route_on_raw_path` (off by default): routes, filters and `ws`
-  routes match the raw path, and each captured segment is decoded after
-  the match, as in Kemal, so `/files/a%2Fb` reaches `/files/:name` with
-  `name` = `a/b`.
+- `config.route_on_raw_path` (off by default): routes, filters, `ws`
+  routes, handlers' `only`/`exclude` rules and `use "/prefix"` match the
+  raw path, and each captured segment is decoded after the match, as in
+  Kemal, so `/files/a%2Fb` reaches `/files/:name` with `name` = `a/b`.
+  `Context#routing_path` is the path they all match, so a rule never reads
+  a request the router routes elsewhere: an `exclude ["/hooks/*"]` does not
+  exempt `/hooks%2Fx/delete` from a CSRF check when it routes to
+  `/:org/delete`.
 - `config.reject_unreadable_body` (on by default): off, a route runs with
   a malformed JSON or multipart body, or one over the upload limits, and
   reads what went wrong from `params.json_valid?`, `params.json_error` and
@@ -108,6 +112,11 @@ All notable changes to iyi-web are recorded here. The format follows
   defaults to 500.
 - `request_log_line` takes an optional request id, which `Logger#request`
   passes when `RequestIdHandler` stored one.
+- `iyi_web/harness`'s `dispatch` gives the context the per-request
+  settings the server gives it (`Config#prepare`: upload limits,
+  `max_ranges`, `send_file`'s compression and the routing path), from the
+  process `config` or a `Config` passed as its third argument, so a request
+  driven in-process is handled as one over a socket.
 
 ### Fixed
 

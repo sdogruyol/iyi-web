@@ -317,16 +317,30 @@ pub class Config
     @reject_unreadable_body = value
   end
 
-  # Whether routes and filters match the path as the request line sent it,
+  # Whether routes, filters, handlers' `only`/`exclude` rules and
+  # `use "/prefix"` match the path as the request line sent it,
   # percent-encoded, with each captured segment decoded afterwards, as
   # Kemal matched them. Off, the path is decoded first, so `%2F` in a
-  # segment is a `/` between two segments.
+  # segment is a `/` between two segments. Static files are looked up by
+  # the decoded path either way.
   pub def route_on_raw_path : Bool
     @route_on_raw_path
   end
 
   pub def route_on_raw_path=(value : Bool) : Bool
     @route_on_raw_path = value
+  end
+
+  # Gives a request's context the settings it carries through the chain:
+  # the upload limits, `max_ranges`, whether `send_file` compresses, and
+  # the path its handlers match. The server calls it for every request,
+  # and `iyi_web/harness`'s `dispatch` does too, so a request driven
+  # in-process is handled as one over a socket.
+  pub def prepare(ctx : Context) : Nil
+    ctx.params.limit_uploads(@max_file_uploads, @max_multipart_form_field_size)
+    ctx.max_ranges = @max_ranges
+    ctx.static_gzip = @serve_static && @static_gzip
+    ctx.route_on_raw_path = @route_on_raw_path
   end
 
   # 0 turns `Range` support off.
