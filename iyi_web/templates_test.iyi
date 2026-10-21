@@ -8,6 +8,12 @@ import iyi_web/templates::{render, content_for, yield_content}
 import iyi_web/harness::*
 import iyi_web/spec::*
 
+# A render in a method, the way a controller renders: the macro expands in
+# this file, which imports `iyi_web/templates` and not `std/eiy`.
+def page_for(name : String) : String
+  render "fixtures/views/page.eiy"
+end
+
 WITH_META = "<head><title>Page of world</title>\n</head>\n<body>Hello world\n</body>\n<aside>[]</aside>\n"
 
 describe "render" do
@@ -29,6 +35,10 @@ describe "render" do
   it "reads a path inside a template beside that template" do
     name = "world"
     assert render("fixtures/views/with_partial.eiy", "fixtures/views/layout.eiy") == "<html><main><p>world</p>\n</main>\n</html>\n"
+  end
+
+  it "renders inside a method of a file that does not import std/eiy" do
+    assert page_for("world") == "Hello world\n"
   end
 
   it "reads an absolute path as itself" do

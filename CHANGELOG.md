@@ -100,6 +100,9 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ### Fixed
 
+- `render` in a method of a file that does not import `std/eiy` itself
+  no longer fails to build: `iyi_web/templates` re-exports `std/eiy`, whose
+  `Eiy.embed` the macro expands to in the caller's file.
 - `examples/cookies_and_context.iyi` answered every sign-in with `500` on
   Windows, opening `/dev/urandom` itself; its tokens come from
   `iyi_web/token`'s `random_hex`, which draws from `Random::Secure`.
