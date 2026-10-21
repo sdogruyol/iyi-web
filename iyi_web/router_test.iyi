@@ -639,6 +639,26 @@ describe "Router" do
     end
   end
 
+  describe "Kemal-compatible matching" do
+    it "matches the path as sent and decodes the captured segments under route_on_raw_path" do
+      router = Router.new
+      router.get "/files/:name" do |env|
+        env.params.url["name"]
+      end
+      sent = http_request("GET", "/files/a/b")
+      sent.raw_path = "/files/a%2Fb"
+
+      assert dispatch(RouteHandler.new(router, Config.new), sent).response.status_code == 404
+
+      settings = Config.new
+      settings.route_on_raw_path = true
+      ctx = dispatch(RouteHandler.new(router, settings), sent)
+      assert ctx.response.status_code == 200
+      assert ctx.response.body == "a/b"
+    end
+
+  end
+
   describe "halt and redirect" do
     it "redirects without writing the handler's return value" do
       handler = routes do |r|

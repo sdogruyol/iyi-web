@@ -35,6 +35,7 @@ pub class Config
   @show_exceptions : Bool?
   @max_file_uploads : Int32
   @max_multipart_form_field_size : Int32
+  @route_on_raw_path : Bool
   @max_ranges : Int32
   @static_dir_index : Bool
   @static_dir_listing : Bool
@@ -73,6 +74,7 @@ pub class Config
     @show_exceptions = nil
     @max_file_uploads = 128
     @max_multipart_form_field_size = 8 * 1024 * 1024
+    @route_on_raw_path = false
     @max_ranges = 16
     @static_dir_index = true
     @static_dir_listing = false
@@ -297,6 +299,18 @@ pub class Config
 
   pub def max_multipart_form_field_size=(value : Int32) : Int32
     @max_multipart_form_field_size = value
+  end
+
+  # Whether routes and filters match the path as the request line sent it,
+  # percent-encoded, with each captured segment decoded afterwards, as
+  # Kemal matched them. Off, the path is decoded first, so `%2F` in a
+  # segment is a `/` between two segments.
+  pub def route_on_raw_path : Bool
+    @route_on_raw_path
+  end
+
+  pub def route_on_raw_path=(value : Bool) : Bool
+    @route_on_raw_path = value
   end
 
   # 0 turns `Range` support off.

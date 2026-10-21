@@ -8,6 +8,12 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ### Added
 
+- `Request#raw_path`: the path as the request line sent it, before
+  percent-decoding (`path` for a request built in-process).
+- `config.route_on_raw_path` (off by default): routes, filters and `ws`
+  routes match the raw path, and each captured segment is decoded after
+  the match, as in Kemal, so `/files/a%2Fb` reaches `/files/:name` with
+  `name` = `a/b`.
 - Cookie sessions, kemal-session's cookie engine (new `iyi_web/session`):
   `use SessionHandler.new(secret)` and `session(env)["user"] = name`. The
   cookie is AES-256-GCM under a key HKDF derives from the secret (32 bytes

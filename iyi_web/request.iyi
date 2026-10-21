@@ -26,10 +26,12 @@ end
 pub class Request
   @remote_address : String?
   @tls : Bool
+  @raw_path : String?
 
   def initialize(@method : String, @path : String, @query_string : String, @version : String, @headers : Headers, @body : String)
     @remote_address = nil
     @tls = false
+    @raw_path = nil
   end
 
   # `std/http`'s request as this type: path percent-decoded, query left
@@ -43,7 +45,9 @@ pub class Request
 
     raw = path == "*" || path.empty? ? "/" : path
     decoded = decode_path(raw)
-    Request.new(method, decoded.empty? ? "/" : decoded, query ? query : "", version, table, body)
+    request = Request.new(method, decoded.empty? ? "/" : decoded, query ? query : "", version, table, body)
+    request.raw_path = raw
+    request
   end
 
   pub def method : String
@@ -56,6 +60,16 @@ pub class Request
 
   pub def path : String
     @path
+  end
+
+  # The path as the request line sent it, percent-encoding and all; the
+  # decoded `path` for a request built in-process.
+  pub def raw_path : String
+    @raw_path || @path
+  end
+
+  pub def raw_path=(value : String?) : String?
+    @raw_path = value
   end
 
   pub def query_string : String
@@ -186,6 +200,7 @@ pub def with_body(request : Request, body : String) : Request
   copy = Request.new(request.method, request.path, request.query_string, request.version, request.headers, body)
   copy.remote_address = request.remote_address
   copy.tls = request.tls?
+  copy.raw_path = request.raw_path
   copy
 end
 
