@@ -35,6 +35,8 @@ pub class Config
   @show_exceptions : Bool?
   @max_file_uploads : Int32
   @max_multipart_form_field_size : Int32
+  @reject_unreadable_body : Bool
+  @route_on_raw_path : Bool
   @max_ranges : Int32
   @static_dir_index : Bool
   @static_dir_listing : Bool
@@ -73,6 +75,8 @@ pub class Config
     @show_exceptions = nil
     @max_file_uploads = 128
     @max_multipart_form_field_size = 8 * 1024 * 1024
+    @reject_unreadable_body = true
+    @route_on_raw_path = false
     @max_ranges = 16
     @static_dir_index = true
     @static_dir_listing = false
@@ -297,6 +301,46 @@ pub class Config
 
   pub def max_multipart_form_field_size=(value : Int32) : Int32
     @max_multipart_form_field_size = value
+  end
+
+  # Whether a request whose body cannot be read - a JSON body that does not
+  # parse, a malformed `multipart/form-data` one, more files or a larger
+  # field than the upload limits allow - gets its 400 or 413 before its
+  # route runs. Off, the route runs, and `params.json_valid?`,
+  # `params.json_error` and `params.body_error` say what went wrong, as
+  # Kemal, which raised only when a route first read the body.
+  pub def reject_unreadable_body : Bool
+    @reject_unreadable_body
+  end
+
+  pub def reject_unreadable_body=(value : Bool) : Bool
+    @reject_unreadable_body = value
+  end
+
+  # Whether routes, filters, handlers' `only`/`exclude` rules and
+  # `use "/prefix"` match the path as the request line sent it,
+  # percent-encoded, with each captured segment decoded afterwards, as
+  # Kemal matched them. Off, the path is decoded first, so `%2F` in a
+  # segment is a `/` between two segments. Static files are looked up by
+  # the decoded path either way.
+  pub def route_on_raw_path : Bool
+    @route_on_raw_path
+  end
+
+  pub def route_on_raw_path=(value : Bool) : Bool
+    @route_on_raw_path = value
+  end
+
+  # Gives a request's context the settings it carries through the chain:
+  # the upload limits, `max_ranges`, whether `send_file` compresses, and
+  # the path its handlers match. The server calls it for every request,
+  # and `iyi_web/harness`'s `dispatch` does too, so a request driven
+  # in-process is handled as one over a socket.
+  pub def prepare(ctx : Context) : Nil
+    ctx.params.limit_uploads(@max_file_uploads, @max_multipart_form_field_size)
+    ctx.max_ranges = @max_ranges
+    ctx.static_gzip = @serve_static && @static_gzip
+    ctx.route_on_raw_path = @route_on_raw_path
   end
 
   # 0 turns `Range` support off.

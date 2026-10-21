@@ -61,6 +61,7 @@ pub class Context
   @route_pattern : String?
   @max_ranges : Int32
   @static_gzip : Bool
+  @route_on_raw_path : Bool
 
   def initialize(@request : Request, @response : Response, @params : Params)
     @halted = false
@@ -70,6 +71,7 @@ pub class Context
     @route_pattern = nil
     @max_ranges = 16
     @static_gzip = true
+    @route_on_raw_path = false
   end
 
   def self.for(request : Request) : Context
@@ -284,6 +286,26 @@ pub class Context
   # configuration.
   pub def static_gzip=(value : Bool) : Bool
     @static_gzip = value
+  end
+
+  # The path routes, filters, `only`/`exclude` rules and `use "/prefix"`
+  # match: the decoded `path`, or the path as sent under
+  # `route_on_raw_path`. One answer for every handler of a request, so a
+  # handler that decides whether it applies sees the path the router
+  # routes on: were they to differ, `/hooks%2Fx/delete` would be
+  # `/hooks/x/delete` to an `exclude ["/hooks/*"]` and `/:org/delete` to
+  # the router.
+  pub def routing_path : String
+    @route_on_raw_path ? @request.raw_path : @request.path
+  end
+
+  pub def route_on_raw_path? : Bool
+    @route_on_raw_path
+  end
+
+  # Set from `Config#route_on_raw_path` by `Config#prepare`.
+  pub def route_on_raw_path=(value : Bool) : Bool
+    @route_on_raw_path = value
   end
 
   pub def set(name : String, value : StoreValue) : Nil

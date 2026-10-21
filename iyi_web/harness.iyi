@@ -10,6 +10,7 @@ import iyi_web/request::{Request}
 import iyi_web/context::{Context}
 import iyi_web/handler::{Handler}
 import iyi_web/router::{Router, RouteHandler}
+import iyi_web/config::{Config, config}
 
 pub def http_request(method : String, path : String, query : String = "", body : String = "", content_type : String = "") : Request
   headers = Headers.new
@@ -23,8 +24,12 @@ pub def http_request(method : String, path : String, query : String = "", body :
   Request.new(method, path, query, "HTTP/1.1", headers, body)
 end
 
-pub def dispatch(handler : Handler, request : Request) : Context
+# *request* through *handler* as the server would send it: the context gets
+# *settings*' per-request values (`Config#prepare`), the process config's
+# unless another is given.
+pub def dispatch(handler : Handler, request : Request, settings : Config = config) : Context
   ctx = Context.for(request)
+  settings.prepare(ctx)
   handler.call(ctx)
   ctx
 end

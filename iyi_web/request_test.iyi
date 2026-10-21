@@ -50,6 +50,16 @@ describe "split_target" do
 end
 
 describe "parse_head" do
+  it "keeps the path as sent next to the decoded one" do
+    req = parsed("GET /files/a%2Fb%20c?x=1 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    assert req.path == "/files/a/b c"
+    assert req.raw_path == "/files/a%2Fb%20c"
+    assert with_body(req, "x").raw_path == "/files/a%2Fb%20c"
+
+    built = Request.new("GET", "/files/a b", "", "HTTP/1.1", Headers.new, "")
+    assert built.raw_path == "/files/a b"
+  end
+
   it "reads method, path, version and well-known headers" do
     req = parsed("POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
     assert req.method == "POST"

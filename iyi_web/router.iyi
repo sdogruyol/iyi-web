@@ -368,7 +368,7 @@ pub class RouteHandler < Handler
     return if ctx.halted?
 
     method = ctx.request.method
-    path = ctx.request.path
+    path = ctx.routing_path
 
     if method == "QUERY" && !ctx.request.body.empty? && ctx.request.content_type.empty?
       render_error(ctx, 400)
@@ -409,7 +409,7 @@ pub class RouteHandler < Handler
     end
 
     route = match.payload
-    ctx.params.update_url(match.params)
+    ctx.params.update_url(captured(ctx, match.params))
     ctx.matched(route.method, route.path)
 
     run_filters(ctx, :before, route.method, path)
@@ -430,13 +430,13 @@ pub class RouteHandler < Handler
 
     # The `BodyError` `env.params.json_as` would answer, so a page for that
     # type, or for 400, takes it.
-    unless ctx.params.json_valid?
+    if @config.reject_unreadable_body && !ctx.params.json_valid?
       render_failure(ctx, BodyError.new(400, "malformed JSON: " + (ctx.params.json_error || "")))
       drop_head_body(ctx)
       return
     end
 
-    if unreadable = ctx.params.body_error
+    if @config.reject_unreadable_body && (unreadable = ctx.params.body_error)
       render_error(ctx, unreadable)
       drop_head_body(ctx)
       return
@@ -505,11 +505,16 @@ pub class RouteHandler < Handler
     ["GET"] + allowed
   end
 
+  # A match's segments as the route reads them: decoded either way.
+  private def captured(ctx : Context, params : Hash(String, String)) : Hash(String, String)
+    ctx.route_on_raw_path? ? params.transform_values { |value| decode_path(value) } : params
+  end
+
   # An upgrade request on a `ws` route. False when it is not the route's to
   # answer: a method other than GET that an HTTP route on the path serves.
   private def serve_socket(ctx : Context, found : Match(SocketRoute)) : Bool
     method = ctx.request.method
-    path = ctx.request.path
+    path = ctx.routing_path
     unless method == "GET"
       return false if lookup(method, path)
       run_filters(ctx, :before, "ALL", path, true)
@@ -522,7 +527,7 @@ pub class RouteHandler < Handler
     end
 
     socket = found.payload
-    ctx.params.update_url(found.params)
+    ctx.params.update_url(captured(ctx, found.params))
     ctx.matched("GET", socket.path)
     run_filters(ctx, :before, "GET", path)
     return true if ctx.halted?

@@ -68,9 +68,11 @@ pub class Handler
     @only.empty? || only_match?(ctx)
   end
 
+  # The path is the one the router routes on (`Context#routing_path`), so a
+  # rule and a route never read one request two ways.
   private def rules_match?(rules : Array(Tuple(String, String)), ctx : Context) : Bool
     method = ctx.request.method
-    path = ctx.request.path
+    path = ctx.routing_path
     rules.each do |rule|
       wanted = rule[0]
       next unless wanted == "*" || wanted == method || (method == "HEAD" && wanted == "GET")

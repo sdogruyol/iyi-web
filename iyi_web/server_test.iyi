@@ -7,7 +7,8 @@ module iyi_web/server_test
 import std/socket::{IyiSocket}
 import std/http::{HTTP}
 import iyi_web/router::{Router, RouteHandler}
-import iyi_web/handler::{chain}
+import iyi_web/handler::{Handler, chain}
+import iyi_web/context::{Context}
 import iyi_web/server::{Server}
 import iyi_web/config::*
 import iyi_web/log::{Logger}
@@ -54,6 +55,13 @@ end
 
 def close_request(method : String, path : String, extra : String = "") : String
   "#{method} #{path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n#{extra}\r\n"
+end
+
+# Refuses a POST it applies to, as a CSRF check refuses one without a token.
+class Guard < Handler
+  pub def call(ctx : Context) : Nil
+    ctx.request.method == "POST" && applies?(ctx) ? ctx.halt(403, "guarded") : call_next(ctx)
+  end
 end
 
 router = Router.new
@@ -165,6 +173,26 @@ typed.error 500 do |env, err|
 end
 typed_server = Server.new(chain([RouteHandler.new(typed)]), cfg, typed.error_handlers, typed.error_type_handlers)
 typed_port = typed_server.bind("127.0.0.1", 0)
+
+# Routes on the path as sent, with a guard that exempts `/hooks/*`.
+raw = Router.new
+raw.get "/files/:name" do |env|
+  env.params.url["name"]
+end
+raw.post "/:org/delete" do |env|
+  "deleted " + env.params.url["org"]
+end
+raw.post "/hooks/:name" do |env|
+  "hook " + env.params.url["name"]
+end
+raw_cfg = Config.new
+raw_cfg.logging = false
+raw_cfg.serve_static = false
+raw_cfg.route_on_raw_path = true
+raw_guard = Guard.new
+raw_guard.exclude ["/hooks/*"], "*"
+raw_server = Server.new(chain([raw_guard, RouteHandler.new(raw, raw_cfg)] of Handler), raw_cfg)
+raw_port = raw_server.bind("127.0.0.1", 0)
 
 group do |g|
   g.spawn do
@@ -440,10 +468,22 @@ group do |g|
         assert status_line(fallback) == "HTTP/1.1 500 Internal Server Error"
         assert http_body(fallback) == "fallback: first"
       end
+
+      it "routes on the path as sent under route_on_raw_path, and guards by it too" do
+        file = exchange(raw_port, close_request("GET", "/files/a%2Fb%20c"))
+        assert status_line(file) == "HTTP/1.1 200 OK"
+        assert http_body(file) == "a/b c"
+
+        forged = exchange(raw_port, close_request("POST", "/hooks%2Fx/delete", "Content-Length: 0\r\n"))
+        assert status_line(forged) == "HTTP/1.1 403 Forbidden"
+        hook = exchange(raw_port, close_request("POST", "/hooks/x", "Content-Length: 0\r\n"))
+        assert http_body(hook) == "hook x"
+      end
     end
 
     server.close
     typed_server.close
+    raw_server.close
     0
   end
 
@@ -454,6 +494,11 @@ group do |g|
 
   g.spawn do
     typed_server.listen
+    0
+  end
+
+  g.spawn do
+    raw_server.listen
     0
   end
 end
