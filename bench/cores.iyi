@@ -1,0 +1,27 @@
+# The application `bench/cores.sh` measures on one worker and on every
+# core: `bench/app.iyi`'s hundred routes, and `/login`, which checks a
+# password against a bcrypt hash of cost 10 (std/password) as a sign-in
+# does - the CPU-bound endpoint of iyi-web issue #145's application. Request
+# logging and static files are off. Takes `run`'s flags, `-w` among them.
+#
+#   iyi build --release bench/cores.iyi -o cores
+#   ./cores -p 3901 -w 1
+#   curl localhost:3901/login
+module bench/cores
+
+import std/password::{Bcrypt}
+import iyi_web/dsl::*
+import bench/app::{fill}
+
+# Made once, at start: the hash a user's row would hold.
+HASH = Bcrypt.hash("correct horse battery staple", 10)
+
+fill(app)
+
+get "/login" do |env|
+  Bcrypt.verify("correct horse battery staple", HASH) ? "welcome" : "refused"
+end
+
+logging(false)
+serve_static(false)
+run
