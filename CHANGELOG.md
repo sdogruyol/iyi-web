@@ -6,6 +6,51 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
+Requires iyi with `spawn_parallel` (iyi master after 0.19.1, SPEC.md
+III.4.13). Exports changed (`iyi mod release`): `Handler#next_handler`
+and `next_handler=` are gone, `RouteHandler#lookup` answers a
+`Match(RouteEntry(...))`, `SessionHandler#clock=` takes the Unix second to
+fix the clock at, `RateLimitHandler`'s `clock:` is a `SharedProc(Nil,
+Int64)`, `StaticHeadersHook` is a `SharedProc`, and `Config`'s
+`custom_handlers`/`positioned_handlers` hold kept steps.
+
+### Added
+
+- A request is served on whichever core is free: `run` serves each
+  connection as a parallel task on a pool of `workers` threads, the
+  cores the process may run on by default (`IYI_WORKERS` overrides).
+  `workers N` in the DSL, `config.workers`, or `-w`/`--workers` on the
+  command line; `workers 1` serves every connection on the accepting
+  thread, as before.
+- Every block the application gives a route, a filter, an `error` page,
+  `ws`, `sse`, `static_headers` and `BasicAuthHandler`/`RateLimitHandler`
+  is checked by the compiler where it is written, as a parallel task's
+  is: one that captures an `Array`, or assigns a local it captured, is
+  refused naming the variable. A handler given to `use`, and a logger,
+  must be `Share`; the refusal names the field.
+- `workers: 1` on a registration (`get "/x", workers: 1 do ...`, `use
+  handler, workers: 1`, `logger value, workers: 1`) keeps its block
+  unchecked; an application holding one is served on one thread and says
+  so at start.
+- `iyi_web/app`: `build_server(router, config)`, the server `run` builds,
+  for a test or a program of its own.
+- `bench/cores.sh`: one worker against every core under wrk, on bcrypt
+  and on a light route, with the server's CPU from /proc.
+
+### Changed
+
+- A request's place in the chain is the request's (`Context#call_next`),
+  not a field of the handler; `only`/`exclude` rules are behind a lock a
+  request takes only when there are rules.
+- Routes are read from a frozen copy of the tree (`Tree#frozen`), children
+  sorted and binary-searched, so every worker reads one tree.
+- `RateLimitHandler`'s table is behind a `Mutex`; `SessionHandler` keeps
+  derived keys and expands an `AesGcm` per seal and open; `StdoutLogger`
+  writes under one lock; the HTTP date cache is per connection.
+- A stop asked for from a request on a worker is sent to the accepting
+  thread, which drains; each connection's watcher closes or cuts off its
+  own connection.
+
 ## [0.4.0] - 2026-10-21
 
 Requires iyi 0.18.0 or later. One export moved (`iyi mod release`):

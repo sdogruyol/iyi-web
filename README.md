@@ -50,9 +50,10 @@ a route returns is checked when the program compiles.
 
 ## Requirements
 
-[iyi](https://iyi-lang.com) 0.18.0 or later: TLS (`std/tls`'s server), the
-streaming compressor (`std/compress`'s `Deflater`) and the media-type table
-(`std/mime`) arrived in 0.18.0.
+[iyi](https://iyi-lang.com) with `spawn_parallel` (master after 0.19.1;
+the first release that has it): the pool every connection is served on.
+TLS (`std/tls`'s server), the streaming compressor (`std/compress`'s
+`Deflater`) and the media-type table (`std/mime`) arrived in 0.18.0.
 
 ## Installation
 
@@ -1176,6 +1177,61 @@ controller's `def show(name : String) : String` with `render` inside.
   template rendered inside another template, to that template.
 - Output is not escaped automatically; escape untrusted text with
   `HTML.escape`.
+
+## Every core
+
+`run` serves each connection as a parallel task on a pool of worker
+threads (iyi's `spawn_parallel`, SPEC.md III.4.13): whichever worker is
+free takes it, so a CPU-bound route - a bcrypt check, a template - uses
+the machine rather than one thread. The pool has one worker per core the
+process may run on; `IYI_WORKERS`, `workers 4`, `config.workers = 4` or
+`-w 4` set it, and `workers 1` serves every connection on the thread that
+accepts them, as iyi-web did before.
+
+Because a route may run on several cores at once, the compiler checks
+every block you register where you write it, as it checks a parallel
+task's (SPEC.md III.4.4). A route that captures a bare `Array` or `Hash`,
+or assigns a local it captured, does not compile:
+
+```iyi
+seen = [] of String
+
+get "/" do |env|
+  seen << env.request.path   # refused
+  seen.size.to_s
+end
+```
+
+```
+Error: the block Dsl.get keeps, which may run on other threads captures
+`seen : Array(String)`, which is not Share: Array(String)'s field @size is
+assigned in `append` (SPEC.md III.4.4)
+```
+
+Two ways out. Keep the state behind a lock or in an atomic -
+`Mutex.new { [] of String }` with `seen.lock { |list| list << path }`,
+`Atomic(Int32)` for a count, a `List` for a table nothing writes
+(`examples/json_api.iyi`). Or register the block with `workers: 1`: it is
+kept unchecked, and the application is served on one thread, saying so
+when it starts (`examples/websocket_chat.iyi`):
+
+```iyi
+get "/", workers: 1 do |env|
+  seen << env.request.path
+  seen.size.to_s
+end
+```
+
+The same holds for filters, `error` pages, `ws`, `sse` and
+`static_headers`. A handler given to `use`, and a logger, are called by
+every worker, so they must be `Share` - no field assigned after
+`initialize` - and the refusal names the field; `use handler, workers: 1`
+and `logger value, workers: 1` keep them unchecked. What the check cannot
+see is a method the block calls that writes module state: a constant
+named in the block is checked, one reached through a function is not.
+
+Settings are copied when a server on more than one worker starts
+(`Settings`); one changed on `config` afterwards does not reach it.
 
 ## Configuration
 
