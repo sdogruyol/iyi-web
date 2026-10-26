@@ -8,6 +8,7 @@
 #   curl -i -b jar -c jar -X POST localhost:3000/sign-out
 module examples/cookies_and_context
 
+import std/mutex::{Mutex}
 import iyi_web/dsl::*
 import iyi_web/token::{random_hex}
 
@@ -22,7 +23,8 @@ end
 # Session token => user. The cookie carries only an unguessable token:
 # `random_hex` draws from the operating system's entropy on every platform.
 # `examples/sessions_and_csrf.iyi` keeps the session in the cookie instead.
-SESSIONS = {} of String => User
+# Requests on every core read and write the table, so it is behind a lock.
+SESSIONS = Mutex.new { {} of String => User }
 
 def new_token : String
   random_hex(24)
@@ -34,7 +36,7 @@ end
 # by its type with `env.get?(name, User)`. Cookies arrive decoded.
 before_all do |env|
   if token = env.cookies["session"]?
-    if user = SESSIONS[token]?
+    if user = SESSIONS.get { |sessions| sessions[token]? }.or_panic
       env.set("user", user)
     end
   end
@@ -57,7 +59,7 @@ post "/sign-in" do |env|
     env.halt(422, "A name is required")
   else
     token = new_token
-    SESSIONS[token] = User.new(name)
+    SESSIONS.lock { |sessions| sessions[token] = User.new(name) }
     # `http_only` keeps scripts from reading it; add `secure: true` behind HTTPS.
     env.set_cookie("session", token, http_only: true, same_site: "Lax", max_age: 86400)
     env.redirect("/account", 303)
@@ -76,7 +78,7 @@ end
 
 post "/sign-out" do |env|
   if token = env.cookies["session"]?
-    SESSIONS.delete(token)
+    SESSIONS.lock { |sessions| sessions.delete(token) }
   end
   # Deleting needs the same `path` and `domain` the cookie was set with.
   env.delete_cookie("session")
