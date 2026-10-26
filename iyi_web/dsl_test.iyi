@@ -190,7 +190,9 @@ describe "iyi_web/dsl" do
   it "sends request lines and log messages to the configured logger until logging false" do
     previous = config.logger
     collected = Collected.new
-    logger collected
+    # `Collected` keeps its lines in a bare `Array`, which no two workers
+    # may share: kept unchecked, for a server on one thread.
+    logger collected, workers: 1
     logging(true)
     serve_static(false)
     dispatch(handler_chain, "GET", "/dsl")
@@ -203,7 +205,7 @@ describe "iyi_web/dsl" do
     dispatch(handler_chain, "GET", "/dsl")
     log "dropped"
     assert collected.lines.size == 2
-    logger previous
+    logger previous, workers: 1
   end
 
   it "registers one filter for a list of paths" do

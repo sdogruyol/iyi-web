@@ -10,7 +10,15 @@
 #
 # The tree is generic over the payload so the router can store a handler
 # without this module knowing what a handler is.
+#
+# `Tree` is built; `FrozenTree` is what a server reads. A tree being added to
+# is written, so it is not `Share` (SPEC.md III.4.4) and every worker may
+# not read one at once. `Tree#frozen` copies it into nodes made whole by
+# their constructors and never written again, children kept sorted in a
+# `List` and found by binary search: `Share` whenever the payload is.
 module iyi_web/radix
+
+import std/list::{List}
 
 pub class Match(T)
   def initialize(@payload : T, @params : Hash(String, String))
@@ -118,6 +126,19 @@ pub class Tree(T)
     return [] of String if trimmed.empty?
     trimmed.split('/')
   end
+
+  # This tree as it stands, for every worker to read.
+  pub def frozen : FrozenTree(T)
+    FrozenTree(T).new(freeze(@root))
+  end
+
+  private def freeze(node : Node(T)) : FrozenNode(T)
+    keys = node.static.keys.sorted
+    children = keys.map { |key| {key, freeze(node.static[key])} }
+    param = node.param
+    glob = node.catch_all
+    FrozenNode(T).new(List.new(children), param ? freeze(param) : nil, glob ? freeze(glob) : nil, node.payload, List.new(node.names))
+  end
 end
 
 private class Node(T)
@@ -158,5 +179,125 @@ private class Node(T)
       end
       child
     end
+  end
+end
+
+# A `Tree` no longer added to: `find` answers what the tree's did.
+pub class FrozenTree(T)
+  @root : FrozenNode(T)
+
+  def initialize(@root : FrozenNode(T))
+  end
+
+  pub def find(path : String) : Match(T)?
+    segments = split_path(path)
+    values = [] of String
+    node = walk(@root, segments, 0, values)
+    return nil unless node
+    payload = node.payload
+    return nil unless payload
+    params = {} of String => String
+    names = node.names
+    index = 0
+    while index < names.size
+      params[names[index]] = values[index]
+      index = index + 1
+    end
+    Match(T).new(payload, params)
+  end
+
+  # `Tree#walk`, over frozen nodes.
+  private def walk(node : FrozenNode(T), segments : Array(String), index : Int32, values : Array(String)) : FrozenNode(T)?
+    if index == segments.size
+      return node if node.payload
+      if glob = node.catch_all
+        if glob.payload
+          values << ""
+          return glob
+        end
+      end
+      return nil
+    end
+
+    segment = segments[index]
+
+    if child = node.child(segment)
+      found = walk(child, segments, index + 1, values)
+      return found if found
+    end
+
+    if child = node.param
+      values << segment
+      found = walk(child, segments, index + 1, values)
+      return found if found
+      values.pop
+    end
+
+    if glob = node.catch_all
+      if glob.payload
+        rest = [] of String
+        rest_index = index
+        while rest_index < segments.size
+          rest << segments[rest_index]
+          rest_index = rest_index + 1
+        end
+        values << rest.join("/")
+        return glob
+      end
+    end
+
+    nil
+  end
+end
+
+private def split_path(path : String) : Array(String)
+  trimmed = path.starts_with?('/') ? path.lchop('/') : path
+  trimmed = trimmed.chomp('/')
+  return [] of String if trimmed.empty?
+  trimmed.split('/')
+end
+
+private class FrozenNode(T)
+  @static : List(Tuple(String, FrozenNode(T)))
+  @param : FrozenNode(T)?
+  @catch_all : FrozenNode(T)?
+  @payload : T?
+  @names : List(String)
+
+  def initialize(@static : List(Tuple(String, FrozenNode(T))), @param : FrozenNode(T)?, @catch_all : FrozenNode(T)?, @payload : T?, @names : List(String))
+  end
+
+  def param : FrozenNode(T)?
+    @param
+  end
+
+  def catch_all : FrozenNode(T)?
+    @catch_all
+  end
+
+  def payload : T?
+    @payload
+  end
+
+  def names : List(String)
+    @names
+  end
+
+  # The static child for *segment*: the children are sorted by key.
+  def child(segment : String) : FrozenNode(T)?
+    low = 0
+    high = @static.size - 1
+    while low <= high
+      middle = (low + high) // 2
+      entry = @static[middle]
+      order = entry[0] <=> segment
+      return entry[1] if order == 0
+      if order < 0
+        low = middle + 1
+      else
+        high = middle - 1
+      end
+    end
+    nil
   end
 end

@@ -110,12 +110,11 @@ describe "Handler" do
   end
 
   it "treats the base Handler as call_next" do
-    passthrough = Handler.new
-    passthrough.next_handler = routes { |r|
+    passthrough = chain([Handler.new, routes { |r|
       r.get "/" do |env|
         "ok"
       end
-    }
+    }])
     assert dispatch(passthrough, "GET", "/").response.body == "ok"
   end
 

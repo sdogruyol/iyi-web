@@ -10,6 +10,20 @@
 # library's: handlers mutate a class, and `Set-Cookie` may appear more
 # than once, which a Hash cannot hold.
 #
+# **On every core.** With more than one worker every connection is a
+# parallel task (SPEC.md III.4.13): the thread that called `listen`
+# accepts, and whichever pool worker is free serves the connection to its
+# end, the requests of other connections running on the other workers at
+# the same time. What the workers share is a `Site`: the handler chain,
+# the error pages and the settings, every one of them `Share` (SPEC.md
+# III.4.4) and never written once the server started, and the counts and
+# signals a stop needs, which are `Atomic`s and `Channel`s. The compiler
+# checks all of it where the connection's task is spawned, so a site that
+# held a `Proc` or an `Array` would not compile. With one worker the same
+# `Site` code runs every connection as a task on the accepting thread, as
+# every connection ran before there were workers; its blocks are `Proc`s,
+# and its settings the live `Config`.
+#
 # Every connection runs as its own task inside its own group. `listen`'s
 # group cancels every live child on the first failure (III.4.3), so a
 # handler's panic, or a write to a client that has gone, would otherwise
@@ -25,6 +39,16 @@
 # handler still streaming stops. The drain is watched the way Kemal
 # watches it, every 10 ms, and only once the listener is closed.
 #
+# The listener belongs to the thread that accepts, and a connection to the
+# worker that serves it, so neither is touched from another thread. Beside
+# each connection, in its own task on its own worker, a watcher waits for
+# the stop: when the server begins to drain it closes its connection if
+# that is waiting for a request, and when the deadline passes it cuts it
+# off - what the accepting thread did itself, walking a list of every
+# connection, before connections ran on other cores (std/http's
+# `serve_parallel` does the same). A `close` from a request, on a worker,
+# is sent to the accepting thread, which drains.
+#
 # A slow client holds one task, and the timeouts bound for how long: a
 # request has `read_timeout` to arrive whole, a keep-alive connection
 # `idle_timeout` to start its next one, and a write `write_timeout` for
@@ -37,63 +61,76 @@
 # connection's own task and inside its first request's `read_timeout`, as
 # `std/http`'s server runs it: a client that fails it - plain HTTP sent to
 # the TLS port, a certificate it refuses - is told by an alert and loses
-# only its own connection.
+# only its own connection. On every worker the config is
+# `TlsServerConfig#frozen`, one copy every worker reads with one set of
+# ticket keys.
 module iyi_web/server
 
+import std/list::{List}
+import std/shared_proc::{SharedProc}
 import std/socket::{IyiSocket, SocketError}
 import std/http::{HTTP, TlsStream}
-import std/tls::{TlsServer, TlsServerConfig, TlsError}
+import std/tls::{TlsServer, TlsServerConfig, TlsFrozenServerConfig, TlsError}
 import std/time::{Time, Span}
-import iyi_web/handler::{Handler}
+import iyi_web/handler::{Handler, Chain}
 import iyi_web/context::{Context}
 import iyi_web/request::{Request, ParseError}
 import iyi_web/intake::{Intake, TooLarge, HeadTooLarge}
 import iyi_web/response::{Response}
-import iyi_web/config::{Config}
+import iyi_web/config::{Config, Settings}
 import iyi_web/http_date::*
 import iyi_web/failure::{render_error_type_page, render_failure_page}
 
 pub class Server
-  @handler : Handler
   @config : Config
-  @error_pages : Hash(Int32, Proc(Context, Error, String))
-  @error_types : Hash(String, Proc(Context, Error, String?))
-  @socket : IyiSocket?
-  @tls : TlsServerConfig?
-  @in_flight : Int32
-  @host : String
-  @port : Int32
-  @first_connection : Connection?
-  @draining : Bool
-  @deadline : Span
-  @cut : Bool
-  @listening : Bool
-  @stopped : Channel(Int32)
-  @date_at : Int64
-  @date_value : String
-  @unix : Bool
+  @serial : SerialSite?
+  @parallel : ParallelSite?
+  @workers : Int32
+  @socket : IyiSocket? = nil
+  @tls : TlsServerConfig? = nil
+  @host : String = "127.0.0.1"
+  @port : Int32 = 0
+  @draining : Bool = false
+  @deadline : Span = Span.zero
+  @cut : Bool = false
+  @listening : Bool = false
+  @stopped : Channel(Int32) = Channel(Int32).new
+  # Stops asked for from any thread, each its timeout in seconds: the
+  # accepting thread drains. Closed once `listen` has returned.
+  @stop_requests : Channel(Int32) = Channel(Int32).new(4)
+  # Set by the first `ask_stop`, from whichever thread.
+  @stop_asked : Atomic(Int32) = Atomic(Int32).new(0)
+  @unix : Bool = false
 
-  # *error_pages* are the application's `error` handlers for statuses, and
-  # *error_types* its `error` handlers for error types (`Router`'s
-  # `error_handlers` and `error_type_handlers`). A panicking request gets
-  # the first type page that takes its `Panicked`, else the 500 page.
-  def initialize(@handler : Handler, @config : Config,
-                 @error_pages : Hash(Int32, Proc(Context, Error, String)) = {} of Int32 => Proc(Context, Error, String),
-                 @error_types : Hash(String, Proc(Context, Error, String?)) = {} of String => Proc(Context, Error, String?))
-    @socket = nil
-    @tls = nil
-    @in_flight = 0
-    @host = "127.0.0.1"
-    @port = 0
-    @first_connection = nil
-    @draining = false
-    @deadline = Span.zero
-    @cut = false
-    @listening = false
-    @stopped = Channel(Int32).new
-    @date_at = -1_i64
-    @date_value = ""
-    @unix = false
+  # One handler on one thread. *error_pages* are the application's `error`
+  # handlers for statuses, and *error_types* its `error` handlers for
+  # error types (`Router`'s `error_handlers` and `error_type_handlers`). A
+  # panicking request gets the first type page that takes its `Panicked`,
+  # else the 500 page.
+  def self.new(handler : Handler, config : Config,
+               error_pages : Hash(Int32, Proc(Context, Error, String)) = {} of Int32 => Proc(Context, Error, String),
+               error_types : Hash(String, Proc(Context, Error, String?)) = {} of String => Proc(Context, Error, String?)) : Server
+    chain = Chain(Proc(Context, Nil)).new([->(ctx : Context) { handler.call(ctx) }])
+    page = error_pages[500]?
+    page_500 = page ? ->(pair : {Context, Error}) { page.call(pair[0], pair[1]).as(String?) } : nil
+    type_pages = error_types.values.map { |typed| ->(pair : {Context, Error}) { typed.call(pair[0], pair[1]) } }
+    new(SerialSite.new(chain, page_500, type_pages, config), config)
+  end
+
+  # *site* on the thread that calls `listen`.
+  def initialize(site : SerialSite, @config : Config)
+    @serial = site
+    @parallel = nil
+    @workers = 1
+  end
+
+  # *site* on a pool of *workers* (SPEC.md III.4.13), the thread that
+  # calls `listen` accepting. The pool's size is fixed once it starts, so
+  # a second server in one process asks for the same count.
+  def initialize(site : ParallelSite, @config : Config, @workers : Int32)
+    raise "workers must be at least 1, not #{@workers}" if @workers < 1
+    @serial = nil
+    @parallel = site
   end
 
   pub def bind(host : String, port : Int32) : Int32
@@ -126,6 +163,11 @@ pub class Server
     @port
   end
 
+  # How many threads serve: 1, or the pool's size.
+  pub def workers : Int32
+    @workers
+  end
+
   # Serves until `close` or `shutdown` has drained the connections.
   pub def listen : Nil
     listener = @socket
@@ -134,39 +176,91 @@ pub class Server
     @listening = true
     defer stopped_listening
 
-    group do |g|
-      pause = 5
-      while !listener.closed?
-        case client = listener.accept
-        in Cancelled
-          break
-        in SocketError
-          # The listener's own trouble - descriptors run out, most often -
-          # is waited out rather than spun on: 5 ms doubling to a second,
-          # as `std/http`'s server does, and the next accept that works
-          # resets it.
-          sleep(pause)
-          pause = pause * 2 if pause < 1000
-        in IyiSocket
-          pause = 5
-          conn = Connection.new(client)
-          track(conn)
-          spawn_connection(g, conn)
+    if site = @parallel
+      # The pool starts at the first parallel task, with the size it was
+      # asked for before then (`IyiWorkers.count=`).
+      IyiWorkers.count = @workers unless IyiWorkers.count == @workers
+      tls = @tls
+      frozen = tls ? tls.frozen : nil
+      unix = @unix
+      accept(listener) { |g, client| Server.spawn_parallel(g, site, client.fd, client.family, frozen, unix) }
+    elsif site = @serial
+      tls = @tls
+      unix = @unix
+      accept(listener) { |g, client| Server.spawn_serial(g, site, client, tls, unix) }
+    end
+  end
+
+  # Accepts until the listener closes, handing each connection to *start*,
+  # and then drains. A stop asked for from another thread is received here
+  # beside the loop, on this thread, where the listener is.
+  private def accept(listener : IyiSocket, & : IyiGroup, IyiSocket -> Nil) : Nil
+    group do |outer|
+      outer.spawn do
+        while true
+          asked = @stop_requests.receive
+          break unless asked.is_a?(Int32)
+          begin_drain(asked)
         end
+        0
       end
-      # Closed by `close` or `shutdown`, or this task was cancelled, which
-      # is a stop that does not wait.
-      begin_drain(0) unless @draining
-      wait_for_connections
+      group do |g|
+        pause = 5
+        while !listener.closed?
+          case client = listener.accept
+          in Cancelled
+            break
+          in SocketError
+            # The listener's own trouble - descriptors run out, most often -
+            # is waited out rather than spun on: 5 ms doubling to a second,
+            # as `std/http`'s server does, and the next accept that works
+            # resets it.
+            sleep(pause)
+            pause = pause * 2 if pause < 1000
+          in IyiSocket
+            pause = 5
+            yield g, client
+          end
+        end
+        # Closed by `close` or `shutdown`, or this task was cancelled, which
+        # is a stop that does not wait.
+        begin_drain(0) unless @draining
+        wait_for_connections
+        0
+      end
+      outer.cancel_children
+      0
+    end
+  end
+
+  # A connection on whichever worker is free. A class method, so the block
+  # reaches no server: it captures the site, the descriptor and family the
+  # socket is made again from on the worker (the accepting thread never
+  # touches its own object again), and the frozen TLS config, all `Share`.
+  def self.spawn_parallel(g : IyiGroup, site : ParallelSite, fd : Int32, family : Int32, tls : TlsFrozenServerConfig?, unix : Bool) : Nil
+    g.spawn_parallel do
+      site.serve(IyiSocket.new(fd, family), tls, unix)
+      0
+    end
+  end
+
+  # A method of its own because a `while` body is not a scope: a block
+  # spawned in the accept loop captures the loop's one `client`, which the
+  # next accept overwrites before the task runs. A parameter is bound per
+  # call.
+  def self.spawn_serial(g : IyiGroup, site : SerialSite, client : IyiSocket, tls : TlsServerConfig?, unix : Bool) : Nil
+    g.spawn do
+      site.serve(client, tls, unix)
       0
     end
   end
 
   # Stops taking connections and drains them, giving the requests in flight
   # `shutdown_timeout` seconds; answers at once, and `listen` returns when
-  # the drain is over.
+  # the drain is over. From a request on a worker it is the accepting
+  # thread that drains.
   pub def close : Nil
-    begin_drain(@config.shutdown_timeout)
+    stop_with(@config.shutdown_timeout)
   end
 
   # Like `close`, with *timeout* seconds for the requests in flight, and
@@ -174,49 +268,49 @@ pub class Server
   # brought forward: `shutdown(0)` during a drain cuts off what is left
   # now.
   pub def shutdown(timeout : Int32 = @config.shutdown_timeout) : Nil
-    begin_drain(timeout)
+    stop_with(timeout)
     @stopped.receive if @listening
   end
 
+  # Marks the server as stopping and answers whether this was the first to
+  # ask: `stop` refuses a second, from whichever thread it comes.
+  pub def ask_stop : Bool
+    @stop_asked.compare_and_set(0, 1)[1]
+  end
+
+  pub def stop_asked? : Bool
+    @stop_asked.get != 0
+  end
+
+  private def stop_with(timeout : Int32) : Nil
+    if @parallel
+      # Closed once `listen` has returned: nothing is left to drain.
+      @stop_requests.send(timeout)
+    else
+      begin_drain(timeout)
+    end
+  end
+
   pub def in_flight : Int32
-    @in_flight
+    if site = @parallel
+      site.in_flight
+    elsif site = @serial
+      site.in_flight
+    else
+      0
+    end
   end
 
   pub def bound_port : Int32
     @port
   end
 
-  private def serve_isolated(conn : Connection) : Nil
-    # The connection's write bound, set once, on the socket TLS writes
-    # through too. Its read bound is set before every read, in
-    # `read_request`.
-    conn.socket.write_timeout_ms = milliseconds(@config.write_timeout)
-    exchange = Exchange.new
-    failure = isolated(conn) { serve_connection(conn, exchange) }
-    client = conn.stream
-    # A connection cut off at shutdown has nobody left to answer.
-    if failure && !exchange.writing && !client.closed?
-      if ctx = exchange.context
-        # A response that has started streaming cannot become a 500: its
-        # status line is already on the wire. The connection just ends.
-        unless ctx.response.headers_sent?
-          isolated { answer_panic(client, ctx, exchange.started, failure) }
-        end
-      end
-    end
-    untrack(conn)
-    # TLS's close sends close_notify, then closes the socket.
-    client.close
-    conn.socket.close
-  end
-
-  # A method of its own because a `while` body is not a scope: a block
-  # spawned in the accept loop captures the loop's one `conn`, which the
-  # next accept overwrites before the task runs. A parameter is bound per
-  # call.
-  private def spawn_connection(g : IyiGroup, conn : Connection) : Nil
-    g.spawn do
-      serve_isolated(conn)
+  private def live : Int32
+    if site = @parallel
+      site.live
+    elsif site = @serial
+      site.live
+    else
       0
     end
   end
@@ -229,27 +323,19 @@ pub class Server
       @socket = nil
       listener.close
     end
-    # A task parked waiting for a request wakes to `Cancelled`, which ends
-    # its connection; one that has any of a request goes on to answer it.
-    # Cancel before the close. The close alone drops the descriptor while
-    # the read is still registered: on Windows that registration outlives
-    # the handle, the next socket reuses it, and the new read panics
-    # "two fibers reading one fd".
-    conn = @first_connection
-    while conn
-      if conn.idle
-        if running = conn.task_group
-          running.cancel_children
-        end
-        conn.socket.close
-      end
-      conn = conn.following
+    # Every connection's watcher closes its connection if that is parked
+    # waiting for a request; one that has any of a request goes on to
+    # answer it.
+    if site = @parallel
+      site.drain
+    elsif site = @serial
+      site.drain
     end
     cut_off if timeout <= 0
   end
 
   private def wait_for_connections : Nil
-    while @first_connection && !@cut
+    while live > 0 && !@cut
       cut_off if Time.monotonic >= @deadline || sleep(10).is_a?(Cancelled)
     end
   end
@@ -257,36 +343,133 @@ pub class Server
   # The tasks cut off end on their own; `listen`'s group waits for them.
   private def cut_off : Nil
     @cut = true
-    conn = @first_connection
-    while conn
-      conn.cut
-      conn = conn.following
+    if site = @parallel
+      site.cut
+    elsif site = @serial
+      site.cut
     end
   end
 
   private def stopped_listening : Nil
     @listening = false
+    @stop_requests.close
     @stopped.close
   end
+end
 
-  private def track(conn : Connection) : Nil
-    first = @first_connection
-    conn.following = first
-    first.previous = conn if first
-    @first_connection = conn
+# What every connection of one server shares: the handler chain, the 500
+# page and the error type pages, the settings, how many requests are in
+# flight and how many connections are open, and the two signals of a stop.
+# Generic over the blocks and the settings, so one copy of the connection
+# code serves both a server on one thread - `Proc`s, the live `Config` -
+# and one on every worker - `SharedProc`s and `Settings`, which makes the
+# site `Share` and is what the compiler checks at the parallel spawn.
+pub class Site(P, E, S)
+  @chain : Chain(P)
+  @page_500 : E?
+  @type_pages : List(E)
+  @settings : S
+  @in_flight : Atomic(Int32)
+  @live : Atomic(Int32)
+  @draining : Atomic(Int32)
+  # Closed when the server begins to drain, and when its deadline passes.
+  @stopping : Channel(Int32)
+  @cutting : Channel(Int32)
+
+  def initialize(@chain : Chain(P), @page_500 : E?, type_pages : Array(E), @settings : S)
+    @type_pages = List.new(type_pages)
+    @in_flight = Atomic(Int32).new(0)
+    @live = Atomic(Int32).new(0)
+    @draining = Atomic(Int32).new(0)
+    @stopping = Channel(Int32).new
+    @cutting = Channel(Int32).new
   end
 
-  private def untrack(conn : Connection) : Nil
-    following = conn.following
-    previous = conn.previous
-    if previous
-      previous.following = following
-    else
-      @first_connection = following
+  pub def in_flight : Int32
+    @in_flight.get
+  end
+
+  pub def live : Int32
+    @live.get
+  end
+
+  def drain : Nil
+    @draining.set(1)
+    @stopping.close
+  end
+
+  def cut : Nil
+    @cutting.close
+  end
+
+  private def draining? : Bool
+    @draining.get != 0
+  end
+
+  # One connection, to its end, with its watcher beside it in a group of
+  # its own: on a worker both are that worker's, and on one thread both
+  # are that thread's, so the watcher reads the connection's state without
+  # a lock.
+  def serve(socket : IyiSocket, tls : T?, unix : Bool) : Nil forall T
+    @live.add(1)
+    conn = Connection.new(socket)
+    group do |own|
+      own.spawn do
+        watch(conn)
+        0
+      end
+      served = own.spawn do
+        serve_isolated(conn, tls, unix)
+        0
+      end
+      served.value
+      # The watcher, still waiting when the connection ended first.
+      own.cancel_children
+      0
     end
-    following.previous = previous if following
-    conn.following = nil
-    conn.previous = nil
+    @live.sub(1)
+  end
+
+  # At the stop, a connection parked waiting for a request wakes to
+  # `Cancelled`, which ends it; one that has any of a request goes on to
+  # answer it. Cancel before the close. The close alone drops the
+  # descriptor while the read is still registered: on Windows that
+  # registration outlives the handle, the next socket reuses it, and the
+  # new read panics "two fibers reading one fd". At the deadline, what is
+  # left is cut off.
+  private def watch(conn : Connection) : Nil
+    return unless @stopping.receive.is_a?(ChannelClosed)
+    if conn.idle
+      if running = conn.task_group
+        running.cancel_children
+      end
+      conn.socket.close
+    end
+    return unless @cutting.receive.is_a?(ChannelClosed)
+    conn.cut
+  end
+
+  private def serve_isolated(conn : Connection, tls : T?, unix : Bool) : Nil forall T
+    # The connection's write bound, set once, on the socket TLS writes
+    # through too. Its read bound is set before every read, in
+    # `read_request`.
+    conn.socket.write_timeout_ms = milliseconds(@settings.write_timeout)
+    exchange = Exchange.new
+    failure = isolated(conn) { serve_connection(conn, exchange, tls, unix) }
+    client = conn.stream
+    # A connection cut off at shutdown has nobody left to answer.
+    if failure && !exchange.writing && !client.closed?
+      if ctx = exchange.context
+        # A response that has started streaming cannot become a 500: its
+        # status line is already on the wire. The connection just ends.
+        unless ctx.response.headers_sent?
+          isolated { answer_panic(client, conn, ctx, exchange.started, failure) }
+        end
+      end
+    end
+    # TLS's close sends close_notify, then closes the socket.
+    client.close
+    conn.socket.close
   end
 
   # A timeout setting in seconds as the socket takes it; nil and 0 are none.
@@ -311,16 +494,16 @@ pub class Server
     outcome.is_a?(Panicked) ? outcome : nil
   end
 
-  private def serve_connection(conn : Connection, exchange : Exchange) : Nil
-    if tls = @tls
-      return unless secure(conn, tls)
+  private def serve_connection(conn : Connection, exchange : Exchange, tls : T?, unix : Bool) : Nil forall T
+    if config = tls
+      return unless secure(conn, config)
     end
     client = conn.stream
     # Asked once: the peer does not change for the life of the connection.
     # A unix socket's peer is a path at most, not an address, and is left
     # nil (`Request#remote_address`).
-    peer = @unix ? nil : conn.socket.remote_address
-    secured = !@tls.nil?
+    peer = unix ? nil : conn.socket.remote_address
+    secured = !tls.nil?
     leftover = ""
     requests = 0
     loop do
@@ -345,7 +528,7 @@ pub class Server
         it[0].tls = secured
         leftover = it[1]
         keepalive = wants_keepalive?(it[2], requests)
-        return unless dispatch(client, it[0], leftover, keepalive, exchange)
+        return unless dispatch(client, conn, it[0], leftover, keepalive, exchange)
         requests = requests + 1
       end
     end
@@ -356,9 +539,9 @@ pub class Server
   # accept. Until it is done the connection has sent no request, so a drain
   # closes it as it closes one waiting for its first byte. False when it
   # failed: `TlsServer.over` has sent the alert and closed the socket.
-  private def secure(conn : Connection, tls : TlsServerConfig) : Bool
+  private def secure(conn : Connection, tls : TlsServerConfig | TlsFrozenServerConfig) : Bool
     socket = conn.socket
-    limit = milliseconds(@config.read_timeout) || TlsServer::HANDSHAKE_TIMEOUT_MS
+    limit = milliseconds(@settings.read_timeout) || TlsServer::HANDSHAKE_TIMEOUT_MS
     socket.read_timeout_ms = limit
     conn.idle = true
     secured = TlsServer.over(socket, tls, limit)
@@ -369,37 +552,37 @@ pub class Server
   end
 
   private def wants_keepalive?(wire_close : Bool, already : Int32) : Bool
-    return false unless @config.keepalive
-    return false if @draining
+    return false unless @settings.keepalive
+    return false if draining?
     return false if wire_close
-    already + 1 < @config.max_keepalive_requests
+    already + 1 < @settings.max_keepalive_requests
   end
 
   # Runs the chain for one request and writes its response. True when the
   # connection may carry another request. *leftover* is what the client
   # sent after this request, which a connection taken over (a WebSocket)
   # reads first.
-  private def dispatch(client : IyiSocket | TlsStream, request : Request, leftover : String, keepalive : Bool, exchange : Exchange) : Bool
-    @in_flight = @in_flight + 1
+  private def dispatch(client : IyiSocket | TlsStream, conn : Connection, request : Request, leftover : String, keepalive : Bool, exchange : Exchange) : Bool
+    @in_flight.add(1)
     defer leave
     ctx = Context.for(request)
-    @config.prepare(ctx)
+    @settings.prepare(ctx)
     defer ctx.params.cleanup
     exchange.context = ctx
     exchange.started = Time.monotonic
     head = HTTP.same_name?(request.method, "HEAD")
     ctx.response.attach(->(bytes : String) { write_raw(client, bytes) }, wire_version(request), keepalive, head)
-    stamp(ctx)
-    @handler.call(ctx)
+    stamp(ctx, conn)
+    ctx.run(@chain)
     if upgrade = ctx.response.upgrade_handler
       return take_over(client, ctx, leftover, exchange, upgrade) if ctx.response.status_code == 101
     end
-    if conn = ctx.response.headers["connection"]?
-      keepalive = false if conn.downcase == "close"
+    if connection = ctx.response.headers["connection"]?
+      keepalive = false if connection.downcase == "close"
     end
     # Cut off at shutdown while the handler ran: nobody is left to answer.
     return false if client.closed?
-    keepalive = false if @draining
+    keepalive = false if draining?
     exchange.writing = true
     if ctx.response.headers_sent?
       ctx.response.finish
@@ -414,7 +597,7 @@ pub class Server
   end
 
   private def leave : Nil
-    @in_flight = @in_flight - 1
+    @in_flight.sub(1)
   end
 
   # A 101 hands the connection to whoever asked for it once the status line
@@ -431,25 +614,13 @@ pub class Server
     false
   end
 
-  private def stamp(ctx : Context) : Nil
-    if @config.powered_by_header
+  private def stamp(ctx : Context, conn : Connection) : Nil
+    if @settings.powered_by_header
       ctx.response.headers["X-Powered-By"] = "iyi-web"
     end
     unless ctx.response.headers.has_key?("Date")
-      ctx.response.headers["Date"] = cached_date
+      ctx.response.headers["Date"] = conn.date
     end
-  end
-
-  # HTTP-date is whole seconds. Formatting one per request showed up under
-  # load; the same second is the same text.
-  private def cached_date : String
-    now = Time.utc
-    second = now.to_unix
-    if second != @date_at
-      @date_at = second
-      @date_value = http_date(now)
-    end
-    @date_value
   end
 
   # The handler panicked before its response went out. The response is
@@ -458,18 +629,18 @@ pub class Server
   # `Panicked` is used, as a 500 unless it sets another status; then the
   # application's `error 500` page. Either is application code, so it may
   # panic too, and then the next one is tried, down to the built-in page.
-  private def answer_panic(client : IyiSocket | TlsStream, ctx : Context, started : Span, failure : Panicked) : Nil
+  private def answer_panic(client : IyiSocket | TlsStream, conn : Connection, ctx : Context, started : Span, failure : Panicked) : Nil
     request = ctx.request
     rendered = false
-    unless @error_types.empty?
-      prepare_500(ctx)
-      isolated { rendered = render_error_type_page(ctx, failure, @error_types) }
+    unless @type_pages.empty?
+      prepare_500(ctx, conn)
+      isolated { rendered = render_error_type_page(ctx, failure, @type_pages) }
     end
-    page = @error_pages[500]?
+    page = @page_500
     if page && !rendered
       body = ""
-      prepare_500(ctx)
-      page_failed = isolated { body = page.call(ctx, failure) }
+      prepare_500(ctx, conn)
+      page_failed = isolated { body = page.call({ctx, failure.as(Error)}) || "" }
       unless page_failed
         # A page written with `env.json` or `env.text` answers nil.
         ctx.response.set_body(body) unless body.empty?
@@ -477,20 +648,20 @@ pub class Server
       end
     end
     unless rendered
-      prepare_500(ctx)
-      render_failure_page(ctx, failure.text, @config.show_exceptions?)
+      prepare_500(ctx, conn)
+      render_failure_page(ctx, failure.text, @settings.show_exceptions?)
     end
     ctx.response.headers["Connection"] = "close"
-    if @config.logging
-      @config.logger.request(ctx, Time.monotonic - started)
+    if @settings.logging
+      @settings.log_request(ctx, Time.monotonic - started)
     end
     write_raw(client, ctx.response.to_http(wire_version(request), !HTTP.same_name?(request.method, "HEAD")))
   end
 
-  private def prepare_500(ctx : Context) : Nil
+  private def prepare_500(ctx : Context, conn : Connection) : Nil
     ctx.response.reset
     ctx.response.status_code = 500
-    stamp(ctx)
+    stamp(ctx, conn)
   end
 
   private def wire_version(request : Request) : String
@@ -509,8 +680,8 @@ pub class Server
   # request, and a new one only the request it has already sent.
   private def read_request(conn : Connection, leftover : String, first : Bool) : Tuple(Request, String, Bool) | ParseError | TooLarge | HeadTooLarge | TimedOut | Closed
     client = conn.stream
-    intake = conn.reader(leftover, @config.max_request_body_size)
-    limit = milliseconds(@config.read_timeout)
+    intake = conn.reader(leftover, @settings.max_request_body_size)
+    limit = milliseconds(@settings.read_timeout)
     since = first ? conn.accepted : Time.monotonic
     loop do
       if taken = intake.take
@@ -525,8 +696,8 @@ pub class Server
       waiting = intake.empty?
       wait = limit
       if waiting && !first
-        return Closed.new if @draining
-        wait = milliseconds(@config.idle_timeout)
+        return Closed.new if draining?
+        wait = milliseconds(@settings.idle_timeout)
       elsif limit
         left = limit.to_i64 - elapsed_ms(since)
         if left <= 0
@@ -535,7 +706,7 @@ pub class Server
         end
         wait = left.to_i32
       end
-      wait = 0 if waiting && @draining
+      wait = 0 if waiting && draining?
       client.read_timeout_ms = wait
       conn.idle = waiting
       chunk = client.read(65536)
@@ -582,6 +753,13 @@ pub class Server
   end
 end
 
+# The site a server on one thread serves: `Proc`s, and the live config.
+pub alias SerialSite = Site(Proc(Context, Nil), Proc({Context, Error}, String?), Config)
+
+# The site every worker serves at once: `SharedProc`s and a `Settings`
+# copy, so the whole of it is `Share`.
+pub alias ParallelSite = Site(SharedProc(Context, Nil), SharedProc({Context, Error}, String?), Settings)
+
 pub struct Closed
 end
 
@@ -602,29 +780,29 @@ class Exchange
   end
 end
 
-# A connection `listen` took, as a drain sees it: its socket, what is read
-# and written - the socket, or TLS over it - when it was taken, whether its
-# task is parked waiting for a request's first byte, and the group running
-# that task. The server keeps them in a list of its own, which a
-# connection leaves in constant time.
+# A connection the server took, as its watcher sees it: its socket, what
+# is read and written - the socket, or TLS over it - when it was taken,
+# whether its task is parked waiting for a request's first byte, and the
+# group running that task. Its task and its watcher are the only ones that
+# reach it, and they never run at once.
 class Connection
   getter socket : IyiSocket
   property stream : IyiSocket | TlsStream
   getter accepted : Span
   property idle : Bool
   property task_group : IyiGroup?
-  property previous : Connection?
-  property following : Connection?
   @reader : Intake?
+  @date_at : Int64
+  @date_value : String
 
   def initialize(@socket : IyiSocket)
     @stream = @socket
     @accepted = Time.monotonic
     @idle = false
     @task_group = nil
-    @previous = nil
-    @following = nil
     @reader = nil
+    @date_at = -1_i64
+    @date_value = ""
   end
 
   # One intake for the life of the connection: its buffers stay, and the
@@ -638,6 +816,19 @@ class Connection
       @reader = created
       created
     end
+  end
+
+  # HTTP-date is whole seconds. Formatting one per request showed up under
+  # load; the same second is the same text. Kept per connection, so the
+  # workers share no cache.
+  def date : String
+    now = Time.utc
+    second = now.to_unix
+    if second != @date_at
+      @date_at = second
+      @date_value = http_date(now)
+    end
+    @date_value
   end
 
   # Cancels the task and closes the socket, which wakes a read or a write

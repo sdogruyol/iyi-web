@@ -81,7 +81,7 @@ def read_back(handler : SessionHandler, value : String) : String
 end
 
 def fixed_clock(handler : SessionHandler, at : Int64) : Nil
-  handler.clock = -> { at }
+  handler.clock = at
 end
 
 describe "SessionHandler" do

@@ -1,0 +1,96 @@
+# An application as a server serves it: request logging, static files, the
+# handlers `use` added, then the router - one chain - and the error pages
+# a panic gets, made once when the server starts.
+#
+# On every worker, unless `workers` is 1 or something was registered with
+# `workers: 1`: then each step is a `SharedProc`, the router's blocks
+# too, and the settings the `Settings` copy taken now, so the site the
+# workers share is `Share` and the compiler has checked it (SPEC.md
+# III.4.4). On one thread the same chain is `Proc`s over the live config,
+# as every iyi-web application was served before it had workers.
+module iyi_web/app
+
+import std/shared_proc::{SharedProc}
+import std/time::{Time}
+import iyi_web/context::{Context}
+import iyi_web/router::{Router, serial_routing, shared_routing}
+import iyi_web/handler::{Chain, shared_step, serial_step}
+import iyi_web/config::{Config, Settings}
+import iyi_web/kept::{Kept}
+import iyi_web/log::{LogHandler}
+import iyi_web/server::{Server, SerialSite, ParallelSite}
+import iyi_web/static::{StaticHandler}
+
+# What keeps *router* and *config* on one thread: the label of a block
+# registered with `workers: 1` (`GET /counter`, `use Counter`), or nil.
+pub def serial_reason(router : Router, config : Config) : String?
+  config.serial_label || router.serial_label
+end
+
+# The server for *router* under *config*: on `config.workers` threads, or
+# on one when that is 1 or `serial_reason` says why it must be.
+pub def build_server(router : Router, config : Config) : Server
+  type_pages = router.kept_error_types.values
+  page_500 = router.kept_error_pages[500]?
+  if config.workers > 1 && serial_reason(router, config).nil?
+    settings = config.settings
+    shared_page = page_500 ? shared_of(page_500) : nil
+    chain = Chain(SharedProc(Context, Nil)).new(shared_steps(router, config, settings))
+    Server.new(ParallelSite.new(chain, shared_page, type_pages.map { |page| shared_of(page) }, settings), config, config.workers)
+  else
+    serial_page = page_500 ? page_500.serial : nil
+    chain = Chain(Proc(Context, Nil)).new(serial_steps(router, config))
+    Server.new(SerialSite.new(chain, serial_page, type_pages.map(&.serial), config), config)
+  end
+end
+
+# The chain on one thread, each step a `Proc`.
+pub def serial_steps(router : Router, config : Config) : Array(Proc(Context, Nil))
+  steps = [] of Proc(Context, Nil)
+  steps << serial_step(LogHandler.new(config.logger)) if config.logging
+  if config.serve_static
+    steps << serial_step(StaticHandler.new(config.public_folder, config.static_dir_index, config.static_dir_listing, config.static_gzip, config.max_ranges, config.static_headers))
+  end
+  config.custom_handlers.each { |kept| steps << kept.serial }
+  config.positioned_handlers.each { |entry| steps = insert_at(steps, entry[0], entry[1].serial) }
+  routing = serial_routing(router, config)
+  steps << ->(ctx : Context) { routing.call(ctx) }
+  steps
+end
+
+# The chain on every worker, each step a `SharedProc`. Only for an
+# application nothing was registered in with `workers: 1`.
+pub def shared_steps(router : Router, config : Config, settings : Settings) : Array(SharedProc(Context, Nil))
+  steps = [] of SharedProc(Context, Nil)
+  if config.logging
+    steps << SharedProc(Context, Nil).of { |ctx|
+      started = Time.monotonic
+      ctx.call_next
+      settings.log_request(ctx, Time.monotonic - started)
+    }
+  end
+  if config.serve_static
+    steps << shared_step(StaticHandler.new(config.public_folder, config.static_dir_index, config.static_dir_listing, config.static_gzip, config.max_ranges, config.static_headers))
+  end
+  config.custom_handlers.each { |kept| steps << shared_of(kept) }
+  config.positioned_handlers.each { |entry| steps = insert_at(steps, entry[0], shared_of(entry[1])) }
+  routing = shared_routing(router, settings)
+  steps << SharedProc(Context, Nil).of { |ctx| routing.call(ctx) }
+  steps
+end
+
+private def shared_of(kept : Kept(A, R)) : SharedProc(A, R) forall A, R
+  kept.shared || raise "#{kept.label} was registered with workers: 1, and a server on more than one worker cannot run it"
+end
+
+# *step* at index *at* of *steps*; at the end when *at* is past it.
+private def insert_at(steps : Array(P), at : Int32, step : P) : Array(P) forall P
+  index = at < 0 ? 0 : at
+  placed = [] of P
+  steps.each_with_index do |existing, position|
+    placed << step if position == index
+    placed << existing
+  end
+  placed << step if index >= steps.size
+  placed
+end

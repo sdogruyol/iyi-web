@@ -4,13 +4,26 @@
 # Registration returns a value. `Kemal::RouteHandler::INSTANCE` and the
 # three singletons beside it are gone: they were the workaround a clean
 # sheet is the moment to stop writing.
+#
+# **Checked where it is written.** A server with more than one worker runs
+# every route on whichever core is free, several at once, so every block a
+# `Router` keeps is checked by the compiler where the application writes
+# it, as a parallel task's is (SPEC.md III.4.4, III.4.13): a route that
+# captures an `Array` or a `Hash`, or assigns a local it captured, is
+# refused, naming the variable and the field that fails. Shared state goes
+# behind a `Mutex` or in an `Atomic`; or the registration says `workers:
+# 1`, its block is kept unchecked, and the application is served on one
+# thread (`iyi_web/kept`).
 module iyi_web/router
 
+import std/list::{List}
+import std/shared_proc::{SharedProc}
 import iyi_web/body::{IntoBody}
 import iyi_web/codec::*
 import iyi_web/context::{Context}
-import iyi_web/radix::{Tree, Match}
+import iyi_web/radix::{Tree, FrozenTree, Match}
 import iyi_web/handler::{Handler}
+import iyi_web/kept::{Kept, serial_only}
 import iyi_web/status::*
 import iyi_web/event_stream::{EventStream}
 import iyi_web/websocket::{WebSocket}
@@ -28,6 +41,13 @@ alias ErrorPage = Proc(Context, Error, String)
 
 # An `error` page for an error type: nil when the error is not its type.
 alias ErrorTypePage = Proc(Context, Error, String?)
+
+# What the router keeps of a route or a filter, of an `error` page, and of
+# a `ws` block: one call each, a page's and a socket's arguments a tuple,
+# so a `Proc` and a `SharedProc` are called alike.
+alias KeptRoute = Kept(Context, String | Error)
+alias KeptPage = Kept({Context, Error}, String?)
+alias KeptSocket = Kept({WebSocket, Context}, Nil)
 
 HTTP_METHODS   = %w(get post put patch delete options head query)
 FILTER_METHODS = %w(get post put patch delete options query)
@@ -66,13 +86,13 @@ end
 private record RouteDefinition,
   method : String,
   path : String,
-  handler : RouteProc
+  handler : KeptRoute
 
 private record FilterDefinition,
   kind : Symbol,
   method : String,
   path : String,
-  handler : Context -> String
+  handler : KeptRoute
 
 private record SubRouter,
   path : String,
@@ -80,23 +100,23 @@ private record SubRouter,
 
 private record SocketDefinition,
   path : String,
-  handler : Proc(WebSocket, Context, Nil)
+  handler : KeptSocket
 
 pub class Router
   @routes : Array(RouteDefinition)
   @filters : Array(FilterDefinition)
   @sub_routers : Array(SubRouter)
   @sockets : Array(SocketDefinition)
-  @error_handlers : Hash(Int32, ErrorPage)
-  @error_types : Hash(String, ErrorTypePage)
+  @error_handlers : Hash(Int32, KeptPage)
+  @error_types : Hash(String, KeptPage)
 
   def initialize(@prefix : String = "")
     @routes = [] of RouteDefinition
     @filters = [] of FilterDefinition
     @sub_routers = [] of SubRouter
     @sockets = [] of SocketDefinition
-    @error_handlers = {} of Int32 => ErrorPage
-    @error_types = {} of String => ErrorTypePage
+    @error_handlers = {} of Int32 => KeptPage
+    @error_types = {} of String => KeptPage
   end
 
   pub def prefix : String
@@ -106,16 +126,34 @@ pub class Router
   # A route's block answers an `IntoBody`, or a union of one with error
   # members: `String | NotFound` where `NotFound` implements `Error`. An
   # error it answers goes to the `error` page for its type.
+  #
+  # Each registration comes twice: checked, and with `workers: 1`, kept
+  # unchecked for a server on one thread.
   {% for method in HTTP_METHODS %}
+    @[Share]
     pub def {{ method.id }}(path : String, &block : Context -> B) : Nil forall B
-      add_route({{ method.upcase }}, path, &block)
+      add_route({{ method.upcase }}, path, KeptRoute.new(SharedProc(Context, String | Error).of { |ctx| route_answer(block.call(ctx)) }))
+    end
+
+    pub def {{ method.id }}(path : String, *, workers : Int32, &block : Context -> B) : Nil forall B
+      serial_only(workers, {{ method.upcase }} + " " + path)
+      add_route({{ method.upcase }}, path, KeptRoute.new(->(ctx : Context) : String | Error { route_answer(block.call(ctx)) }, {{ method.upcase }} + " " + path))
     end
   {% end %}
 
   # A GET route that answers with a server-sent event stream. The block
   # gets the stream and the context; the stream ends when it returns.
+  @[Share]
   pub def sse(path : String, &block : EventStream, Context -> Nil) : Nil
     get(path) do |env|
+      EventStream.serve(env) { |stream| block.call(stream, env) }
+      nil
+    end
+  end
+
+  pub def sse(path : String, *, workers : Int32, &block : EventStream, Context -> Nil) : Nil
+    serial_only(workers, "sse " + path)
+    get(path, workers: 1) do |env|
       EventStream.serve(env) { |stream| block.call(stream, env) }
       nil
     end
@@ -126,43 +164,40 @@ pub class Router
   # callbacks, and the connection's task then reads frames until the
   # socket closes. Before and after filters run for the handshake as for
   # any GET. See `WebSocket`.
+  @[Share]
   pub def ws(path : String, &block : WebSocket, Context -> Nil) : Nil
-    raise "path must start with /" unless path.starts_with?('/')
-    @sockets << SocketDefinition.new(path: path, handler: block)
+    add_socket(path, KeptSocket.new(SharedProc({WebSocket, Context}, Nil).of { |pair| block.call(pair[0], pair[1]) }))
   end
 
-  pub def before(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
-    add_filter(:before, "ALL", path, &block)
+  pub def ws(path : String, *, workers : Int32, &block : WebSocket, Context -> Nil) : Nil
+    serial_only(workers, "ws " + path)
+    add_socket(path, KeptSocket.new(->(pair : {WebSocket, Context}) { block.call(pair[0], pair[1]) }, "ws " + path))
   end
 
-  pub def after(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
-    add_filter(:after, "ALL", path, &block)
-  end
-
-  # One block for several paths: registered once per path.
-  pub def before(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
-    paths.each { |path| add_filter(:before, "ALL", path, &block) }
-  end
-
-  pub def after(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
-    paths.each { |path| add_filter(:after, "ALL", path, &block) }
-  end
-
-  {% for method in FILTER_METHODS %}
-    pub def before_{{ method.id }}(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
-      add_filter(:before, {{ method.upcase }}, path, &block)
+  # `before` and `after` for every method, then per method; each for one
+  # path, or one block for several paths, registered once per path.
+  {% for filter in [{"before", "ALL"}, {"after", "ALL"}] + FILTER_METHODS.map { |m| {"before_" + m, m.upcase} } + FILTER_METHODS.map { |m| {"after_" + m, m.upcase} } %}
+    {% name = filter[0]; method = filter[1]; kind = name.starts_with?("before") ? :before : :after %}
+    @[Share]
+    pub def {{ name.id }}(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
+      add_filter({{ kind }}, {{ method }}, path, KeptRoute.new(SharedProc(Context, String | Error).of { |ctx| block.call(ctx).into_body.as(String | Error) }))
     end
 
-    pub def after_{{ method.id }}(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
-      add_filter(:after, {{ method.upcase }}, path, &block)
+    @[Share]
+    pub def {{ name.id }}(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
+      kept = KeptRoute.new(SharedProc(Context, String | Error).of { |ctx| block.call(ctx).into_body.as(String | Error) })
+      paths.each { |path| add_filter({{ kind }}, {{ method }}, path, kept) }
     end
 
-    pub def before_{{ method.id }}(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
-      paths.each { |path| add_filter(:before, {{ method.upcase }}, path, &block) }
+    pub def {{ name.id }}(path : String = "*", *, workers : Int32, &block : Context -> B) : Nil forall B : IntoBody
+      serial_only(workers, {{ name }} + " " + path)
+      add_filter({{ kind }}, {{ method }}, path, KeptRoute.new(->(ctx : Context) : String | Error { block.call(ctx).into_body }, {{ name }} + " " + path))
     end
 
-    pub def after_{{ method.id }}(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
-      paths.each { |path| add_filter(:after, {{ method.upcase }}, path, &block) }
+    pub def {{ name.id }}(paths : Array(String), *, workers : Int32, &block : Context -> B) : Nil forall B : IntoBody
+      serial_only(workers, {{ name }} + " " + paths.join(", "))
+      kept = KeptRoute.new(->(ctx : Context) : String | Error { block.call(ctx).into_body }, {{ name }} + " " + paths.join(", "))
+      paths.each { |path| add_filter({{ kind }}, {{ method }}, path, kept) }
     end
   {% end %}
 
@@ -188,8 +223,14 @@ pub class Router
   # parameter: the `Panicked` a route's panic was caught as, for a 500;
   # the error a route answered, when no `error` for its type caught it;
   # otherwise a `StatusError` for the status.
+  @[Share]
   pub def error(status_code : Int32, &block : Context, Error -> B) : Nil forall B : IntoBody
-    @error_handlers[status_code] = ->(ctx : Context, cause : Error) { block.call(ctx, cause).into_body }
+    @error_handlers[status_code] = KeptPage.new(SharedProc({Context, Error}, String?).of { |pair| block.call(pair[0], pair[1]).into_body.as(String?) })
+  end
+
+  pub def error(status_code : Int32, *, workers : Int32, &block : Context, Error -> B) : Nil forall B : IntoBody
+    serial_only(workers, "error " + status_code.to_s)
+    @error_handlers[status_code] = KeptPage.new(->(pair : {Context, Error}) : String? { block.call(pair[0], pair[1]).into_body }, "error " + status_code.to_s)
   end
 
   # The page for an error of type *type*, or of a subclass of it: Kemal's
@@ -198,10 +239,20 @@ pub class Router
   # 500 unless it is an `HttpError`, unless the block sets another. Pages
   # for types are tried in the order they were registered, and the first
   # that matches renders, before any `error` page for the status.
+  @[Share]
   pub def error(type : E.class, &block : Context, E -> B) : Nil forall E : Error, B : IntoBody
-    @error_types[E.to_s] = ->(ctx : Context, failure : Error) : String? {
-      failure.is_a?(E) ? block.call(ctx, failure).into_body : nil
-    }
+    @error_types[E.to_s] = KeptPage.new(SharedProc({Context, Error}, String?).of { |pair|
+      failure = pair[1]
+      failure.is_a?(E) ? block.call(pair[0], failure).into_body.as(String?) : nil
+    })
+  end
+
+  pub def error(type : E.class, *, workers : Int32, &block : Context, E -> B) : Nil forall E : Error, B : IntoBody
+    serial_only(workers, "error " + E.to_s)
+    @error_types[E.to_s] = KeptPage.new(->(pair : {Context, Error}) : String? {
+      failure = pair[1]
+      failure.is_a?(E) ? block.call(pair[0], failure).into_body : nil
+    }, "error " + E.to_s)
   end
 
   pub def error_handler(status_code : Int32) : ErrorPage?
@@ -212,13 +263,9 @@ pub class Router
   # parent's for the same code. Routes and filters already flatten this way.
   pub def error_handlers : Hash(Int32, ErrorPage)
     collected = {} of Int32 => ErrorPage
-    @error_handlers.each do |code, handler|
-      collected[code] = handler
-    end
-    @sub_routers.each do |sub|
-      sub.router.error_handlers.each do |code, handler|
-        collected[code] = handler
-      end
+    kept_error_pages.each do |code, kept|
+      page = kept.serial
+      collected[code] = ->(ctx : Context, cause : Error) { page.call({ctx, cause}) || "" }
     end
     collected
   end
@@ -228,88 +275,156 @@ pub class Router
   # for a panic, beside `error_handlers`.
   pub def error_type_handlers : Hash(String, ErrorTypePage)
     collected = {} of String => ErrorTypePage
-    @error_types.each do |name, page|
-      collected[name] = page
+    kept_error_types.each do |name, kept|
+      page = kept.serial
+      collected[name] = ->(ctx : Context, failure : Error) { page.call({ctx, failure}) }
     end
+    collected
+  end
+
+  pub def kept_error_pages : Hash(Int32, KeptPage)
+    collected = {} of Int32 => KeptPage
+    @error_handlers.each { |code, page| collected[code] = page }
     @sub_routers.each do |sub|
-      sub.router.error_type_handlers.each do |name, page|
-        collected[name] = page
-      end
+      sub.router.kept_error_pages.each { |code, page| collected[code] = page }
+    end
+    collected
+  end
+
+  pub def kept_error_types : Hash(String, KeptPage)
+    collected = {} of String => KeptPage
+    @error_types.each { |name, page| collected[name] = page }
+    @sub_routers.each do |sub|
+      sub.router.kept_error_types.each { |name, page| collected[name] = page }
     end
     collected
   end
 
   pub def routes(base_prefix : String = "") : Array(Route)
+    kept_routes(base_prefix).map { |route| Route.new(route[0], route[1], route[2].serial) }
+  end
+
+  # Method, full path and block of every route, mounts included.
+  pub def kept_routes(base_prefix : String = "") : Array(Tuple(String, String, KeptRoute))
     full_prefix = join_paths(base_prefix, @prefix)
-    collected = [] of Route
-
+    collected = [] of Tuple(String, String, KeptRoute)
     @routes.each do |route|
-      collected << Route.new(route.method, join_paths(full_prefix, route.path), route.handler)
+      collected << {route.method, join_paths(full_prefix, route.path), route.handler}
     end
-
     @sub_routers.each do |sub|
-      collected.concat(sub.router.routes(join_paths(full_prefix, sub.path)))
+      collected.concat(sub.router.kept_routes(join_paths(full_prefix, sub.path)))
     end
-
     collected
   end
 
   pub def ws_routes(base_prefix : String = "") : Array(SocketRoute)
+    kept_sockets(base_prefix).map do |socket|
+      block = socket[1].serial
+      SocketRoute.new(socket[0], ->(ws : WebSocket, ctx : Context) { block.call({ws, ctx}) })
+    end
+  end
+
+  pub def kept_sockets(base_prefix : String = "") : Array(Tuple(String, KeptSocket))
     full_prefix = join_paths(base_prefix, @prefix)
-    collected = [] of SocketRoute
-
+    collected = [] of Tuple(String, KeptSocket)
     @sockets.each do |socket|
-      collected << SocketRoute.new(join_paths(full_prefix, socket.path), socket.handler)
+      collected << {join_paths(full_prefix, socket.path), socket.handler}
     end
-
     @sub_routers.each do |sub|
-      collected.concat(sub.router.ws_routes(join_paths(full_prefix, sub.path)))
+      collected.concat(sub.router.kept_sockets(join_paths(full_prefix, sub.path)))
     end
-
     collected
   end
 
   pub def filters(base_prefix : String = "") : Array(Tuple(Symbol, String, String, HandlerProc))
-    full_prefix = join_paths(base_prefix, @prefix)
-    collected = [] of Tuple(Symbol, String, String, HandlerProc)
+    kept_filters(base_prefix).map do |filter|
+      block = filter[3].serial
+      {filter[0], filter[1], filter[2], ->(ctx : Context) { answer = block.call(ctx); answer.is_a?(String) ? answer : "" }}
+    end
+  end
 
+  pub def kept_filters(base_prefix : String = "") : Array(Tuple(Symbol, String, String, KeptRoute))
+    full_prefix = join_paths(base_prefix, @prefix)
+    collected = [] of Tuple(Symbol, String, String, KeptRoute)
     @filters.each do |filter|
       collected << {filter.kind, filter.method, join_paths(full_prefix, filter.path), filter.handler}
     end
-
     @sub_routers.each do |sub|
-      collected.concat(sub.router.filters(join_paths(full_prefix, sub.path)))
+      collected.concat(sub.router.kept_filters(join_paths(full_prefix, sub.path)))
     end
-
     collected
   end
 
-  # Unbounded, so a union with error members is accepted: the bound is
-  # checked on what is left once the errors are taken out.
-  private def add_route(method : String, path : String, &block : Context -> B) : Nil forall B
+  # What a block registered with `workers: 1` was registered as, here or
+  # in a mount: the reason this router cannot be served on more than one
+  # thread. Nil when every block was checked.
+  pub def serial_label : String?
+    @routes.each { |route| return route.handler.label unless route.handler.shared? }
+    @filters.each { |filter| return filter.handler.label unless filter.handler.shared? }
+    @sockets.each { |socket| return socket.handler.label unless socket.handler.shared? }
+    @error_handlers.each_value { |page| return page.label unless page.shared? }
+    @error_types.each_value { |page| return page.label unless page.shared? }
+    @sub_routers.each do |sub|
+      if label = sub.router.serial_label
+        return label
+      end
+    end
+    nil
+  end
+
+  private def add_route(method : String, path : String, kept : KeptRoute) : Nil
     raise "path must start with /" unless path.starts_with?('/')
-    handler = ->(ctx : Context) : String | Error {
-      result = block.call(ctx)
-      result.is_a?(::Error) ? result.as(Error) : body_of(result)
-    }
-    @routes << RouteDefinition.new(method: method, path: path, handler: handler)
+    @routes << RouteDefinition.new(method: method, path: path, handler: kept)
   end
 
-  private def add_filter(kind : Symbol, method : String, path : String, &block : Context -> B) : Nil forall B : IntoBody
-    handler = ->(ctx : Context) { block.call(ctx).into_body }
-    @filters << FilterDefinition.new(kind: kind, method: method, path: path, handler: handler)
+  private def add_filter(kind : Symbol, method : String, path : String, kept : KeptRoute) : Nil
+    @filters << FilterDefinition.new(kind: kind, method: method, path: path, handler: kept)
   end
 
-  # Where a route answering something that is not an `IntoBody` is
-  # refused, naming the member that is not.
-  private def body_of(value : IntoBody) : String
-    value.into_body
+  private def add_socket(path : String, kept : KeptSocket) : Nil
+    raise "path must start with /" unless path.starts_with?('/')
+    @sockets << SocketDefinition.new(path: path, handler: kept)
   end
 end
 
-# The last handler in the chain: look the route up, run before-filters,
-# call the block, run after-filters, and render 404/405 when nothing
-# matched. HEAD falls back to GET the way RFC 9110 §9.3.1 asks.
+# What a route's block answered, as the router keeps it: an error as it
+# is, anything else as its body. Where a route answering something that is
+# not an `IntoBody` is refused, naming the member that is not. A function
+# rather than a method, so a kept block calling it reaches no router.
+private def route_answer(result : R) : String | Error forall R
+  result.is_a?(::Error) ? result.as(Error) : body_of(result)
+end
+
+private def body_of(value : IntoBody) : String
+  value.into_body
+end
+
+# A route in the tree: its method, its path as declared, and its block.
+pub struct RouteEntry(B)
+  getter method : String
+  getter path : String
+  getter block : B
+
+  def initialize(@method : String, @path : String, @block : B)
+  end
+end
+
+# A filter: before or after, the method it is for ("ALL" for every one),
+# its path, and its block.
+pub struct FilterEntry(B)
+  getter kind : Symbol
+  getter method : String
+  getter path : String
+  getter block : B
+
+  def initialize(@kind : Symbol, @method : String, @path : String, @block : B)
+  end
+end
+
+# A router's routes, filters and pages, made once and only read after: the
+# last handler of a chain. Look the route up, run before-filters, call the
+# block, run after-filters, and render 404/405 when nothing matched. HEAD
+# falls back to GET the way RFC 9110 §9.3.1 asks.
 #
 # `before_all` filters also run for a request no route matched, before
 # its 404 or 405, so an authentication or logging filter sees it too.
@@ -323,45 +438,39 @@ end
 # serves it, or is refused with 405. A request that does not ask to
 # upgrade is routed as usual; a GET only a `ws` route serves gets 426
 # with `Upgrade: websocket`.
-pub class RouteHandler < Handler
-  @tree : Tree(Route)
-  @filters : Array(Tuple(Symbol, String, String, HandlerProc))
-  @error_handlers : Hash(Int32, ErrorPage)
-  @error_types : Hash(String, ErrorTypePage)
-  @methods : Array(String)
-  @sockets : Tree(SocketRoute)
-  @config : Config
+#
+# Generic over the blocks it calls - `Proc`s for a server on one thread,
+# `SharedProc`s for one on every worker, where it is `Share` - and over
+# where it reads its settings: the live `Config` on one thread, the copy a
+# server on every worker took when it started (`Settings`).
+pub class Routing(R, E, W, S)
+  @tree : FrozenTree(RouteEntry(R))
+  @filters : List(FilterEntry(R))
+  @pages : List(Tuple(Int32, E))
+  @type_pages : List(E)
+  @methods : List(String)
+  @sockets : FrozenTree(RouteEntry(W))
+  @settings : S
 
-  # *settings* supplies the WebSocket origin list and message limit, read
-  # at each handshake, and whether the 500 page shows an error's message.
-  def initialize(router : Router, settings : Config = config)
-    super()
-    @tree = Tree(Route).new
-    @filters = router.filters
-    @error_handlers = {} of Int32 => ErrorPage
-    @error_types = router.error_type_handlers
-    @methods = [] of String
-    @sockets = Tree(SocketRoute).new
-    @config = settings
-
-    router.error_handlers.each do |code, handler|
-      @error_handlers[code] = handler
-    end
-
-    seen = {} of String => Bool
-    router.routes.each do |route|
-      unless @tree.add("/" + route.method + route.path, route)
-        raise "route #{route.method} #{route.path} is defined twice"
+  def initialize(routes : Array(Tuple(String, String, R)), filters : Array(FilterEntry(R)), pages : Array(Tuple(Int32, E)), type_pages : Array(E), sockets : Array(Tuple(String, W)), @settings : S)
+    tree = Tree(RouteEntry(R)).new
+    methods = [] of String
+    routes.each do |route|
+      unless tree.add("/" + route[0] + route[1], RouteEntry(R).new(route[0], route[1], route[2]))
+        raise "route #{route[0]} #{route[1]} is defined twice"
       end
-      unless seen.has_key?(route.method)
-        @methods << route.method
-        seen[route.method] = true
-      end
+      methods << route[0] unless methods.includes?(route[0])
     end
-
-    router.ws_routes.each do |socket|
-      raise "ws #{socket.path} is defined twice" unless @sockets.add(socket.path, socket)
+    socket_tree = Tree(RouteEntry(W)).new
+    sockets.each do |socket|
+      raise "ws #{socket[0]} is defined twice" unless socket_tree.add(socket[0], RouteEntry(W).new("GET", socket[0], socket[1]))
     end
+    @tree = tree.frozen
+    @filters = List.new(filters)
+    @pages = List.new(pages)
+    @type_pages = List.new(type_pages)
+    @methods = List.new(methods)
+    @sockets = socket_tree.frozen
   end
 
   pub def call(ctx : Context) : Nil
@@ -421,7 +530,7 @@ pub class RouteHandler < Handler
     # A before filter that left an error status with a page of its own
     # gets that page, and the route does not run.
     if ctx.response.status_code >= 400
-      if custom = @error_handlers[ctx.response.status_code]?
+      if custom = page_for(ctx.response.status_code)
         render_page(ctx, custom, StatusError.new(ctx.response.status_code))
         drop_head_body(ctx)
         return
@@ -430,19 +539,19 @@ pub class RouteHandler < Handler
 
     # The `BodyError` `env.params.json_as` would answer, so a page for that
     # type, or for 400, takes it.
-    if @config.reject_unreadable_body && !ctx.params.json_valid?
+    if @settings.reject_unreadable_body && !ctx.params.json_valid?
       render_failure(ctx, BodyError.new(400, "malformed JSON: " + (ctx.params.json_error || "")))
       drop_head_body(ctx)
       return
     end
 
-    if @config.reject_unreadable_body && (unreadable = ctx.params.body_error)
+    if @settings.reject_unreadable_body && (unreadable = ctx.params.body_error)
       render_error(ctx, unreadable)
       drop_head_body(ctx)
       return
     end
 
-    answer = route.handler.call(ctx)
+    answer = route.block.call(ctx)
     if ctx.halted?
       drop_head_body(ctx)
       return
@@ -463,7 +572,7 @@ pub class RouteHandler < Handler
 
     run_filters(ctx, :after, route.method, path)
 
-    if custom = @error_handlers[ctx.response.status_code]?
+    if custom = page_for(ctx.response.status_code)
       if ctx.response.status_code >= 400
         render_page(ctx, custom, StatusError.new(ctx.response.status_code))
       end
@@ -472,10 +581,17 @@ pub class RouteHandler < Handler
     drop_head_body(ctx)
   end
 
-  pub def lookup(method : String, path : String) : Match(Route)?
+  # The route *method* and *path* take, HEAD falling back to GET.
+  pub def lookup(method : String, path : String) : Match(RouteEntry(R))?
     found = @tree.find("/" + method + path)
     return found if found
     return @tree.find("/GET" + path) if method == "HEAD"
+    nil
+  end
+
+  # The `error` page for *status*, if there is one.
+  private def page_for(status : Int32) : E?
+    @pages.each { |entry| return entry[1] if entry[0] == status }
     nil
   end
 
@@ -512,7 +628,7 @@ pub class RouteHandler < Handler
 
   # An upgrade request on a `ws` route. False when it is not the route's to
   # answer: a method other than GET that an HTTP route on the path serves.
-  private def serve_socket(ctx : Context, found : Match(SocketRoute)) : Bool
+  private def serve_socket(ctx : Context, found : Match(RouteEntry(W))) : Bool
     method = ctx.request.method
     path = ctx.routing_path
     unless method == "GET"
@@ -533,17 +649,18 @@ pub class RouteHandler < Handler
     return true if ctx.halted?
     if ctx.response.status_code >= 400
       # A filter that answered with an error refused the upgrade.
-      if custom = @error_handlers[ctx.response.status_code]?
-        ctx.response.set_body(custom.call(ctx, StatusError.new(ctx.response.status_code)))
+      if custom = page_for(ctx.response.status_code)
+        ctx.response.set_body(custom.call({ctx, StatusError.new(ctx.response.status_code).as(Error)}) || "")
       end
       ctx.response.headers["Connection"] = "close"
       return true
     end
 
-    if status = WebSocket.refusal(ctx.request, @config.websocket_allowed_origins)
+    if status = WebSocket.refusal(ctx.request, @settings.websocket_allowed_origins)
       refuse_upgrade(ctx, status)
     else
-      WebSocket.accept(ctx, @config.websocket_max_message_size, socket.handler)
+      block = socket.block
+      WebSocket.accept(ctx, @settings.websocket_max_message_size, ->(ws : WebSocket, env : Context) { block.call({ws, env}) })
     end
     run_filters(ctx, :after, "GET", path)
     true
@@ -562,21 +679,21 @@ pub class RouteHandler < Handler
   # an unmatched request gets.
   private def run_filters(ctx : Context, kind : Symbol, method : String, path : String, only_all : Bool = false) : Nil
     @filters.each do |filter|
-      next unless filter[0] == kind
+      next unless filter.kind == kind
       if only_all
-        next unless filter[1] == "ALL"
+        next unless filter.method == "ALL"
       else
-        next unless filter[1].in?("ALL", method)
+        next unless filter.method.in?("ALL", method)
       end
-      next unless pattern_matches?(filter[2], path)
-      filter[3].call(ctx)
+      next unless pattern_matches?(filter.path, path)
+      filter.block.call(ctx)
       return if ctx.halted?
     end
   end
 
   private def render_error(ctx : Context, status : Int32) : Nil
     ctx.response.status_code = status
-    if handler = @error_handlers[status]?
+    if handler = page_for(status)
       render_page(ctx, handler, StatusError.new(status))
     else
       ctx.response.content_type = "text/html; charset=utf-8"
@@ -594,22 +711,73 @@ pub class RouteHandler < Handler
     status = failure.is_a?(HttpError) ? failure.status : 500
     ctx.response.status_code = status
     ctx.response.set_body("")
-    return if render_error_type_page(ctx, failure, @error_types)
-    if page = @error_handlers[status]?
+    return if render_error_type_page(ctx, failure, @type_pages)
+    if page = page_for(status)
       render_page(ctx, page, failure)
     elsif failure.is_a?(HttpError) && status < 500
       render_client_error_page(ctx, failure)
     else
-      render_failure_page(ctx, failure.message, @config.show_exceptions?, status)
+      render_failure_page(ctx, failure.message, @settings.show_exceptions?, status)
     end
   end
 
   # An error page answers its body, or writes it with a helper such as
   # `env.json` and answers nil. What the response held before - a route's
   # own body, a halt's message - is not the page, so it goes first.
-  private def render_page(ctx : Context, page : ErrorPage, cause : Error) : Nil
+  private def render_page(ctx : Context, page : E, cause : Error) : Nil
     ctx.response.set_body("")
-    body = page.call(ctx, cause)
+    body = page.call({ctx, cause.as(Error)}) || ""
     ctx.response.set_body(body) unless body.empty?
+  end
+end
+
+# The routing for a server on one thread: every block a `Proc`, settings
+# read from *settings* as they stand at each request.
+alias SerialRouting = Routing(RouteProc, Proc({Context, Error}, String?), Proc({WebSocket, Context}, Nil), Config)
+
+pub def serial_routing(router : Router, settings : Config) : SerialRouting
+  routes = router.kept_routes.map { |route| {route[0], route[1], route[2].serial} }
+  filters = router.kept_filters.map { |filter| FilterEntry(RouteProc).new(filter[0], filter[1], filter[2], filter[3].serial) }
+  pages = router.kept_error_pages.map { |code, page| {code, page.serial} }
+  type_pages = router.kept_error_types.values.map(&.serial)
+  sockets = router.kept_sockets.map { |socket| {socket[0], socket[1].serial} }
+  SerialRouting.new(routes, filters, pages, type_pages, sockets, settings)
+end
+
+# The routing for a server on every worker: every block a `SharedProc`,
+# so the whole of it is `Share`. Only for a router whose `serial_label` is
+# nil; one that holds a block registered with `workers: 1` is refused.
+pub def shared_routing(router : Router, settings : S) : Routing(SharedProc(Context, String | Error), SharedProc({Context, Error}, String?), SharedProc({WebSocket, Context}, Nil), S) forall S
+  routes = router.kept_routes.map { |route| {route[0], route[1], shared_of(route[2])} }
+  filters = router.kept_filters.map { |filter| FilterEntry(SharedProc(Context, String | Error)).new(filter[0], filter[1], filter[2], shared_of(filter[3])) }
+  pages = router.kept_error_pages.map { |code, page| {code, shared_of(page)} }
+  type_pages = router.kept_error_types.values.map { |page| shared_of(page) }
+  sockets = router.kept_sockets.map { |socket| {socket[0], shared_of(socket[1])} }
+  Routing(SharedProc(Context, String | Error), SharedProc({Context, Error}, String?), SharedProc({WebSocket, Context}, Nil), S).new(routes, filters, pages, type_pages, sockets, settings)
+end
+
+private def shared_of(kept : Kept(A, R)) : SharedProc(A, R) forall A, R
+  kept.shared || raise "#{kept.label} was registered with workers: 1, and a server on more than one worker cannot run it"
+end
+
+# The last handler in the chain a test or a server on one thread runs: a
+# router's routing, with *settings* (the process config unless another is
+# given) read at each request for the WebSocket origin list and message
+# limit and whether the 500 page shows an error's message.
+pub class RouteHandler < Handler
+  @routing : SerialRouting
+
+  def initialize(router : Router, settings : Config = config)
+    super()
+    @routing = serial_routing(router, settings)
+  end
+
+  pub def call(ctx : Context) : Nil
+    @routing.call(ctx)
+  end
+
+  # The route *method* and *path* take, HEAD falling back to GET.
+  pub def lookup(method : String, path : String) : Match(RouteEntry(RouteProc))?
+    @routing.lookup(method, path)
   end
 end

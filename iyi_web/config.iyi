@@ -3,17 +3,32 @@
 # tests had to `clear` the world between examples. The DSL still has one
 # process-wide config, because that is the Sinatra contract; it is this
 # object rather than a handful of globals.
+#
+# A `Config` is written while an application sets itself up, so it is not
+# `Share` (SPEC.md III.4.4). A server on more than one worker reads
+# `Settings` instead, the copy of what a request needs that `settings`
+# takes when the server starts and nothing writes after.
 module iyi_web/config
 
 import std/file::{File}
+import std/list::{List}
+import std/shared_proc::{SharedProc}
+import std/time::{Span}
 import std/tls::{TlsServerConfig}
-import iyi_web/handler::{Handler}
+import iyi_web/handler::{Handler, shared_step, serial_step}
 import iyi_web/context::{Context}
+import iyi_web/kept::{Kept}
 import iyi_web/log::{Logger, StdoutLogger}
 
 # Called for every file the static handler serves, before its body is
-# written: the context, the file's path and its `File::Info`.
-pub alias StaticHeadersHook = Proc(Context, String, File::Info, Nil)
+# written: the context, the file's path and its `File::Info`. A
+# `SharedProc`, since every worker serves files: `static_headers`' block
+# is checked where it is written.
+pub alias StaticHeadersHook = SharedProc({Context, String, File::Info}, Nil)
+
+# A handler `use` added, as a step of the chain: checked, or kept as it
+# is with `workers: 1`.
+pub alias KeptStep = Kept(Context, Nil)
 
 pub class Config
   @app_name : String
@@ -23,14 +38,17 @@ pub class Config
   @public_folder : String
   @logging : Bool
   @logger : Logger
-  @running : Bool
+  # The logger's `request`, as the server on every worker calls it.
+  @log_request : Kept({Context, Span}, Nil)
+  @workers : Int32
+  @running : Atomic(Int32)
   @serve_static : Bool
   @powered_by_header : Bool
   @keepalive : Bool
   @max_keepalive_requests : Int32
   @max_request_body_size : Int32
-  @custom_handlers : Array(Handler)
-  @positioned_handlers : Array(Tuple(Int32, Handler))
+  @custom_handlers : Array(KeptStep)
+  @positioned_handlers : Array(Tuple(Int32, KeptStep))
   @shutdown_message : Bool
   @show_exceptions : Bool?
   @max_file_uploads : Int32
@@ -62,15 +80,18 @@ pub class Config
     @port = parsed ? parsed : 3000
     @public_folder = "./public"
     @logging = true
-    @logger = StdoutLogger.new
-    @running = false
+    stdout = StdoutLogger.new
+    @logger = stdout
+    @log_request = request_log(stdout)
+    @workers = IyiWorkers.count
+    @running = Atomic(Int32).new(0)
     @serve_static = true
     @powered_by_header = false
     @keepalive = true
     @max_keepalive_requests = 100
     @max_request_body_size = 8 * 1024 * 1024
-    @custom_handlers = [] of Handler
-    @positioned_handlers = [] of Tuple(Int32, Handler)
+    @custom_handlers = [] of KeptStep
+    @positioned_handlers = [] of Tuple(Int32, KeptStep)
     @shutdown_message = true
     @show_exceptions = nil
     @max_file_uploads = 128
@@ -145,16 +166,55 @@ pub class Config
     @logger
   end
 
-  pub def logger=(value : Logger) : Logger
+  # Every worker writes through the logger at once, so it must be `Share`:
+  # one that keeps lines in an `Array` is refused here, naming the field,
+  # and keeps them behind a `Mutex` instead - or is given with
+  # `set_logger(value, workers: 1)`.
+  pub def logger=(value : L) : L forall L
     @logger = value
+    @log_request = request_log(value)
+    value
   end
 
+  # *value* kept unchecked, for a server on one thread.
+  pub def set_logger(value : Logger, *, workers : Int32) : Nil
+    raise "logger: workers: #{workers} - only workers: 1 keeps a logger unchecked" unless workers == 1
+    @logger = value
+    @log_request = Kept({Context, Span}, Nil).new(->(pair : {Context, Span}) { value.request(pair[0], pair[1]) }, "logger " + value.class.to_s)
+  end
+
+  # One finished request through the logger.
+  pub def log_request(ctx : Context, elapsed : Span) : Nil
+    @logger.request(ctx, elapsed)
+  end
+
+  pub def log_requests : Kept({Context, Span}, Nil)
+    @log_request
+  end
+
+  # How many threads serve requests: each connection is a task on a pool
+  # of this many workers, started by whichever is free (SPEC.md III.4.13).
+  # The cores the process may run on unless `IYI_WORKERS` says otherwise;
+  # `-w` on the command line. 1 serves every connection on the thread
+  # that accepts them, as tasks that take turns where one waits.
+  pub def workers : Int32
+    @workers
+  end
+
+  pub def workers=(value : Int32) : Int32
+    raise "workers must be at least 1, not #{value}" if value < 1
+    @workers = value
+  end
+
+  # Set while the server runs; `stop` clears it from whichever worker the
+  # request that called it is on.
   pub def running : Bool
-    @running
+    @running.get != 0
   end
 
   pub def running=(value : Bool) : Bool
-    @running = value
+    @running.set(value ? 1 : 0)
+    value
   end
 
   pub def serve_static : Bool
@@ -269,21 +329,33 @@ pub class Config
     @ssl = value
   end
 
-  pub def custom_handlers : Array(Handler)
+  # The handlers `use` added, in order, each a step of the chain.
+  pub def custom_handlers : Array(KeptStep)
     @custom_handlers
   end
 
-  pub def add_handler(handler : Handler) : Nil
-    @custom_handlers << handler
+  # Checked: a handler every worker calls at once must be `Share`.
+  pub def add_handler(handler : H) : Nil forall H
+    @custom_handlers << KeptStep.new(shared_step(handler))
   end
 
   # *position* is the handler's index in the final chain, counted before
   # the router, which always stays last.
-  pub def add_handler(handler : Handler, position : Int32) : Nil
-    @positioned_handlers << {position, handler}
+  pub def add_handler(handler : H, position : Int32) : Nil forall H
+    @positioned_handlers << {position, KeptStep.new(shared_step(handler))}
   end
 
-  pub def positioned_handlers : Array(Tuple(Int32, Handler))
+  # A handler kept unchecked: its application is served on one thread.
+  pub def add_serial_handler(handler : H, position : Int32? = nil) : Nil forall H
+    kept = KeptStep.new(serial_step(handler), "use " + H.to_s)
+    if at = position
+      @positioned_handlers << {at, kept}
+    else
+      @custom_handlers << kept
+    end
+  end
+
+  pub def positioned_handlers : Array(Tuple(Int32, KeptStep))
     @positioned_handlers
   end
 
@@ -424,6 +496,137 @@ pub class Config
     @show_exceptions = value
     value
   end
+
+  # What was registered with `workers: 1` here - a handler, the logger -
+  # and so keeps the server on one thread; nil when nothing was.
+  pub def serial_label : String?
+    @custom_handlers.each { |step| return step.label unless step.shared? }
+    @positioned_handlers.each { |entry| return entry[1].label unless entry[1].shared? }
+    return @log_request.label unless @log_request.shared?
+    nil
+  end
+
+  # What a request needs of this config, as it stands now, for every
+  # worker to read: `Share`, and never written. Only for a config whose
+  # `serial_label` is nil.
+  pub def settings : Settings
+    log = @log_request.shared || raise "#{@log_request.label} was registered with workers: 1"
+    Settings.new(self, log)
+  end
+end
+
+# A config's per-request settings, copied when a server on more than one
+# worker starts. Every field is assigned here and nowhere else, and each
+# is a number, a string, a `List` or a `SharedProc`, so the compiler finds
+# it `Share` (SPEC.md III.4.4) and every worker reads one copy. A setting
+# changed on the config after the start does not reach the server; on one
+# worker, which reads the `Config` itself, it does.
+pub class Settings
+  @reject_unreadable_body : Bool
+  @show_exceptions : Bool
+  @websocket_allowed_origins : List(String)
+  @websocket_max_message_size : Int32
+  @max_file_uploads : Int32
+  @max_multipart_form_field_size : Int32
+  @max_ranges : Int32
+  @static_gzip : Bool
+  @route_on_raw_path : Bool
+  @powered_by_header : Bool
+  @keepalive : Bool
+  @max_keepalive_requests : Int32
+  @max_request_body_size : Int32
+  @read_timeout : Int32?
+  @write_timeout : Int32?
+  @idle_timeout : Int32?
+  @logging : Bool
+  @log_request : SharedProc({Context, Span}, Nil)
+
+  def initialize(config : Config, @log_request : SharedProc({Context, Span}, Nil))
+    @reject_unreadable_body = config.reject_unreadable_body
+    @show_exceptions = config.show_exceptions?
+    @websocket_allowed_origins = List.new(config.websocket_allowed_origins)
+    @websocket_max_message_size = config.websocket_max_message_size
+    @max_file_uploads = config.max_file_uploads
+    @max_multipart_form_field_size = config.max_multipart_form_field_size
+    @max_ranges = config.max_ranges
+    @static_gzip = config.serve_static && config.static_gzip
+    @route_on_raw_path = config.route_on_raw_path
+    @powered_by_header = config.powered_by_header
+    @keepalive = config.keepalive
+    @max_keepalive_requests = config.max_keepalive_requests
+    @max_request_body_size = config.max_request_body_size
+    @read_timeout = config.read_timeout
+    @write_timeout = config.write_timeout
+    @idle_timeout = config.idle_timeout
+    @logging = config.logging
+  end
+
+  pub def reject_unreadable_body : Bool
+    @reject_unreadable_body
+  end
+
+  pub def show_exceptions? : Bool
+    @show_exceptions
+  end
+
+  # A copy: `WebSocket.refusal` reads an `Array`.
+  pub def websocket_allowed_origins : Array(String)
+    @websocket_allowed_origins.to_a
+  end
+
+  pub def websocket_max_message_size : Int32
+    @websocket_max_message_size
+  end
+
+  pub def powered_by_header : Bool
+    @powered_by_header
+  end
+
+  pub def keepalive : Bool
+    @keepalive
+  end
+
+  pub def max_keepalive_requests : Int32
+    @max_keepalive_requests
+  end
+
+  pub def max_request_body_size : Int32
+    @max_request_body_size
+  end
+
+  pub def read_timeout : Int32?
+    @read_timeout
+  end
+
+  pub def write_timeout : Int32?
+    @write_timeout
+  end
+
+  pub def idle_timeout : Int32?
+    @idle_timeout
+  end
+
+  pub def logging : Bool
+    @logging
+  end
+
+  pub def log_request(ctx : Context, elapsed : Span) : Nil
+    @log_request.call({ctx, elapsed})
+  end
+
+  # `Config#prepare`, from the copy.
+  pub def prepare(ctx : Context) : Nil
+    ctx.params.limit_uploads(@max_file_uploads, @max_multipart_form_field_size)
+    ctx.max_ranges = @max_ranges
+    ctx.static_gzip = @static_gzip
+    ctx.route_on_raw_path = @route_on_raw_path
+  end
+end
+
+# *logger*'s `request` as every worker calls it: checked here, so a logger
+# that is not `Share` is refused naming its field.
+private def request_log(logger : L) : Kept({Context, Span}, Nil) forall L
+  Kept({Context, Span}, Nil).new(SharedProc({Context, Span}, Nil).of { |pair| logger.request(pair[0], pair[1]) })
 end
 
 INSTANCE = Config.new
@@ -432,6 +635,6 @@ pub def config : Config
   INSTANCE
 end
 
-pub def add_handler(handler : Handler) : Nil
+pub def add_handler(handler : H) : Nil forall H
   INSTANCE.add_handler(handler)
 end

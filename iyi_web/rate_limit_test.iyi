@@ -4,6 +4,7 @@
 # `max_keys`.
 module iyi_web/rate_limit_test
 
+import std/shared_proc::{SharedProc}
 import iyi_web/rate_limit::{RateLimitHandler}
 import iyi_web/handler::{Handler, chain}
 import iyi_web/context::{Context}
@@ -11,30 +12,48 @@ import iyi_web/request::{Request}
 import iyi_web/harness::*
 import iyi_web/spec::*
 
+# A clock the test moves, read by the handler on whichever worker: its
+# milliseconds in an `Atomic`, so it is `Share`.
 class FakeClock
-  property now : Int64
+  @now : Atomic(Int64)
 
   def initialize
-    @now = 1_000_000_i64
+    @now = Atomic(Int64).new(1_000_000_i64)
+  end
+
+  def now : Int64
+    @now.get
   end
 
   def advance(ms : Int64) : Nil
-    @now = @now + ms
+    @now.add(ms)
+  end
+
+  def reading : SharedProc(Nil, Int64)
+    SharedProc(Nil, Int64).of { |_| now }
   end
 end
 
 class Hits
-  property count : Int32
+  @count : Atomic(Int32)
 
   def initialize
-    @count = 0
+    @count = Atomic(Int32).new(0)
+  end
+
+  def count : Int32
+    @count.get
+  end
+
+  def hit : Nil
+    @count.add(1)
   end
 end
 
 def limited(handler : RateLimitHandler, hits : Hits) : Handler
   chain([handler, routes { |r|
     r.get "/" do |env|
-      hits.count = hits.count + 1
+      hits.hit
       "ok"
     end
     r.get "/health" do |env|
@@ -57,7 +76,7 @@ describe "RateLimitHandler" do
   it "allows the limit, then answers 429 with Retry-After without running the route" do
     clock = FakeClock.new
     hits = Hits.new
-    app = limited(RateLimitHandler.new(limit: 3, period: 60, clock: ->{ clock.now }), hits)
+    app = limited(RateLimitHandler.new(limit: 3, period: 60, clock: clock.reading), hits)
 
     remaining = [] of String
     3.times do
@@ -84,7 +103,7 @@ describe "RateLimitHandler" do
   it "keeps refusing until the window ends, then allows again" do
     clock = FakeClock.new
     hits = Hits.new
-    app = limited(RateLimitHandler.new(limit: 2, period: 10, clock: ->{ clock.now }), hits)
+    app = limited(RateLimitHandler.new(limit: 2, period: 10, clock: clock.reading), hits)
     2.times { dispatch(app, from("10.0.0.1")) }
 
     clock.advance(9_999_i64)
@@ -104,7 +123,7 @@ describe "RateLimitHandler" do
   it "gives every address its own allowance" do
     clock = FakeClock.new
     hits = Hits.new
-    app = limited(RateLimitHandler.new(limit: 1, period: 60, clock: ->{ clock.now }), hits)
+    app = limited(RateLimitHandler.new(limit: 1, period: 60, clock: clock.reading), hits)
     assert dispatch(app, from("10.0.0.1")).response.status_code == 200
     assert dispatch(app, from("10.0.0.1")).response.status_code == 429
     assert dispatch(app, from("10.0.0.2")).response.status_code == 200
@@ -113,14 +132,14 @@ describe "RateLimitHandler" do
 
   it "puts requests without an address in one shared allowance" do
     clock = FakeClock.new
-    app = limited(RateLimitHandler.new(limit: 1, period: 60, clock: ->{ clock.now }), Hits.new)
+    app = limited(RateLimitHandler.new(limit: 1, period: 60, clock: clock.reading), Hits.new)
     assert dispatch(app, from(nil)).response.status_code == 200
     assert dispatch(app, from(nil)).response.status_code == 429
   end
 
   it "keys on what the block answers, and leaves a nil key unlimited" do
     clock = FakeClock.new
-    handler = RateLimitHandler.new(limit: 1, period: 60, clock: ->{ clock.now }) do |ctx|
+    handler = RateLimitHandler.new(limit: 1, period: 60, clock: clock.reading) do |ctx|
       ctx.request.headers["X-Forwarded-For"]?
     end
     app = limited(handler, Hits.new)
@@ -143,7 +162,7 @@ describe "RateLimitHandler" do
 
   it "drops windows that have ended and never holds more than max_keys" do
     clock = FakeClock.new
-    handler = RateLimitHandler.new(limit: 1, period: 60, max_keys: 3, clock: ->{ clock.now })
+    handler = RateLimitHandler.new(limit: 1, period: 60, max_keys: 3, clock: clock.reading)
     app = limited(handler, Hits.new)
     ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"].each do |address|
       dispatch(app, from(address))
@@ -161,7 +180,7 @@ describe "RateLimitHandler" do
 
   it "counts only the paths it is for" do
     clock = FakeClock.new
-    handler = RateLimitHandler.new(limit: 1, period: 60, clock: ->{ clock.now })
+    handler = RateLimitHandler.new(limit: 1, period: 60, clock: clock.reading)
     handler.exclude ["/health"]
     app = limited(handler, Hits.new)
     3.times { assert dispatch(app, from("10.0.0.1", "/health")).response.body == "up" }

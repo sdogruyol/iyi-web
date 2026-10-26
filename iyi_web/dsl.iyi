@@ -5,19 +5,29 @@
 # `before_all` into the importing program. `import iyi_web/dsl::{get}` moves that decision to
 # the consumer: the library exports names, the program says which ones it
 # wants unqualified.
+#
+# `run` serves on every core: each connection is a task on a pool of
+# `workers` threads (SPEC.md III.4.13), so every block given here may run
+# on several cores at once, and the compiler checks each where it is
+# written - a route that captures an `Array`, or assigns a local it
+# captured, is refused naming the variable (SPEC.md III.4.4). The way past
+# is a `Mutex` or an `Atomic` for the state, or `workers: 1` on the
+# registration, which keeps its block unchecked and serves the application
+# on one thread.
 module iyi_web/dsl
 
 import std/file::{File}
 import std/kernel::{abort}
+import std/shared_proc::{SharedProc}
 import std/signal::{Signal}
 import iyi_web/body::{IntoBody}
 import iyi_web/context::{Context}
 import iyi_web/router::{Router, RouteHandler}
-import iyi_web/handler::{Handler, chain}
+import iyi_web/handler::{Handler, ChainHandler}
 import iyi_web/config::*
-import iyi_web/log::{LogHandler, Logger}
+import iyi_web/log::{Logger}
 import iyi_web/server::{Server}
-import iyi_web/static::{StaticHandler}
+import iyi_web/app::{build_server, serial_steps, serial_reason}
 import iyi_web/path::{PathHandler}
 import iyi_web/compress::{CompressHandler}
 import iyi_web/event_stream::{EventStream}
@@ -53,67 +63,80 @@ FILTER_METHODS = %w(get post put patch delete options query)
 
 APP = Router.new
 
-# A route may answer an error as well as a body; see `Router#get`.
+# A route may answer an error as well as a body; see `Router#get`. Each
+# registration comes checked, and with `workers: 1` unchecked.
 {% for method in HTTP_METHODS %}
+  @[Share]
   pub def {{ method.id }}(path : String, &block : Context -> B) : Nil forall B
     APP.{{ method.id }}(path, &block)
   end
+
+  pub def {{ method.id }}(path : String, *, workers : Int32, &block : Context -> B) : Nil forall B
+    APP.{{ method.id }}(path, workers: workers, &block)
+  end
 {% end %}
 
-pub def before_all(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
-  APP.before(path, &block)
-end
-
-pub def after_all(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
-  APP.after(path, &block)
-end
-
-pub def before_all(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
-  APP.before(paths, &block)
-end
-
-pub def after_all(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
-  APP.after(paths, &block)
-end
-
-{% for method in FILTER_METHODS %}
-  pub def before_{{ method.id }}(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
-    APP.before_{{ method.id }}(path, &block)
+{% for name in ["before_all", "after_all"] + FILTER_METHODS.map { |m| "before_" + m } + FILTER_METHODS.map { |m| "after_" + m } %}
+  {% target = name.ends_with?("_all") ? name.split("_")[0] : name %}
+  @[Share]
+  pub def {{ name.id }}(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
+    APP.{{ target.id }}(path, &block)
   end
 
-  pub def after_{{ method.id }}(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
-    APP.after_{{ method.id }}(path, &block)
+  @[Share]
+  pub def {{ name.id }}(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
+    APP.{{ target.id }}(paths, &block)
   end
 
-  pub def before_{{ method.id }}(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
-    APP.before_{{ method.id }}(paths, &block)
+  pub def {{ name.id }}(path : String = "*", *, workers : Int32, &block : Context -> B) : Nil forall B : IntoBody
+    APP.{{ target.id }}(path, workers: workers, &block)
   end
 
-  pub def after_{{ method.id }}(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
-    APP.after_{{ method.id }}(paths, &block)
+  pub def {{ name.id }}(paths : Array(String), *, workers : Int32, &block : Context -> B) : Nil forall B : IntoBody
+    APP.{{ target.id }}(paths, workers: workers, &block)
   end
 {% end %}
 
 # A GET route answering with server-sent events; see `EventStream`.
+@[Share]
 pub def sse(path : String, &block : EventStream, Context -> Nil) : Nil
   APP.sse(path, &block)
 end
 
+pub def sse(path : String, *, workers : Int32, &block : EventStream, Context -> Nil) : Nil
+  APP.sse(path, workers: workers, &block)
+end
+
 # A WebSocket endpoint; see `Router#ws` and `WebSocket`.
+@[Share]
 pub def ws(path : String, &block : WebSocket, Context -> Nil) : Nil
   APP.ws(path, &block)
 end
 
+pub def ws(path : String, *, workers : Int32, &block : WebSocket, Context -> Nil) : Nil
+  APP.ws(path, workers: workers, &block)
+end
+
 # `error 404 do |env| ... end`, or `do |env, err|` for what caused the page;
 # see `Router#error`.
+@[Share]
 pub def error(status_code : Int32, &block : Context, Error -> B) : Nil forall B : IntoBody
   APP.error(status_code, &block)
 end
 
+pub def error(status_code : Int32, *, workers : Int32, &block : Context, Error -> B) : Nil forall B : IntoBody
+  APP.error(status_code, workers: workers, &block)
+end
+
 # `error NotFound do |env, err| ... end`: the page for an error of that type
 # a route answers.
+@[Share]
 pub def error(type : E.class, &block : Context, E -> B) : Nil forall E : Error, B : IntoBody
   APP.error(type, &block)
+end
+
+pub def error(type : E.class, *, workers : Int32, &block : Context, E -> B) : Nil forall E : Error, B : IntoBody
+  APP.error(type, workers: workers, &block)
 end
 
 pub def mount(path : String, router : Router) : Nil
@@ -128,22 +151,45 @@ pub def app : Router
   APP
 end
 
-pub def use(handler : Handler) : Nil
+# Every worker calls one handler object at once, so a handler must be
+# `Share`: one with a field assigned after `initialize`, or one holding an
+# `Array`, is refused here, naming the field. `workers: 1` keeps it as it
+# is, and serves the application on one thread.
+pub def use(handler : H) : Nil forall H
   add_handler(handler)
+end
+
+pub def use(handler : H, *, workers : Int32) : Nil forall H
+  check_workers(workers, "use " + H.to_s)
+  config.add_serial_handler(handler)
 end
 
 # *position* is the index the handler takes in the finished chain: 0 puts
 # it before request logging. The router always stays last.
-pub def use(handler : Handler, position : Int32) : Nil
+pub def use(handler : H, position : Int32) : Nil forall H
   config.add_handler(handler, position)
 end
 
-pub def use(path : String, handler : Handler) : Nil
+pub def use(handler : H, position : Int32, *, workers : Int32) : Nil forall H
+  check_workers(workers, "use " + H.to_s)
+  config.add_serial_handler(handler, position)
+end
+
+pub def use(path : String, handler : H) : Nil forall H
   add_handler(PathHandler.new(path, handler))
+end
+
+pub def use(path : String, handler : H, *, workers : Int32) : Nil forall H
+  check_workers(workers, "use " + path + " " + H.to_s)
+  config.add_serial_handler(PathHandler.new(path, handler))
 end
 
 pub def use(path : String, handlers : Array(H)) : Nil forall H
   handlers.each { |handler| add_handler(PathHandler.new(path, handler)) }
+end
+
+private def check_workers(workers : Int32, what : String) : Nil
+  raise "#{what}: workers: #{workers} - only workers: 1 keeps a handler unchecked" unless workers == 1
 end
 
 # `gzip true` compresses every textual response the client accepts
@@ -174,9 +220,20 @@ pub def logging(status : Bool) : Nil
   config.logging = status
 end
 
+# How many threads serve requests; see `Config#workers`. `workers 1`
+# serves every connection on the thread that accepts them.
+pub def workers(count : Int32) : Nil
+  config.workers = count
+end
+
 # Replaces the logger request lines and `log` messages are written to.
-pub def logger(value : Logger) : Nil
+# Every worker writes through it, so it is checked as a handler is.
+pub def logger(value : L) : Nil forall L
   config.logger = value
+end
+
+pub def logger(value : Logger, *, workers : Int32) : Nil
+  config.set_logger(value, workers: workers)
 end
 
 # Writes *message* through the configured logger; nothing with `logging false`.
@@ -200,9 +257,11 @@ pub def serve_static(options : Hash(String, Bool)) : Nil
 end
 
 # Runs for every file the static handler serves, before its body is
-# written: add caching or CORS headers here.
+# written: add caching or CORS headers here. Checked where it is written,
+# as a route is.
+@[Share]
 pub def static_headers(&block : Context, String, File::Info -> Nil) : Nil
-  config.static_headers = block
+  config.static_headers = SharedProc({Context, String, File::Info}, Nil).of { |args| block.call(args[0], args[1], args[2]) }
 end
 
 pub def public_folder(path : String) : Nil
@@ -226,9 +285,10 @@ pub def extra_options(&block : CLIParser -> Nil) : Nil
   HOLDER.extra_options = block
 end
 
-# Reads the command line (`-b HOST`, `-p PORT`, `-s` with `--ssl-key-file`
-# and `--ssl-cert-file`, `-h` and any `extra_options`), then serves. A
-# *port* given here wins over `-p`; `args: nil` skips the command line.
+# Reads the command line (`-b HOST`, `-p PORT`, `-w WORKERS`, `-s` with
+# `--ssl-key-file` and `--ssl-cert-file`, `-h` and any `extra_options`),
+# then serves. A *port* given here wins over `-p`; `args: nil` skips the
+# command line.
 #
 # Returns once the server has stopped - by `stop`, or by INT or TERM - and
 # the requests in flight then have finished, or `shutdown_timeout` seconds
@@ -257,40 +317,32 @@ private def read_arguments(args : Array(String)) : Nil
 end
 
 # Stops taking connections. The requests in flight are left to finish;
-# `run` waits for them before it returns.
+# `run` waits for them before it returns. A route may call it, on
+# whichever worker it runs: the thread that accepts is the one that stops.
 pub def stop : Nil
   current = HOLDER.server
-  raise "#{config.app_name} is already stopped" unless current
+  raise "#{config.app_name} is already stopped" unless current && current.ask_stop
   config.running = false
   current.close
-  HOLDER.server = nil
 end
 
 pub def running? : Bool
   config.running
 end
 
-# The chain `run` serves: request logging, static files, the middleware
-# added with `use`, then the router. Built fresh on every call, which is
-# also how a test drives the whole application without a socket.
+# The chain `run` serves on one thread - request logging, static files,
+# the middleware added with `use`, then the router - as one handler. Built
+# fresh on every call, which is also how a test drives the whole
+# application without a socket.
 pub def handler_chain : Handler
-  cfg = config
-  handlers = [] of Handler
-  handlers << LogHandler.new(cfg.logger) if cfg.logging
-  if cfg.serve_static
-    handlers << StaticHandler.new(cfg.public_folder, cfg.static_dir_index, cfg.static_dir_listing, cfg.static_gzip, cfg.max_ranges, cfg.static_headers)
-  end
-  cfg.custom_handlers.each { |handler| handlers << handler }
-  cfg.positioned_handlers.each { |entry| handlers = insert_at(handlers, entry[0], entry[1]) }
-  handlers << RouteHandler.new(app, cfg)
-  chain(handlers)
+  ChainHandler.new(serial_steps(app, config))
 end
 
 private def start(port : Int32 | Nil) : Nil
   cfg = config
   cfg.port = port if port
 
-  server = Server.new(handler_chain, cfg, app.error_handlers, app.error_type_handlers)
+  server = build_server(app, cfg)
   address = ""
   tls = cfg.ssl
   if path = cfg.unix_socket
@@ -306,8 +358,12 @@ private def start(port : Int32 | Nil) : Nil
 
   unless cfg.env == "test"
     puts "[" + cfg.env + "] " + cfg.app_name + " is ready to lead at " + address
+    if cfg.workers > 1 && server.workers == 1
+      puts "[" + cfg.env + "] " + cfg.app_name + " serves on one thread: " + (serial_reason(app, cfg) || "") + " was registered with workers: 1"
+    end
     STDOUT.flush
     serve(server, cfg)
+    HOLDER.server = nil
   end
 end
 
@@ -331,7 +387,7 @@ end
 private def stop_on_signals(server : Server, cfg : Config) : Nil
   while true
     return if Signal.wait(Signal::INT, Signal::TERM).is_a?(Cancelled)
-    unless HOLDER.server
+    if server.stop_asked?
       server.shutdown(0)
       return
     end
@@ -341,17 +397,6 @@ private def stop_on_signals(server : Server, cfg : Config) : Nil
     end
     stop
   end
-end
-
-private def insert_at(handlers : Array(Handler), at : Int32, handler : Handler) : Array(Handler)
-  index = at < 0 ? 0 : at
-  placed = [] of Handler
-  handlers.each_with_index do |existing, position|
-    placed << handler if position == index
-    placed << existing
-  end
-  placed << handler if index >= handlers.size
-  placed
 end
 
 # 0.0.0.0 and `::` listen everywhere; the URL names this machine. An IPv6
