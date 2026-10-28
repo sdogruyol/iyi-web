@@ -6,13 +6,17 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
-Requires iyi with `spawn_parallel` (iyi master after 0.19.1, SPEC.md
-III.4.13). Exports changed (`iyi mod release`): `Handler#next_handler`
-and `next_handler=` are gone, `RouteHandler#lookup` answers a
-`Match(RouteEntry(...))`, `SessionHandler#clock=` takes the Unix second to
-fix the clock at, `RateLimitHandler`'s `clock:` is a `SharedProc(Nil,
-Int64)`, `StaticHeadersHook` is a `SharedProc`, and `Config`'s
-`custom_handlers`/`positioned_handlers` hold kept steps.
+Requires iyi master after 0.19.1: `spawn_parallel` (SPEC.md III.4.13)
+and the `@[Share(serial:, crossing:)]` mark. Exports changed (`iyi mod
+release`): `Handler#next_handler` and `next_handler=` are gone,
+`RouteHandler#lookup` answers a `Match(RouteEntry(...))`,
+`SessionHandler#clock=` takes the Unix second to fix the clock at,
+`RateLimitHandler`'s `clock:` is a `SharedProc(Nil, Int64)`,
+`StaticHeadersHook` is a `SharedProc` and `Config#static_headers` a
+`KeptStaticHeaders`, `Config`'s `custom_handlers`/`positioned_handlers`
+hold kept steps, each `before`/`after` filter is one def taking a path or
+an `Array` of them, and `select_content_coding`'s *available* is a
+`List(String)`.
 
 ### Added
 
@@ -26,12 +30,22 @@ Int64)`, `StaticHeadersHook` is a `SharedProc`, and `Config`'s
   `ws`, `sse`, `static_headers` and `BasicAuthHandler`/`RateLimitHandler`
   is checked by the compiler where it is written, as a parallel task's
   is: one that captures an `Array`, or assigns a local it captured, is
-  refused naming the variable. A handler given to `use`, and a logger,
-  must be `Share`; the refusal names the field.
+  refused naming the variable. A handler given to `use` or
+  `add_handler`, and a logger given to `logger` or `config.logger =`,
+  must be `Share`: one that is not is refused at the argument on the
+  application's line, not inside iyi-web, naming the field.
+- Each registration is marked `@[Share(serial: workers)]`, and `use` and
+  `logger` `crossing:` too, so a refusal names both ways past it: a
+  `Mutex` or an `Atomic` for the state, or `workers: 1`.
 - `workers: 1` on a registration (`get "/x", workers: 1 do ...`, `use
-  handler, workers: 1`, `logger value, workers: 1`) keeps its block
-  unchecked; an application holding one is served on one thread and says
-  so at start.
+  handler, workers: 1`, `logger value, workers: 1`, `static_headers
+  workers: 1 do ...`) keeps its block unchecked; an application holding
+  one is served on one thread and says so at start. Each registration is
+  one def taking `workers:`, rather than a checked def and an unchecked
+  one beside it.
+- `iyi_web/refused_test.iyi` checks the refusals' text and place: the
+  programs in `iyi_web/refused` go through `iyi check -f json`, and the
+  one with `workers: 1` on everything must compile with no warning.
 - `iyi_web/app`: `build_server(router, config)`, the server `run` builds,
   for a test or a program of its own.
 - `bench/cores.sh`: one worker against every core under wrk, on bcrypt
@@ -50,6 +64,11 @@ Int64)`, `StaticHeadersHook` is a `SharedProc`, and `Config`'s
 - A stop asked for from a request on a worker is sent to the accepting
   thread, which drains; each connection's watcher closes or cuts off its
   own connection.
+- The content codings iyi-web negotiates (`CONTENT_CODINGS`) are a
+  `List`, which every worker may read: iyi master's reach warning (#148)
+  named the `Array` they were in every program that served files or
+  compressed. Every program here, tests and examples, now compiles with
+  no reach warning.
 
 ## [0.4.0] - 2026-10-21
 
