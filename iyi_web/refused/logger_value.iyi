@@ -1,0 +1,20 @@
+# Refused: a logger that keeps its lines in an `Array`, given to `logger`
+# (iyi_web/refused_test.iyi).
+module iyi_web/refused/logger_value
+
+import iyi_web/dsl::*
+import iyi_web/log::{Logger}
+
+class Collected < Logger
+  @lines : Array(String)
+
+  def initialize
+    @lines = [] of String
+  end
+
+  pub def write(message : String) : Nil
+    @lines << message
+  end
+end
+
+logger Collected.new

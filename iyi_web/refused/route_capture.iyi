@@ -1,0 +1,11 @@
+# Refused: a route that captures an `Array`. iyi_web/refused_test.iyi
+# checks the refusal's place and its two ways out.
+module iyi_web/refused/route_capture
+
+import iyi_web/dsl::*
+
+seen = [] of String
+get "/seen" do |env|
+  seen << env.request.path
+  seen.size.to_s
+end

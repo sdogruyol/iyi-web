@@ -1,0 +1,23 @@
+# Refused: a handler that is not `Share`, given to `use`. The refusal is
+# at the argument on this line, not inside iyi_web (iyi_web/refused_test.iyi).
+module iyi_web/refused/use_handler
+
+import iyi_web/dsl::*
+import iyi_web/context::{Context}
+import iyi_web/handler::{Handler}
+
+class Counter < Handler
+  property count : Int32
+
+  def initialize
+    super()
+    @count = 0
+  end
+
+  pub def call(ctx : Context) : Nil
+    @count = @count + 1
+    call_next(ctx)
+  end
+end
+
+use Counter.new
