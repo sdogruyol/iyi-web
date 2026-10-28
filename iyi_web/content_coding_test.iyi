@@ -3,6 +3,7 @@
 module iyi_web/content_coding_test
 
 import std/compress::{Gzip, Zlib}
+import std/list::{List}
 import iyi_web/content_coding::{select_content_coding, compressible_file?, encode_body, append_vary, etag_with_coding}
 import iyi_web/headers::{Headers}
 import iyi_web/spec::*
@@ -47,9 +48,10 @@ describe "select_content_coding" do
   end
 
   it "chooses only among the codings offered" do
-    assert select_content_coding("deflate", ["gzip"]).nil?
-    assert select_content_coding("deflate, gzip;q=0.5", ["gzip"]) == "gzip"
-    assert select_content_coding("identity;q=1, gzip;q=0.5", ["gzip"]).nil?
+    gzip = List.new(["gzip"])
+    assert select_content_coding("deflate", gzip).nil?
+    assert select_content_coding("deflate, gzip;q=0.5", gzip) == "gzip"
+    assert select_content_coding("identity;q=1, gzip;q=0.5", gzip).nil?
   end
 end
 

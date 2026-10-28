@@ -27,6 +27,7 @@
 # is first redirected to one, so relative links in the page resolve.
 module iyi_web/static
 
+import std/list::{List}
 import std/shared_proc::{SharedProc}
 import std/file::{File}
 import std/dir::{Dir}
@@ -42,6 +43,11 @@ import iyi_web/http_date::*
 import iyi_web/content_coding::{select_content_coding, compressible_file?, append_vary, etag_with_coding}
 import iyi_web/range::*
 import iyi_web/file_body::{respond_file, respond_file_encoded}
+
+# What `select_content_coding` is asked for a file with a precompressed
+# copy: whether the request takes gzip at all. A `List`, which every
+# worker may read (SPEC.md III.4.4), made once.
+GZIP_ONLY = List.new(["gzip"])
 
 pub class StaticHandler < Handler
   @root : String
@@ -120,7 +126,7 @@ pub class StaticHandler < Handler
     if ranged.nil?
       if accept = ctx.request.headers["Accept-Encoding"]?
         coding = select_content_coding(accept) if compressed
-        if precompressed && coding.nil? && select_content_coding(accept, ["gzip"])
+        if precompressed && coding.nil? && select_content_coding(accept, GZIP_ONLY)
           coding = "gzip"
         end
       end
