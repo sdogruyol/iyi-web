@@ -49,7 +49,10 @@ pub def serial_steps(router : Router, config : Config) : Array(Proc(Context, Nil
   steps = [] of Proc(Context, Nil)
   steps << serial_step(LogHandler.new(config.logger)) if config.logging
   if config.serve_static
-    steps << serial_step(StaticHandler.new(config.public_folder, config.static_dir_index, config.static_dir_listing, config.static_gzip, config.max_ranges, config.static_headers))
+    static = StaticHandler.new(config.public_folder, config.static_dir_index, config.static_dir_listing, config.static_gzip, config.max_ranges)
+    kept_hook = config.static_headers
+    hook = kept_hook ? kept_hook.serial : nil
+    steps << ->(ctx : Context) { static.serve(ctx, hook) }
   end
   config.custom_handlers.each { |kept| steps << kept.serial }
   config.positioned_handlers.each { |entry| steps = insert_at(steps, entry[0], entry[1].serial) }
@@ -70,7 +73,9 @@ pub def shared_steps(router : Router, config : Config, settings : Settings) : Ar
     }
   end
   if config.serve_static
-    steps << shared_step(StaticHandler.new(config.public_folder, config.static_dir_index, config.static_dir_listing, config.static_gzip, config.max_ranges, config.static_headers))
+    kept_hook = config.static_headers
+    hook = kept_hook ? shared_of(kept_hook) : nil
+    steps << shared_step(StaticHandler.new(config.public_folder, config.static_dir_index, config.static_dir_listing, config.static_gzip, config.max_ranges, hook))
   end
   config.custom_handlers.each { |kept| steps << shared_of(kept) }
   config.positioned_handlers.each { |entry| steps = insert_at(steps, entry[0], shared_of(entry[1])) }

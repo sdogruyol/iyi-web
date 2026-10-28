@@ -10,10 +10,10 @@
 # `Router` keeps is checked by the compiler where the application writes
 # it, as a parallel task's is (SPEC.md III.4.4, III.4.13): a route that
 # captures an `Array` or a `Hash`, or assigns a local it captured, is
-# refused, naming the variable and the field that fails. Shared state goes
-# behind a `Mutex` or in an `Atomic`; or the registration says `workers:
-# 1`, its block is kept unchecked, and the application is served on one
-# thread (`iyi_web/kept`).
+# refused, naming the variable and the field that fails, and the two ways
+# past it: shared state behind a `Mutex` or in an `Atomic`, or `workers:
+# 1` on the registration, which keeps its block unchecked and serves the
+# application on one thread (`iyi_web/kept`).
 module iyi_web/router
 
 import std/list::{List}
@@ -23,7 +23,7 @@ import iyi_web/codec::*
 import iyi_web/context::{Context}
 import iyi_web/radix::{Tree, FrozenTree, Match}
 import iyi_web/handler::{Handler}
-import iyi_web/kept::{Kept, serial_only}
+import iyi_web/kept::{Kept, kept_serial?}
 import iyi_web/status::*
 import iyi_web/event_stream::{EventStream}
 import iyi_web/websocket::{WebSocket}
@@ -127,33 +127,24 @@ pub class Router
   # members: `String | NotFound` where `NotFound` implements `Error`. An
   # error it answers goes to the `error` page for its type.
   #
-  # Each registration comes twice: checked, and with `workers: 1`, kept
-  # unchecked for a server on one thread.
+  # Every registration is marked `@[Share(serial: workers)]`: its block is
+  # checked where the application writes it, and a refusal names both
+  # ways out - a lock, or `workers: 1`. A call that passes the literal 1
+  # is not checked, and its block is kept as the `Proc` it is
+  # (`iyi_web/kept`).
   {% for method in HTTP_METHODS %}
-    @[Share]
-    pub def {{ method.id }}(path : String, &block : Context -> B) : Nil forall B
-      add_route({{ method.upcase }}, path, KeptRoute.new(SharedProc(Context, String | Error).of { |ctx| route_answer(block.call(ctx)) }))
-    end
-
-    pub def {{ method.id }}(path : String, *, workers : Int32, &block : Context -> B) : Nil forall B
-      serial_only(workers, {{ method.upcase }} + " " + path)
-      add_route({{ method.upcase }}, path, KeptRoute.new(->(ctx : Context) : String | Error { route_answer(block.call(ctx)) }, {{ method.upcase }} + " " + path))
+    @[Share(serial: workers)]
+    pub def {{ method.id }}(path : String, *, workers : Int32? = nil, &block : Context -> B) : Nil forall B
+      what = {{ method.upcase }} + " " + path
+      add_route({{ method.upcase }}, path, kept_serial?(workers, what) ? KeptRoute.new(->(ctx : Context) : String | Error { route_answer(block.call(ctx)) }, what) : KeptRoute.new(SharedProc(Context, String | Error).of { |ctx| route_answer(block.call(ctx)) }))
     end
   {% end %}
 
   # A GET route that answers with a server-sent event stream. The block
   # gets the stream and the context; the stream ends when it returns.
-  @[Share]
-  pub def sse(path : String, &block : EventStream, Context -> Nil) : Nil
-    get(path) do |env|
-      EventStream.serve(env) { |stream| block.call(stream, env) }
-      nil
-    end
-  end
-
-  pub def sse(path : String, *, workers : Int32, &block : EventStream, Context -> Nil) : Nil
-    serial_only(workers, "sse " + path)
-    get(path, workers: 1) do |env|
+  @[Share(serial: workers)]
+  pub def sse(path : String, *, workers : Int32? = nil, &block : EventStream, Context -> Nil) : Nil
+    get(path, workers: workers) do |env|
       EventStream.serve(env) { |stream| block.call(stream, env) }
       nil
     end
@@ -164,40 +155,26 @@ pub class Router
   # callbacks, and the connection's task then reads frames until the
   # socket closes. Before and after filters run for the handshake as for
   # any GET. See `WebSocket`.
-  @[Share]
-  pub def ws(path : String, &block : WebSocket, Context -> Nil) : Nil
-    add_socket(path, KeptSocket.new(SharedProc({WebSocket, Context}, Nil).of { |pair| block.call(pair[0], pair[1]) }))
-  end
-
-  pub def ws(path : String, *, workers : Int32, &block : WebSocket, Context -> Nil) : Nil
-    serial_only(workers, "ws " + path)
-    add_socket(path, KeptSocket.new(->(pair : {WebSocket, Context}) { block.call(pair[0], pair[1]) }, "ws " + path))
+  @[Share(serial: workers)]
+  pub def ws(path : String, *, workers : Int32? = nil, &block : WebSocket, Context -> Nil) : Nil
+    what = "ws " + path
+    add_socket(path, kept_serial?(workers, what) ? KeptSocket.new(->(pair : {WebSocket, Context}) { block.call(pair[0], pair[1]) }, what) : KeptSocket.new(SharedProc({WebSocket, Context}, Nil).of { |pair| block.call(pair[0], pair[1]) }))
   end
 
   # `before` and `after` for every method, then per method; each for one
-  # path, or one block for several paths, registered once per path.
+  # path, or one block for several paths, registered once per path. One
+  # def takes both: as two overloads, a `String` with a default and an
+  # `Array(String)`, each with `workers:` after the `*`, iyi master
+  # (befaa8bc4) kept only the later, and `before do ... end` found no
+  # def to call.
   {% for filter in [{"before", "ALL"}, {"after", "ALL"}] + FILTER_METHODS.map { |m| {"before_" + m, m.upcase} } + FILTER_METHODS.map { |m| {"after_" + m, m.upcase} } %}
     {% name = filter[0]; method = filter[1]; kind = name.starts_with?("before") ? :before : :after %}
-    @[Share]
-    pub def {{ name.id }}(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
-      add_filter({{ kind }}, {{ method }}, path, KeptRoute.new(SharedProc(Context, String | Error).of { |ctx| block.call(ctx).into_body.as(String | Error) }))
-    end
-
-    @[Share]
-    pub def {{ name.id }}(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
-      kept = KeptRoute.new(SharedProc(Context, String | Error).of { |ctx| block.call(ctx).into_body.as(String | Error) })
-      paths.each { |path| add_filter({{ kind }}, {{ method }}, path, kept) }
-    end
-
-    pub def {{ name.id }}(path : String = "*", *, workers : Int32, &block : Context -> B) : Nil forall B : IntoBody
-      serial_only(workers, {{ name }} + " " + path)
-      add_filter({{ kind }}, {{ method }}, path, KeptRoute.new(->(ctx : Context) : String | Error { block.call(ctx).into_body }, {{ name }} + " " + path))
-    end
-
-    pub def {{ name.id }}(paths : Array(String), *, workers : Int32, &block : Context -> B) : Nil forall B : IntoBody
-      serial_only(workers, {{ name }} + " " + paths.join(", "))
-      kept = KeptRoute.new(->(ctx : Context) : String | Error { block.call(ctx).into_body }, {{ name }} + " " + paths.join(", "))
-      paths.each { |path| add_filter({{ kind }}, {{ method }}, path, kept) }
+    @[Share(serial: workers)]
+    pub def {{ name.id }}(path : String | Array(String) = "*", *, workers : Int32? = nil, &block : Context -> B) : Nil forall B : IntoBody
+      paths = path.is_a?(String) ? [path] : path
+      what = {{ name }} + " " + paths.join(", ")
+      kept = kept_serial?(workers, what) ? KeptRoute.new(->(ctx : Context) : String | Error { block.call(ctx).into_body }, what) : KeptRoute.new(SharedProc(Context, String | Error).of { |ctx| block.call(ctx).into_body.as(String | Error) })
+      paths.each { |one| add_filter({{ kind }}, {{ method }}, one, kept) }
     end
   {% end %}
 
@@ -223,14 +200,10 @@ pub class Router
   # parameter: the `Panicked` a route's panic was caught as, for a 500;
   # the error a route answered, when no `error` for its type caught it;
   # otherwise a `StatusError` for the status.
-  @[Share]
-  pub def error(status_code : Int32, &block : Context, Error -> B) : Nil forall B : IntoBody
-    @error_handlers[status_code] = KeptPage.new(SharedProc({Context, Error}, String?).of { |pair| block.call(pair[0], pair[1]).into_body.as(String?) })
-  end
-
-  pub def error(status_code : Int32, *, workers : Int32, &block : Context, Error -> B) : Nil forall B : IntoBody
-    serial_only(workers, "error " + status_code.to_s)
-    @error_handlers[status_code] = KeptPage.new(->(pair : {Context, Error}) : String? { block.call(pair[0], pair[1]).into_body }, "error " + status_code.to_s)
+  @[Share(serial: workers)]
+  pub def error(status_code : Int32, *, workers : Int32? = nil, &block : Context, Error -> B) : Nil forall B : IntoBody
+    what = "error " + status_code.to_s
+    @error_handlers[status_code] = kept_serial?(workers, what) ? KeptPage.new(->(pair : {Context, Error}) : String? { block.call(pair[0], pair[1]).into_body }, what) : KeptPage.new(SharedProc({Context, Error}, String?).of { |pair| block.call(pair[0], pair[1]).into_body.as(String?) })
   end
 
   # The page for an error of type *type*, or of a subclass of it: Kemal's
@@ -239,20 +212,16 @@ pub class Router
   # 500 unless it is an `HttpError`, unless the block sets another. Pages
   # for types are tried in the order they were registered, and the first
   # that matches renders, before any `error` page for the status.
-  @[Share]
-  pub def error(type : E.class, &block : Context, E -> B) : Nil forall E : Error, B : IntoBody
-    @error_types[E.to_s] = KeptPage.new(SharedProc({Context, Error}, String?).of { |pair|
+  @[Share(serial: workers)]
+  pub def error(type : E.class, *, workers : Int32? = nil, &block : Context, E -> B) : Nil forall E : Error, B : IntoBody
+    what = "error " + E.to_s
+    @error_types[E.to_s] = kept_serial?(workers, what) ? KeptPage.new(->(pair : {Context, Error}) : String? {
+      failure = pair[1]
+      failure.is_a?(E) ? block.call(pair[0], failure).into_body : nil
+    }, what) : KeptPage.new(SharedProc({Context, Error}, String?).of { |pair|
       failure = pair[1]
       failure.is_a?(E) ? block.call(pair[0], failure).into_body.as(String?) : nil
     })
-  end
-
-  pub def error(type : E.class, *, workers : Int32, &block : Context, E -> B) : Nil forall E : Error, B : IntoBody
-    serial_only(workers, "error " + E.to_s)
-    @error_types[E.to_s] = KeptPage.new(->(pair : {Context, Error}) : String? {
-      failure = pair[1]
-      failure.is_a?(E) ? block.call(pair[0], failure).into_body : nil
-    }, "error " + E.to_s)
   end
 
   pub def error_handler(status_code : Int32) : ErrorPage?

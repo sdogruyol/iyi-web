@@ -169,9 +169,9 @@ pub def chain(handlers : Array(Handler)) : Handler
   ChainHandler.new(handlers)
 end
 
-# *handler* as a step of a chain every worker runs: checked here, so a
-# handler that is not `Share` is refused naming its field, where the
-# application gives it to `use`.
+# *handler* as a step of a chain every worker runs: iyi-web's own
+# handlers, `Share` by their fields. An application's handler is made a
+# step at its `use` line instead, so a refusal is made there.
 pub def shared_step(handler : H) : SharedProc(Context, Nil) forall H
   SharedProc(Context, Nil).of { |ctx| handler.call(ctx) }
 end

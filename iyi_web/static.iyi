@@ -62,6 +62,14 @@ pub class StaticHandler < Handler
   end
 
   pub def call(ctx : Context) : Nil
+    serve(ctx, @headers_hook)
+  end
+
+  # `call` with *hook* run for each file before its body is written: this
+  # handler's own, or, on a server on one thread, the `Proc` of a
+  # `static_headers` registered with `workers: 1`, which a handler every
+  # worker may call cannot hold.
+  pub def serve(ctx : Context, hook : K) : Nil forall K
     return call_next(ctx) unless ctx.request.method.in?("GET", "HEAD")
 
     relative = ctx.request.path
@@ -73,15 +81,15 @@ pub class StaticHandler < Handler
     return call_next(ctx) unless info
 
     if info.directory?
-      serve_directory(ctx, path, relative)
+      serve_directory(ctx, path, relative, hook)
     elsif info.file?
-      serve_file(ctx, path, info)
+      serve_file(ctx, path, info, hook)
     else
       call_next(ctx)
     end
   end
 
-  private def serve_directory(ctx : Context, dir : String, relative : String) : Nil
+  private def serve_directory(ctx : Context, dir : String, relative : String, hook : K) : Nil forall K
     index = join_paths(dir, "index.html")
     index_info = @dir_index ? File.info?(index) : nil
     has_index = index_info ? index_info.file? : false
@@ -95,14 +103,14 @@ pub class StaticHandler < Handler
 
     if found = index_info
       if has_index
-        serve_file(ctx, index, found)
+        serve_file(ctx, index, found, hook)
         return
       end
     end
     list_directory(ctx, dir, relative)
   end
 
-  private def serve_file(ctx : Context, path : String, info : File::Info) : Nil
+  private def serve_file(ctx : Context, path : String, info : File::Info, hook : K) : Nil forall K
     headers = ctx.response.headers
     type = MIME.with_charset(MIME.from_extension(path))
     size = info.size
@@ -140,7 +148,7 @@ pub class StaticHandler < Handler
       return
     end
 
-    if hook = @headers_hook
+    if hook
       hook.call({ctx, path, info})
     end
 

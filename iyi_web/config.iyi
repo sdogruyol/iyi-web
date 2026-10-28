@@ -15,7 +15,6 @@ import std/list::{List}
 import std/shared_proc::{SharedProc}
 import std/time::{Span}
 import std/tls::{TlsServerConfig}
-import iyi_web/handler::{Handler, shared_step, serial_step}
 import iyi_web/context::{Context}
 import iyi_web/kept::{Kept}
 import iyi_web/log::{Logger, StdoutLogger}
@@ -25,6 +24,10 @@ import iyi_web/log::{Logger, StdoutLogger}
 # `SharedProc`, since every worker serves files: `static_headers`' block
 # is checked where it is written.
 pub alias StaticHeadersHook = SharedProc({Context, String, File::Info}, Nil)
+
+# The `static_headers` hook as the config keeps it: checked, or kept as it
+# is with `workers: 1`.
+pub alias KeptStaticHeaders = Kept({Context, String, File::Info}, Nil)
 
 # A handler `use` added, as a step of the chain: checked, or kept as it
 # is with `workers: 1`.
@@ -59,7 +62,7 @@ pub class Config
   @static_dir_index : Bool
   @static_dir_listing : Bool
   @static_gzip : Bool
-  @static_headers : StaticHeadersHook?
+  @static_headers : KeptStaticHeaders?
   @shutdown_timeout : Int32
   @read_timeout : Int32?
   @write_timeout : Int32?
@@ -167,20 +170,21 @@ pub class Config
   end
 
   # Every worker writes through the logger at once, so it must be `Share`:
-  # one that keeps lines in an `Array` is refused here, naming the field,
-  # and keeps them behind a `Mutex` instead - or is given with
-  # `set_logger(value, workers: 1)`.
+  # one that keeps lines in an `Array` is refused at the assignment,
+  # naming the field. The DSL's `logger value, workers: 1` keeps one that
+  # is not, for a server on one thread.
+  @[Share(crossing: {value: "Keep its lines behind a `Mutex` (std/mutex), or give it with `logger value, workers: 1` so it stays on one thread"})]
   pub def logger=(value : L) : L forall L
-    @logger = value
-    @log_request = request_log(value)
+    keep_logger(value, Kept({Context, Span}, Nil).new(SharedProc({Context, Span}, Nil).of { |pair| value.request(pair[0], pair[1]) }))
     value
   end
 
-  # *value* kept unchecked, for a server on one thread.
-  pub def set_logger(value : Logger, *, workers : Int32) : Nil
-    raise "logger: workers: #{workers} - only workers: 1 keeps a logger unchecked" unless workers == 1
+  # *value*, with its `request` as the chain calls it: made where the
+  # logger was given (`logger=`, the DSL's `logger`), checked unless it
+  # was given with `workers: 1`.
+  pub def keep_logger(value : Logger, request : Kept({Context, Span}, Nil)) : Nil
     @logger = value
-    @log_request = Kept({Context, Span}, Nil).new(->(pair : {Context, Span}) { value.request(pair[0], pair[1]) }, "logger " + value.class.to_s)
+    @log_request = request
   end
 
   # One finished request through the logger.
@@ -334,24 +338,28 @@ pub class Config
     @custom_handlers
   end
 
-  # Checked: a handler every worker calls at once must be `Share`.
+  # Checked: a handler every worker calls at once must be `Share`, and one
+  # that is not is refused where it is given, naming the field.
+  @[Share(crossing: {handler: "Keep what it changes in an `Atomic` or behind a `Mutex` (std/mutex), or give it with `use handler, workers: 1` so it stays on one thread"})]
   pub def add_handler(handler : H) : Nil forall H
-    @custom_handlers << KeptStep.new(shared_step(handler))
+    add_step(KeptStep.new(SharedProc(Context, Nil).of { |ctx| handler.call(ctx) }))
   end
 
   # *position* is the handler's index in the final chain, counted before
   # the router, which always stays last.
+  @[Share(crossing: {handler: "Keep what it changes in an `Atomic` or behind a `Mutex` (std/mutex), or give it with `use handler, position, workers: 1` so it stays on one thread"})]
   pub def add_handler(handler : H, position : Int32) : Nil forall H
-    @positioned_handlers << {position, KeptStep.new(shared_step(handler))}
+    add_step(KeptStep.new(SharedProc(Context, Nil).of { |ctx| handler.call(ctx) }), position)
   end
 
-  # A handler kept unchecked: its application is served on one thread.
-  pub def add_serial_handler(handler : H, position : Int32? = nil) : Nil forall H
-    kept = KeptStep.new(serial_step(handler), "use " + H.to_s)
+  # A step made where its handler was given (`add_handler`, the DSL's
+  # `use`): checked, or kept unchecked with `workers: 1`, which serves
+  # the application on one thread.
+  pub def add_step(step : KeptStep, position : Int32? = nil) : Nil
     if at = position
-      @positioned_handlers << {at, kept}
+      @positioned_handlers << {at, step}
     else
-      @custom_handlers << kept
+      @custom_handlers << step
     end
   end
 
@@ -448,11 +456,11 @@ pub class Config
     @static_gzip = value
   end
 
-  pub def static_headers : StaticHeadersHook?
+  pub def static_headers : KeptStaticHeaders?
     @static_headers
   end
 
-  pub def static_headers=(hook : StaticHeadersHook) : StaticHeadersHook
+  pub def static_headers=(hook : KeptStaticHeaders) : KeptStaticHeaders
     @static_headers = hook
     hook
   end
@@ -497,12 +505,16 @@ pub class Config
     value
   end
 
-  # What was registered with `workers: 1` here - a handler, the logger -
-  # and so keeps the server on one thread; nil when nothing was.
+  # What was registered with `workers: 1` here - a handler, the logger,
+  # the `static_headers` hook - and so keeps the server on one thread; nil
+  # when nothing was.
   pub def serial_label : String?
     @custom_handlers.each { |step| return step.label unless step.shared? }
     @positioned_handlers.each { |entry| return entry[1].label unless entry[1].shared? }
     return @log_request.label unless @log_request.shared?
+    if hook = @static_headers
+      return hook.label unless hook.shared?
+    end
     nil
   end
 
@@ -623,8 +635,8 @@ pub class Settings
   end
 end
 
-# *logger*'s `request` as every worker calls it: checked here, so a logger
-# that is not `Share` is refused naming its field.
+# *logger*'s `request` as every worker calls it: the default
+# `StdoutLogger`'s, which writes under one lock.
 private def request_log(logger : L) : Kept({Context, Span}, Nil) forall L
   Kept({Context, Span}, Nil).new(SharedProc({Context, Span}, Nil).of { |pair| logger.request(pair[0], pair[1]) })
 end
@@ -635,6 +647,9 @@ pub def config : Config
   INSTANCE
 end
 
+# Kemal's `add_handler`: `use handler`, refused where it is given when the
+# handler is not `Share`.
+@[Share(crossing: {handler: "Keep what it changes in an `Atomic` or behind a `Mutex` (std/mutex), or give it with `use handler, workers: 1` so it stays on one thread"})]
 pub def add_handler(handler : H) : Nil forall H
   INSTANCE.add_handler(handler)
 end

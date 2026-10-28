@@ -38,6 +38,22 @@ class Collected < Logger
   end
 end
 
+# A handler with a field it assigns as it serves, which no two workers may
+# share: given to `use` with `workers: 1`.
+class Counted < Handler
+  property count : Int32
+
+  def initialize
+    super()
+    @count = 0
+  end
+
+  pub def call(ctx : Context) : Nil
+    @count = @count + 1
+    call_next(ctx)
+  end
+end
+
 struct Refused
   def initialize
   end
@@ -208,6 +224,19 @@ describe "iyi_web/dsl" do
     logger previous, workers: 1
   end
 
+  it "keeps a handler given with workers: 1 as it is, on one thread" do
+    logging(false)
+    serve_static(false)
+    counted = Counted.new
+    use "/counted", counted, workers: 1
+    dispatch(handler_chain, "GET", "/counted/x")
+    dispatch(handler_chain, "GET", "/elsewhere")
+    assert counted.count == 1
+    kept = config.custom_handlers.last
+    assert !kept.shared?
+    assert kept.label.starts_with?("use /counted ")
+  end
+
   it "registers one filter for a list of paths" do
     handler = RouteHandler.new(app)
     assert dispatch(handler, "GET", "/listed-a").response.headers["x-listed"]? == "1"
@@ -269,6 +298,23 @@ describe "iyi_web/dsl" do
     assert served.response.headers["x-served"] == "12"
     listed = dispatch(handler_chain, "GET", "/")
     assert listed.response.body.includes?("hello.txt")
+    serve_static(false)
+  end
+
+  it "keeps a static_headers block given workers: 1 unchecked" do
+    served = [] of String
+    serve_static(true)
+    public_folder(__DIR__ + "/fixtures")
+    static_headers workers: 1 do |env, path, info|
+      served << path
+      nil
+    end
+    dispatch(handler_chain, "GET", "/hello.txt")
+    assert served.size == 1
+    assert served[0].ends_with?("hello.txt")
+    static_headers do |env, path, info|
+      nil
+    end
     serve_static(false)
   end
 end

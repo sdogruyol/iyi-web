@@ -11,9 +11,11 @@
 # captured, is refused where it is written, naming the variable.
 #
 # The way past the refusal, besides a `Mutex` or an `Atomic`, is
-# `workers: 1` on the registration: its block is kept as the `Proc` it
-# is, unchecked, and an application holding one is served on one thread,
-# as every iyi-web application was before 0.5.0 (`Frozen#serial_reason`).
+# `workers: 1` on the registration, which the refusal names too: each
+# registration is marked `@[Share(serial: workers)]`, so a call passing
+# the literal 1 is not checked, and its block is kept as the `Proc` it
+# is. An application holding one is served on one thread, as every
+# iyi-web application was before 0.5.0 (`serial_reason`).
 module iyi_web/kept
 
 import std/shared_proc::{SharedProc}
@@ -50,9 +52,12 @@ pub struct Kept(A, R)
   end
 end
 
-# `workers: 1` is the one count a registration takes: the count of the
-# server is the application's (`workers`, `-w`), and a block that may not
-# run on two cores pins it to one.
-pub def serial_only(workers : Int32, what : String) : Nil
-  raise "#{what}: workers: #{workers} - a block registered with workers: is kept unchecked, and only workers: 1 says what that means; leave it out to have the block checked and served on every worker" unless workers == 1
+# Whether a registration given *workers* keeps its block for one thread:
+# `workers: 1`. Left out, the block was checked and is kept for every
+# worker. A registration takes no other count - the server's is the
+# application's (`workers`, `-w`) - so another one panics, naming *what*.
+pub def kept_serial?(workers : Int32?, what : String) : Bool
+  return false unless workers
+  raise "#{what}: workers: #{workers} - a registration takes only workers: 1, which keeps its block on one thread; leave it out to have the block checked and served on every worker" unless workers == 1
+  true
 end

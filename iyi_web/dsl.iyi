@@ -10,25 +10,28 @@
 # `workers` threads (SPEC.md III.4.13), so every block given here may run
 # on several cores at once, and the compiler checks each where it is
 # written - a route that captures an `Array`, or assigns a local it
-# captured, is refused naming the variable (SPEC.md III.4.4). The way past
-# is a `Mutex` or an `Atomic` for the state, or `workers: 1` on the
-# registration, which keeps its block unchecked and serves the application
-# on one thread.
+# captured, is refused naming the variable (SPEC.md III.4.4), and so is a
+# handler given to `use` that is not `Share`, at the `use` line. Each
+# registration is marked `@[Share(serial: workers)]`, so the refusal names
+# both ways past it: a `Mutex` or an `Atomic` for the state, or `workers:
+# 1` on the registration, which keeps its block unchecked and serves the
+# application on one thread.
 module iyi_web/dsl
 
 import std/file::{File}
 import std/kernel::{abort}
 import std/shared_proc::{SharedProc}
+import std/time::{Span}
 import std/signal::{Signal}
 import iyi_web/body::{IntoBody}
 import iyi_web/context::{Context}
 import iyi_web/router::{Router, RouteHandler}
-import iyi_web/handler::{Handler, ChainHandler}
+import iyi_web/handler::{Handler, ChainHandler, serial_step}
 import iyi_web/config::*
-import iyi_web/log::{Logger}
+import iyi_web/kept::{Kept, kept_serial?}
 import iyi_web/server::{Server}
 import iyi_web/app::{build_server, serial_steps, serial_reason}
-import iyi_web/path::{PathHandler}
+import iyi_web/path::{PathHandler, call_under_prefix}
 import iyi_web/compress::{CompressHandler}
 import iyi_web/event_stream::{EventStream}
 import iyi_web/websocket::{WebSocket}
@@ -63,79 +66,46 @@ FILTER_METHODS = %w(get post put patch delete options query)
 
 APP = Router.new
 
-# A route may answer an error as well as a body; see `Router#get`. Each
-# registration comes checked, and with `workers: 1` unchecked.
+# A route may answer an error as well as a body; see `Router#get`.
 {% for method in HTTP_METHODS %}
-  @[Share]
-  pub def {{ method.id }}(path : String, &block : Context -> B) : Nil forall B
-    APP.{{ method.id }}(path, &block)
-  end
-
-  pub def {{ method.id }}(path : String, *, workers : Int32, &block : Context -> B) : Nil forall B
+  @[Share(serial: workers)]
+  pub def {{ method.id }}(path : String, *, workers : Int32? = nil, &block : Context -> B) : Nil forall B
     APP.{{ method.id }}(path, workers: workers, &block)
   end
 {% end %}
 
+# One path or several, as `Router#before` takes them.
 {% for name in ["before_all", "after_all"] + FILTER_METHODS.map { |m| "before_" + m } + FILTER_METHODS.map { |m| "after_" + m } %}
   {% target = name.ends_with?("_all") ? name.split("_")[0] : name %}
-  @[Share]
-  pub def {{ name.id }}(path : String = "*", &block : Context -> B) : Nil forall B : IntoBody
-    APP.{{ target.id }}(path, &block)
-  end
-
-  @[Share]
-  pub def {{ name.id }}(paths : Array(String), &block : Context -> B) : Nil forall B : IntoBody
-    APP.{{ target.id }}(paths, &block)
-  end
-
-  pub def {{ name.id }}(path : String = "*", *, workers : Int32, &block : Context -> B) : Nil forall B : IntoBody
+  @[Share(serial: workers)]
+  pub def {{ name.id }}(path : String | Array(String) = "*", *, workers : Int32? = nil, &block : Context -> B) : Nil forall B : IntoBody
     APP.{{ target.id }}(path, workers: workers, &block)
-  end
-
-  pub def {{ name.id }}(paths : Array(String), *, workers : Int32, &block : Context -> B) : Nil forall B : IntoBody
-    APP.{{ target.id }}(paths, workers: workers, &block)
   end
 {% end %}
 
 # A GET route answering with server-sent events; see `EventStream`.
-@[Share]
-pub def sse(path : String, &block : EventStream, Context -> Nil) : Nil
-  APP.sse(path, &block)
-end
-
-pub def sse(path : String, *, workers : Int32, &block : EventStream, Context -> Nil) : Nil
+@[Share(serial: workers)]
+pub def sse(path : String, *, workers : Int32? = nil, &block : EventStream, Context -> Nil) : Nil
   APP.sse(path, workers: workers, &block)
 end
 
 # A WebSocket endpoint; see `Router#ws` and `WebSocket`.
-@[Share]
-pub def ws(path : String, &block : WebSocket, Context -> Nil) : Nil
-  APP.ws(path, &block)
-end
-
-pub def ws(path : String, *, workers : Int32, &block : WebSocket, Context -> Nil) : Nil
+@[Share(serial: workers)]
+pub def ws(path : String, *, workers : Int32? = nil, &block : WebSocket, Context -> Nil) : Nil
   APP.ws(path, workers: workers, &block)
 end
 
 # `error 404 do |env| ... end`, or `do |env, err|` for what caused the page;
 # see `Router#error`.
-@[Share]
-pub def error(status_code : Int32, &block : Context, Error -> B) : Nil forall B : IntoBody
-  APP.error(status_code, &block)
-end
-
-pub def error(status_code : Int32, *, workers : Int32, &block : Context, Error -> B) : Nil forall B : IntoBody
+@[Share(serial: workers)]
+pub def error(status_code : Int32, *, workers : Int32? = nil, &block : Context, Error -> B) : Nil forall B : IntoBody
   APP.error(status_code, workers: workers, &block)
 end
 
 # `error NotFound do |env, err| ... end`: the page for an error of that type
 # a route answers.
-@[Share]
-pub def error(type : E.class, &block : Context, E -> B) : Nil forall E : Error, B : IntoBody
-  APP.error(type, &block)
-end
-
-pub def error(type : E.class, *, workers : Int32, &block : Context, E -> B) : Nil forall E : Error, B : IntoBody
+@[Share(serial: workers)]
+pub def error(type : E.class, *, workers : Int32? = nil, &block : Context, E -> B) : Nil forall E : Error, B : IntoBody
   APP.error(type, workers: workers, &block)
 end
 
@@ -153,43 +123,40 @@ end
 
 # Every worker calls one handler object at once, so a handler must be
 # `Share`: one with a field assigned after `initialize`, or one holding an
-# `Array`, is refused here, naming the field. `workers: 1` keeps it as it
-# is, and serves the application on one thread.
-pub def use(handler : H) : Nil forall H
-  add_handler(handler)
-end
-
-pub def use(handler : H, *, workers : Int32) : Nil forall H
-  check_workers(workers, "use " + H.to_s)
-  config.add_serial_handler(handler)
+# `Array`, is refused at the `use` line, naming the field. `workers: 1`
+# keeps it as it is, and serves the application on one thread.
+#
+# Each `use` makes its step itself rather than handing the handler on: a
+# `@[Share(crossing: ...)]` def takes its own parameter on trust, but a
+# def it handed the handler to would ask it again, and under `workers: 1`
+# would refuse it inside iyi-web.
+@[Share(serial: workers, crossing: {handler: "Keep what it changes in an `Atomic` or behind a `Mutex` (std/mutex)"})]
+pub def use(handler : H, *, workers : Int32? = nil) : Nil forall H
+  what = "use " + H.to_s
+  config.add_step(kept_serial?(workers, what) ? KeptStep.new(serial_step(handler), what) : KeptStep.new(SharedProc(Context, Nil).of { |ctx| handler.call(ctx) }))
 end
 
 # *position* is the index the handler takes in the finished chain: 0 puts
 # it before request logging. The router always stays last.
-pub def use(handler : H, position : Int32) : Nil forall H
-  config.add_handler(handler, position)
+@[Share(serial: workers, crossing: {handler: "Keep what it changes in an `Atomic` or behind a `Mutex` (std/mutex)"})]
+pub def use(handler : H, position : Int32, *, workers : Int32? = nil) : Nil forall H
+  what = "use " + H.to_s
+  config.add_step(kept_serial?(workers, what) ? KeptStep.new(serial_step(handler), what) : KeptStep.new(SharedProc(Context, Nil).of { |ctx| handler.call(ctx) }), position)
 end
 
-pub def use(handler : H, position : Int32, *, workers : Int32) : Nil forall H
-  check_workers(workers, "use " + H.to_s)
-  config.add_serial_handler(handler, position)
+# *handler* for the requests under *path* alone; see `PathHandler`.
+@[Share(serial: workers, crossing: {handler: "Keep what it changes in an `Atomic` or behind a `Mutex` (std/mutex)"})]
+pub def use(path : String, handler : H, *, workers : Int32? = nil) : Nil forall H
+  what = "use " + path + " " + H.to_s
+  config.add_step(kept_serial?(workers, what) ? KeptStep.new(serial_step(PathHandler.new(path, handler)), what) : KeptStep.new(SharedProc(Context, Nil).of { |ctx| call_under_prefix(path, handler, ctx) }))
 end
 
-pub def use(path : String, handler : H) : Nil forall H
-  add_handler(PathHandler.new(path, handler))
-end
-
-pub def use(path : String, handler : H, *, workers : Int32) : Nil forall H
-  check_workers(workers, "use " + path + " " + H.to_s)
-  config.add_serial_handler(PathHandler.new(path, handler))
-end
-
+# Several handlers under *path*, each checked as `use(path, handler)`
+# checks one. An `Array` is never `Share`, so the check is made on each
+# element here, and a refusal points at this line; give a handler that
+# must stay on one thread alone, with `workers: 1`.
 pub def use(path : String, handlers : Array(H)) : Nil forall H
-  handlers.each { |handler| add_handler(PathHandler.new(path, handler)) }
-end
-
-private def check_workers(workers : Int32, what : String) : Nil
-  raise "#{what}: workers: #{workers} - only workers: 1 keeps a handler unchecked" unless workers == 1
+  handlers.each { |handler| use(path, handler) }
 end
 
 # `gzip true` compresses every textual response the client accepts
@@ -227,13 +194,12 @@ pub def workers(count : Int32) : Nil
 end
 
 # Replaces the logger request lines and `log` messages are written to.
-# Every worker writes through it, so it is checked as a handler is.
-pub def logger(value : L) : Nil forall L
-  config.logger = value
-end
-
-pub def logger(value : Logger, *, workers : Int32) : Nil
-  config.set_logger(value, workers: workers)
+# Every worker writes through it, so it is checked as a handler is, at
+# this line; `workers: 1` keeps one that is not `Share`.
+@[Share(serial: workers, crossing: {value: "Keep its lines behind a `Mutex` (std/mutex)"})]
+pub def logger(value : L, *, workers : Int32? = nil) : Nil forall L
+  what = "logger " + L.to_s
+  config.keep_logger(value, kept_serial?(workers, what) ? Kept({Context, Span}, Nil).new(->(pair : {Context, Span}) { value.request(pair[0], pair[1]) }, what) : Kept({Context, Span}, Nil).new(SharedProc({Context, Span}, Nil).of { |pair| value.request(pair[0], pair[1]) }))
 end
 
 # Writes *message* through the configured logger; nothing with `logging false`.
@@ -258,10 +224,11 @@ end
 
 # Runs for every file the static handler serves, before its body is
 # written: add caching or CORS headers here. Checked where it is written,
-# as a route is.
-@[Share]
-pub def static_headers(&block : Context, String, File::Info -> Nil) : Nil
-  config.static_headers = SharedProc({Context, String, File::Info}, Nil).of { |args| block.call(args[0], args[1], args[2]) }
+# as a route is; `workers: 1` keeps it unchecked.
+@[Share(serial: workers)]
+pub def static_headers(*, workers : Int32? = nil, &block : Context, String, File::Info -> Nil) : Nil
+  what = "static_headers"
+  config.static_headers = kept_serial?(workers, what) ? KeptStaticHeaders.new(->(args : {Context, String, File::Info}) { block.call(args[0], args[1], args[2]) }, what) : KeptStaticHeaders.new(SharedProc({Context, String, File::Info}, Nil).of { |args| block.call(args[0], args[1], args[2]) })
 end
 
 pub def public_folder(path : String) : Nil
