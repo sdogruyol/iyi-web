@@ -1,0 +1,20 @@
+# Refused: a logger that is not `Share`, assigned to `config.logger`,
+# which has no `workers:` (iyi_web/refused_test.iyi).
+module iyi_web/refused/config_logger
+
+import iyi_web/config::{config}
+import iyi_web/log::{Logger}
+
+class Collected < Logger
+  @lines : Array(String)
+
+  def initialize
+    @lines = [] of String
+  end
+
+  pub def write(message : String) : Nil
+    @lines << message
+  end
+end
+
+config.logger = Collected.new

@@ -5,18 +5,30 @@
 #   curl -X POST localhost:3000/todos -H 'Content-Type: application/json' -d '{"title":"Write docs"}'
 #   curl -X PATCH localhost:3000/todos/1 -H 'Content-Type: application/json' -d '{"done":true}'
 #   curl -X DELETE localhost:3000/todos/1
+#
+# Every core serves requests at once, so the store is behind a lock and the
+# last id is an `Atomic`: a route that named a bare `Hash` would not
+# compile, the compiler naming the constant and its field.
 module examples/json_api
 
 import std/json::{ToJSON, Builder}
+import std/list::{List}
+import std/mutex::{Mutex}
 import iyi_web/dsl::*
 import iyi_web/context::{Context}
 
-class Todo
+# A todo is a value: an update makes a new one, so one read out of the
+# store is the todo as it was then, whatever another request does next.
+struct Todo
   getter id : Int32
-  property title : String
-  property done : Bool
+  getter title : String
+  getter done : Bool
 
   def initialize(@id : Int32, @title : String, @done : Bool = false)
+  end
+
+  def with(title : String? = nil, done : Bool? = nil) : Todo
+    Todo.new(@id, title || @title, done.nil? ? @done : done)
   end
 end
 
@@ -32,25 +44,16 @@ impl ToJSON for Todo
   end
 end
 
-# Kept in memory for as long as the program runs. A constant cannot be
-# reassigned, so the last id given out lives in an object.
-TODOS = {} of Int32 => Todo
-
-class Ids
-  @last = 0
-
-  def next : Int32
-    @last += 1
-  end
-end
-
-IDS = Ids.new
+# Kept in memory for as long as the program runs, reached only inside
+# `lock` and `get`, one request at a time.
+TODOS   = Mutex.new { {} of Int32 => Todo }
+LAST_ID = Atomic(Int32).new(0)
 
 # The todo named by `:id`, or a `404` that ends the request. A segment that
 # is not a number names no todo either.
 def find_todo(env : Context) : Todo?
   id = env.params.url["id"].to_i?
-  todo = id ? TODOS[id]? : nil
+  todo = id ? TODOS.get { |todos| todos[id]? }.or_panic : nil
   env.halt(404, %({"error":"not found"})) unless todo
   todo
 end
@@ -73,7 +76,8 @@ error 400 do |env|
 end
 
 get "/todos" do |env|
-  env.json(TODOS.values)
+  # A `List` leaves the lock; an `Array` the lock held would not.
+  env.json(TODOS.get { |todos| List.new(todos.values) }.or_panic.to_a)
 end
 
 get "/todos/:id" do |env|
@@ -87,27 +91,36 @@ post "/todos" do |env|
   if title.nil? || title.empty?
     env.halt(422, %({"error":"title is required"}))
   else
-    id = IDS.next
-    TODOS[id] = Todo.new(id, title)
-    env.status(201).json(TODOS[id])
+    todo = Todo.new(LAST_ID.add(1) + 1, title)
+    TODOS.lock { |todos| todos[todo.id] = todo }
+    env.status(201).json(todo)
   end
 end
 
 patch "/todos/:id" do |env|
   if todo = find_todo(env)
-    if title = json_string(env, "title")
-      todo.title = title
+    id = todo.id
+    title = json_string(env, "title")
+    flag = env.params.json["done"]?
+    done = flag ? flag.as_bool? == true : nil
+    # Read and written under one lock, so a second PATCH at the same time
+    # changes this one's result rather than losing it.
+    changed = TODOS.get { |todos|
+      current = todos[id]?
+      current ? (todos[id] = current.with(title, done)) : nil
+    }.or_panic
+    if changed
+      env.json(changed)
+    else
+      env.halt(404, %({"error":"not found"}))
     end
-    if done = env.params.json["done"]?
-      todo.done = done.as_bool? == true
-    end
-    env.json(todo)
   end
 end
 
 delete "/todos/:id" do |env|
   if todo = find_todo(env)
-    TODOS.delete(todo.id)
+    id = todo.id
+    TODOS.lock { |todos| todos.delete(id) }
     env.response.status_code = 204
   end
   nil

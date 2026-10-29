@@ -9,9 +9,16 @@
 # forwards to `Log.info` is two lines for an application that wants them.
 module iyi_web/log
 
+import std/mutex::{Mutex}
 import iyi_web/handler::{Handler}
 import iyi_web/context::{Context}
 import std/time::{Time, Span}
+
+# Standard output is one buffer, and the prelude's stream keeps its place
+# in it in a field every write moves, with no lock: two workers writing
+# at once race on it. Every `StdoutLogger` writes under this one lock,
+# whichever worker its request is on.
+STDOUT_LOCK = Mutex.new { 0 }
 
 pub abstract class Logger
   # One finished request. *ctx* carries the status that was sent; the
@@ -28,7 +35,7 @@ end
 
 pub class StdoutLogger < Logger
   pub def write(message : String) : Nil
-    puts message
+    STDOUT_LOCK.lock { |_| puts message }
   end
 end
 

@@ -107,8 +107,10 @@ JSON_BODY = %({"name":"Ada Lovelace","email":"ada@example.com","age":36,"admin":
 
 options = parse_options(Program.args)
 
-tree = Tree(String).new
-route_keys.each { |key| check(tree.add(key, key), "duplicate route " + key) }
+built = Tree(String).new
+route_keys.each { |key| check(built.add(key, key), "duplicate route " + key) }
+# What a server reads: the tree frozen when it starts (`Tree#frozen`).
+tree = built.frozen
 check(!tree.find("/GET/api/v1/webhooks").nil?, "radix static")
 check(matched(tree.find("/GET/api/v1/webhooks/7/items/9"), "radix param")["item"] == "9", "radix param")
 check(matched(tree.find("/GET/assets/css/site/main.css"), "radix wildcard")["path"] == "css/site/main.css", "radix wildcard")

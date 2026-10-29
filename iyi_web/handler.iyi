@@ -6,73 +6,42 @@
 # `only` and `exclude` record which requests a handler is meant for;
 # `only_match?` and `exclude_match?` answer for one request, and `call`
 # decides what to do with the answer.
+#
+# **One handler, every worker.** A server with more than one worker calls
+# one handler object from every core at once, so a handler `use` takes
+# must be `Share` (SPEC.md III.4.4): no field assigned after `initialize`,
+# and every field's type `Share` itself. The compiler checks it where the
+# handler is registered and names the field that fails; a count goes in an
+# `Atomic`, a table behind a `Mutex`. That is why nothing here is written
+# after a handler is made: the next handler is the request's to know
+# (`Context#call_next`), not a field, and the rules are behind a lock,
+# which a request takes only when there are rules to read.
 module iyi_web/handler
 
+import std/list::{List}
+import std/mutex::{Mutex}
+import std/shared_proc::{SharedProc}
 import iyi_web/codec
-import iyi_web/context::{Context}
+import iyi_web/context::{Context, Runner}
 
-pub class Handler
-  @next_handler : Handler?
-  @only : Array(Tuple(String, String))
-  @exclude : Array(Tuple(String, String))
+# A handler's `only` and `exclude` rules: method, then path.
+class Rules
+  getter only : Array(Tuple(String, String))
+  getter exclude : Array(Tuple(String, String))
 
   def initialize
-    @next_handler = nil
     @only = [] of Tuple(String, String)
     @exclude = [] of Tuple(String, String)
   end
 
-  pub def next_handler=(handler : Handler) : Handler
-    @next_handler = handler
-    handler
+  # Whether *method* and *path* are what the handler is for: no `only`
+  # rules, or one that matches, and no `exclude` rule that matches.
+  def applies?(method : String, path : String) : Bool
+    return false if any_match?(@exclude, method, path)
+    @only.empty? || any_match?(@only, method, path)
   end
 
-  pub def next_handler : Handler?
-    @next_handler
-  end
-
-  pub def call(ctx : Context) : Nil
-    call_next(ctx)
-  end
-
-  pub def call_next(ctx : Context) : Nil
-    return if ctx.halted?
-    if handler = @next_handler
-      handler.call(ctx)
-    end
-  end
-
-  # Paths use the filter syntax: exact, `:name` segments, or a `/*` prefix.
-  # *method* "*" means every method, and a HEAD request counts as GET.
-  pub def only(paths : Array(String), method : String = "GET") : Nil
-    paths.each { |path| @only << {method, path} }
-  end
-
-  pub def exclude(paths : Array(String), method : String = "GET") : Nil
-    paths.each { |path| @exclude << {method, path} }
-  end
-
-  pub def only_match?(ctx : Context) : Bool
-    rules_match?(@only, ctx)
-  end
-
-  pub def exclude_match?(ctx : Context) : Bool
-    rules_match?(@exclude, ctx)
-  end
-
-  # Whether *ctx* is one this handler is for: no `only` rules, or one that
-  # matches, and no `exclude` rule that matches. The built-in handlers that
-  # honour the rules ask this; an `only` left empty means every request.
-  pub def applies?(ctx : Context) : Bool
-    return false if exclude_match?(ctx)
-    @only.empty? || only_match?(ctx)
-  end
-
-  # The path is the one the router routes on (`Context#routing_path`), so a
-  # rule and a route never read one request two ways.
-  private def rules_match?(rules : Array(Tuple(String, String)), ctx : Context) : Bool
-    method = ctx.request.method
-    path = ctx.routing_path
+  def any_match?(rules : Array(Tuple(String, String)), method : String, path : String) : Bool
     rules.each do |rule|
       wanted = rule[0]
       next unless wanted == "*" || wanted == method || (method == "HEAD" && wanted == "GET")
@@ -82,15 +51,132 @@ pub class Handler
   end
 end
 
-# Build a chain: handlers[0].next = handlers[1], … . The last one is the
-# router. Returns the head.
+pub class Handler
+  @rules : Mutex(Rules)
+  # How many rules there are, read without the lock: a handler with none,
+  # which is most, answers `applies?` without taking it.
+  @rule_count : Atomic(Int32)
+
+  def initialize
+    @rules = Mutex.new { Rules.new }
+    @rule_count = Atomic(Int32).new(0)
+  end
+
+  pub def call(ctx : Context) : Nil
+    call_next(ctx)
+  end
+
+  pub def call_next(ctx : Context) : Nil
+    ctx.call_next
+  end
+
+  # Paths use the filter syntax: exact, `:name` segments, or a `/*` prefix.
+  # *method* "*" means every method, and a HEAD request counts as GET.
+  pub def only(paths : Array(String), method : String = "GET") : Nil
+    added = List.new(paths)
+    @rules.lock { |rules| added.each { |path| rules.only << {method, path} } }
+    @rule_count.add(paths.size)
+  end
+
+  pub def exclude(paths : Array(String), method : String = "GET") : Nil
+    added = List.new(paths)
+    @rules.lock { |rules| added.each { |path| rules.exclude << {method, path} } }
+    @rule_count.add(paths.size)
+  end
+
+  pub def only_match?(ctx : Context) : Bool
+    return false if @rule_count.get == 0
+    method = ctx.request.method
+    path = ctx.routing_path
+    answer = @rules.get { |rules| rules.any_match?(rules.only, method, path) }
+    answer.is_a?(Bool) && answer
+  end
+
+  pub def exclude_match?(ctx : Context) : Bool
+    return false if @rule_count.get == 0
+    method = ctx.request.method
+    path = ctx.routing_path
+    answer = @rules.get { |rules| rules.any_match?(rules.exclude, method, path) }
+    answer.is_a?(Bool) && answer
+  end
+
+  # Whether *ctx* is one this handler is for: no `only` rules, or one that
+  # matches, and no `exclude` rule that matches. The built-in handlers that
+  # honour the rules ask this; an `only` left empty means every request.
+  # The path is the one the router routes on (`Context#routing_path`), so
+  # a rule and a route never read one request two ways.
+  pub def applies?(ctx : Context) : Bool
+    return true if @rule_count.get == 0
+    method = ctx.request.method
+    path = ctx.routing_path
+    answer = @rules.get { |rules| rules.applies?(method, path) }
+    # Cancelled while it waited for the lock: the request is being cut
+    # off at shutdown, and nothing it does next is answered.
+    answer.is_a?(Bool) && answer
+  end
+end
+
+# A request's handlers in order, each a block over the context: a
+# `SharedProc` on a server with more than one worker, a `Proc` on one.
+# Nothing in it changes once it is made; where a request stands is the
+# request's (`Context#position`), so every worker runs one chain.
+pub class Chain(P) < Runner
+  @steps : List(P)
+
+  def initialize(steps : Array(P))
+    @steps = List.new(steps)
+  end
+
+  pub def size : Int32
+    @steps.size
+  end
+
+  pub def step(ctx : Context, index : Int32) : Nil
+    return if index >= @steps.size
+    at = ctx.position
+    ctx.position = index
+    @steps[index].call(ctx)
+    ctx.position = at
+  end
+end
+
+# A chain of handlers as one handler, for a test, `handler_chain`, or a
+# server given one handler: its first runs, and each `call_next` runs the
+# one after it.
+pub class ChainHandler < Handler
+  @chain : Chain(Proc(Context, Nil))
+
+  def initialize(handlers : Array(Handler))
+    super()
+    steps = handlers.map { |handler| ->(ctx : Context) { handler.call(ctx) } }
+    @chain = Chain(Proc(Context, Nil)).new(steps)
+  end
+
+  def initialize(steps : Array(Proc(Context, Nil)))
+    super()
+    @chain = Chain(Proc(Context, Nil)).new(steps)
+  end
+
+  pub def call(ctx : Context) : Nil
+    ctx.run(@chain)
+  end
+end
+
+# Build a chain: each handler's `call_next` runs the one after it, and the
+# last one is the router. Returns it as one handler.
 pub def chain(handlers : Array(Handler)) : Handler
   raise "handler chain is empty" if handlers.empty?
+  ChainHandler.new(handlers)
+end
 
-  index = 0
-  while index + 1 < handlers.size
-    handlers[index].next_handler = handlers[index + 1]
-    index = index + 1
-  end
-  handlers[0]
+# *handler* as a step of a chain every worker runs: iyi-web's own
+# handlers, `Share` by their fields. An application's handler is made a
+# step at its `use` line instead, so a refusal is made there.
+pub def shared_step(handler : H) : SharedProc(Context, Nil) forall H
+  SharedProc(Context, Nil).of { |ctx| handler.call(ctx) }
+end
+
+# *handler* as a step of a chain one thread runs.
+pub def serial_step(handler : H) : Proc(Context, Nil) forall H
+  ->(ctx : Context) { handler.call(ctx) }
 end

@@ -1,0 +1,23 @@
+# Refused: a handler that is not `Share`, given to Kemal's `add_handler`.
+# The refusal is at the argument on this line (iyi_web/refused_test.iyi).
+module iyi_web/refused/add_handler
+
+import iyi_web/config::{add_handler}
+import iyi_web/context::{Context}
+import iyi_web/handler::{Handler}
+
+class Counter < Handler
+  property count : Int32
+
+  def initialize
+    super()
+    @count = 0
+  end
+
+  pub def call(ctx : Context) : Nil
+    @count = @count + 1
+    call_next(ctx)
+  end
+end
+
+add_handler Counter.new

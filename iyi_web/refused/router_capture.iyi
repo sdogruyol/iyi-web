@@ -1,0 +1,13 @@
+# Refused: a `Router` route that captures a `Hash`. iyi_web/refused_test.iyi
+# checks the refusal's place and its two ways out.
+module iyi_web/refused/router_capture
+
+import iyi_web/router::{Router}
+
+hits = {} of String => Int32
+router = Router.new
+router.post "/hit/:name" do |env|
+  name = env.params.url["name"]
+  hits[name] = (hits[name]? || 0) + 1
+  hits[name].to_s
+end

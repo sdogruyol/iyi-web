@@ -34,9 +34,16 @@
 # early - must call `save_session(env)` before its first flush; a change
 # made once the headers are out cannot reach the client, and is reported
 # on the error stream instead of being lost without a word.
+#
+# Every worker opens and seals cookies with one handler, so what it keeps
+# is `Share`: the derived keys, not std/aead's `AesGcm`, whose expanded key
+# schedule sits behind a `Pointer` the compiler cannot vouch for. Each
+# open and seal expands its key again: an AES key schedule and three GHASH
+# multiplications, beside the cookie's own encryption.
 module iyi_web/session
 
 import std/aead::{AesGcm}
+import std/list::{List}
 import std/crypto::{HKDF}
 import std/digest::{SHA256}
 import std/json::{JSON, Any}
@@ -212,7 +219,7 @@ end
 # *max_age* is seconds, both the cookie's `Max-Age` and the server's own
 # limit on a cookie's age.
 pub class SessionHandler < Handler
-  @ciphers : Array(AesGcm)
+  @keys : List(List(UInt8))
   @cookie_name : String
   @max_age : Int32
   @path : String
@@ -220,7 +227,9 @@ pub class SessionHandler < Handler
   @secure : Bool
   @http_only : Bool
   @same_site : String
-  @clock : Proc(Int64)
+  # Unix seconds a test fixed the clock at, when `@fixed` is 1.
+  @fixed_now : Atomic(Int64)
+  @fixed : Atomic(Int32)
 
   def initialize(secret : String, old_secrets : Array(String) = [] of String, @cookie_name : String = "iyi_web.session", @max_age : Int32 = 14 * 86400, @path : String = "/", @domain : String = "", @secure : Bool = false, @http_only : Bool = true, @same_site : String = "Lax")
     super()
@@ -231,10 +240,11 @@ pub class SessionHandler < Handler
     end
     # Browsers drop a `SameSite=None` cookie that is not also `Secure`.
     raise "SessionHandler: same_site \"None\" needs secure: true" if @same_site == "None" && !@secure
-    @ciphers = [] of AesGcm
-    @ciphers << cipher_for(secret)
-    old_secrets.each { |old| @ciphers << cipher_for(old) }
-    @clock = -> { Time.utc.to_unix }
+    keys = [List.new(cipher_key(secret))]
+    old_secrets.each { |old| keys << List.new(cipher_key(old)) }
+    @keys = List.new(keys)
+    @fixed_now = Atomic(Int64).new(0_i64)
+    @fixed = Atomic(Int32).new(0)
   end
 
   pub def cookie_name : String
@@ -245,10 +255,20 @@ pub class SessionHandler < Handler
     @max_age
   end
 
-  # Unix seconds now. The wall clock unless replaced, which tests do to
-  # see a cookie lapse without waiting for it.
-  pub def clock=(clock : Proc(Int64)) : Proc(Int64)
-    @clock = clock
+  # Unix seconds now: the wall clock unless fixed, which tests do to see a
+  # cookie lapse without waiting for it; nil goes back to the wall clock.
+  pub def clock=(at : Int64?) : Int64?
+    if at
+      @fixed_now.set(at)
+      @fixed.set(1)
+    else
+      @fixed.set(0)
+    end
+    at
+  end
+
+  private def now : Int64
+    @fixed.get == 1 ? @fixed_now.get : Time.utc.to_unix
   end
 
   pub def call(ctx : Context) : Nil
@@ -274,7 +294,7 @@ pub class SessionHandler < Handler
       session.written(0_i64, false)
       return
     end
-    now = @clock.call
+    now = self.now
     issued = session.rekey_only? ? session.issued_at : now
     value = seal(session, issued)
     size = @cookie_name.bytesize + 1 + value.bytesize
@@ -296,8 +316,8 @@ pub class SessionHandler < Handler
     sealed = bytes[1 + NONCE_SIZE, bytes.bytesize - 1 - NONCE_SIZE]
     aad = additional_data
     index = 0
-    while index < @ciphers.size
-      plain = @ciphers[index].open(nonce, sealed, aad)
+    while index < @keys.size
+      plain = AesGcm.new(@keys[index].to_a).open(nonce, sealed, aad)
       if plain.is_a?(String)
         return parse(plain, index > 0)
       end
@@ -314,7 +334,7 @@ pub class SessionHandler < Handler
     envelope["exp"] = Any.new(issued_at + @max_age.to_i64)
     envelope["data"] = Any.new(session.data)
     nonce = random_bytes(NONCE_SIZE)
-    sealed = @ciphers[0].seal(nonce, JSON.to_json(envelope), additional_data)
+    sealed = AesGcm.new(@keys[0].to_a).seal(nonce, JSON.to_json(envelope), additional_data)
     encode_base64url(COOKIE_VERSION + nonce + sealed)
   end
 
@@ -337,7 +357,7 @@ pub class SessionHandler < Handler
     held = fields["data"]?
     data = held ? held.as_h? : nil
     return Session.empty(self, true) unless id && issued && expires && data
-    now = @clock.call
+    now = self.now
     return Session.empty(self, true) if now >= expires || now >= issued + @max_age.to_i64
     Session.new(self, data, id, issued, true, rekey)
   end
@@ -356,11 +376,11 @@ pub class SessionHandler < Handler
     value ? value.as_i64? : nil
   end
 
-  private def cipher_for(secret : String) : AesGcm
+  private def cipher_key(secret : String) : Array(UInt8)
     if secret.bytesize < MIN_SECRET_SIZE
       raise "SessionHandler: a secret must be at least #{MIN_SECRET_SIZE} bytes, not #{secret.bytesize}: use 32 random bytes or more, such as `Random::Secure.hex(32)`"
     end
-    AesGcm.new(HKDF.derive(SHA256, secret, "iyi_web/session", "AES-256-GCM cookie key", 32))
+    HKDF.derive(SHA256, secret, "iyi_web/session", "AES-256-GCM cookie key", 32)
   end
 end
 

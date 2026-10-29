@@ -1,0 +1,63 @@
+# A block an application gave iyi-web to keep - a route, a filter, an
+# error page, a WebSocket endpoint, a handler, a logger - as one of two
+# things, and the reason there are two.
+#
+# A server with more than one worker runs every connection as a parallel
+# task (SPEC.md III.4.13), so a kept block may run on several cores at
+# once. A `Proc` cannot say what it captured, and is never `Share`; a
+# `SharedProc` can only be made from a block the compiler checked where it
+# was written (`SharedProc.of`, a `@[Share]` def). Every registration is
+# such a def, so a route that captures an `Array`, or assigns a local it
+# captured, is refused where it is written, naming the variable.
+#
+# The way past the refusal, besides a `Mutex` or an `Atomic`, is
+# `workers: 1` on the registration, which the refusal names too: each
+# registration is marked `@[Share(serial: workers)]`, so a call passing
+# the literal 1 is not checked, and its block is kept as the `Proc` it
+# is. An application holding one is served on one thread, as every
+# iyi-web application was before 0.5.0 (`serial_reason`).
+module iyi_web/kept
+
+import std/shared_proc::{SharedProc}
+
+pub struct Kept(A, R)
+  @block : SharedProc(A, R) | Proc(A, R)
+  # Where it was registered, for the line that says why a server runs on
+  # one thread: `GET /counter`, `use Counter`.
+  @label : String
+
+  def initialize(@block : SharedProc(A, R) | Proc(A, R), @label : String = "")
+  end
+
+  pub def label : String
+    @label
+  end
+
+  # The block as a server on one thread calls it.
+  pub def serial : Proc(A, R)
+    block = @block
+    return block if block.is_a?(Proc(A, R))
+    ->(argument : A) { block.call(argument) }
+  end
+
+  # The block as every worker may call it; nil for one registered with
+  # `workers: 1`, which nothing checked.
+  pub def shared : SharedProc(A, R)?
+    block = @block
+    block.is_a?(SharedProc(A, R)) ? block : nil
+  end
+
+  pub def shared? : Bool
+    @block.is_a?(SharedProc(A, R))
+  end
+end
+
+# Whether a registration given *workers* keeps its block for one thread:
+# `workers: 1`. Left out, the block was checked and is kept for every
+# worker. A registration takes no other count - the server's is the
+# application's (`workers`, `-w`) - so another one panics, naming *what*.
+pub def kept_serial?(workers : Int32?, what : String) : Bool
+  return false unless workers
+  raise "#{what}: workers: #{workers} - a registration takes only workers: 1, which keeps its block on one thread; leave it out to have the block checked and served on every worker" unless workers == 1
+  true
+end
