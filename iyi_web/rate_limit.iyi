@@ -36,17 +36,21 @@
 # period is therefore not limited per address; size `max_keys` for the
 # clients one period sees.
 #
-# The counters are this handler's alone and need no lock: a server's
-# connection tasks share one thread, switching only where one parks on a
-# socket or a sleep (SPEC.md III.4), and nothing between reading a key's
-# count and writing it back parks.
+# The counters are one table every worker counts in, behind a `Mutex`: a
+# request takes the lock once, to expire what has ended and count itself,
+# and leaves with the numbers its headers say. Before workers the table
+# needed no lock, since a server's connection tasks shared one thread and
+# nothing between reading a count and writing it back parked; on every
+# core two requests from one client read the same count.
 #
-# The clock is a block answering milliseconds, monotonic by default; a test
-# hands it one it moves itself.
+# The clock is a `SharedProc` answering milliseconds, monotonic by
+# default; a test hands it one over an `Atomic` it moves itself.
 #
 # Not in the default stack: `use RateLimitHandler.new(limit: 60, period: 60)`.
 module iyi_web/rate_limit
 
+import std/mutex::{Mutex}
+import std/shared_proc::{SharedProc}
 import std/time::{Time}
 import iyi_web/handler::{Handler}
 import iyi_web/context::{Context}
@@ -62,28 +66,71 @@ class RateWindow
   end
 end
 
+# The windows, by key, in the order they opened; only ever reached under
+# the handler's lock.
+class RateTable
+  @windows : Hash(String, RateWindow)
+
+  def initialize
+    @windows = {} of String => RateWindow
+  end
+
+  def size : Int32
+    @windows.size
+  end
+
+  # Counts a request for *key* at *now*: the key's count afterwards, and
+  # the milliseconds its window has left.
+  def count(key : String, now : Int64, limit : Int32, period_ms : Int64, max_keys : Int32) : Tuple(Int32, Int64)
+    expire(now, period_ms)
+    window = window_for(key, now, max_keys)
+    window.count = window.count + 1 if window.count <= limit
+    {window.count, window.opened + period_ms - now}
+  end
+
+  # The key's open window, or a new one at the back of the table. A window
+  # that has ended was already dropped by `expire`.
+  private def window_for(key : String, now : Int64, max_keys : Int32) : RateWindow
+    if current = @windows[key]?
+      return current
+    end
+    @windows.shift if @windows.size >= max_keys
+    created = RateWindow.new(now)
+    @windows[key] = created
+    created
+  end
+
+  # Windows open in the order they were added, so every one that has ended
+  # is at the front.
+  private def expire(now : Int64, period_ms : Int64) : Nil
+    while key = @windows.first_key?
+      window = @windows[key]
+      break if now - window.opened < period_ms
+      @windows.delete(key)
+    end
+  end
+end
+
 pub class RateLimitHandler < Handler
   @limit : Int32
   @period_ms : Int64
   @max_keys : Int32
-  @clock : Proc(Int64)
-  @key : Proc(Context, String?)?
-  @windows : Hash(String, RateWindow)
+  @clock : SharedProc(Nil, Int64)
+  @key : SharedProc(Context, String?)?
+  @windows : Mutex(RateTable)
 
-  # Keyed by the client's address.
-  def initialize(@limit : Int32 = 60, period : Int32 = 60, @max_keys : Int32 = 10000, @clock : Proc(Int64) = ->{ monotonic_ms })
+  # Keyed by the client's address, or by what *key* answers.
+  def initialize(@limit : Int32 = 60, period : Int32 = 60, @max_keys : Int32 = 10000, @clock : SharedProc(Nil, Int64) = SharedProc(Nil, Int64).of { |_| monotonic_ms }, @key : SharedProc(Context, String?)? = nil)
     super()
     @period_ms = checked_period(@limit, period, @max_keys)
-    @key = nil
-    @windows = {} of String => RateWindow
+    @windows = Mutex.new { RateTable.new }
   end
 
-  # Keyed by what the block answers; nil is a request left unlimited.
-  def initialize(@limit : Int32 = 60, period : Int32 = 60, @max_keys : Int32 = 10000, @clock : Proc(Int64) = ->{ monotonic_ms }, &key : Context -> String?)
-    super()
-    @period_ms = checked_period(@limit, period, @max_keys)
-    @key = key
-    @windows = {} of String => RateWindow
+  # Keyed by what the block answers; nil is a request left unlimited. The
+  # block runs on every worker, and is checked where it is written.
+  @[Share]
+  def self.new(limit : Int32 = 60, period : Int32 = 60, max_keys : Int32 = 10000, clock : SharedProc(Nil, Int64) = SharedProc(Nil, Int64).of { |_| monotonic_ms }, &key : Context -> String?) : RateLimitHandler
+    new(limit, period, max_keys, clock, SharedProc(Context, String?).of { |ctx| key.call(ctx) })
   end
 
   pub def limit : Int32
@@ -92,7 +139,8 @@ pub class RateLimitHandler < Handler
 
   # Keys with a window currently held.
   pub def tracked : Int32
-    @windows.size
+    held = @windows.get { |table| table.size }
+    held.is_a?(Int32) ? held : 0
   end
 
   pub def call(ctx : Context) : Nil
@@ -100,17 +148,21 @@ pub class RateLimitHandler < Handler
     key = key_of(ctx)
     return call_next(ctx) unless key
 
-    now = @clock.call
-    expire(now)
-    window = window_for(key, now)
-    window.count = window.count + 1 if window.count <= @limit
+    now = @clock.call(nil)
+    limit = @limit
+    period_ms = @period_ms
+    max_keys = @max_keys
+    counted = @windows.get { |table| table.count(key, now, limit, period_ms, max_keys) }
+    # Cancelled while it waited for the lock: cut off at shutdown.
+    return unless counted.is_a?(Tuple(Int32, Int64))
+    count = counted[0]
 
     headers = ctx.response.headers
-    reset = seconds_left(window, now)
+    reset = seconds_left(counted[1])
     headers["RateLimit-Limit"] = @limit.to_s
-    headers["RateLimit-Remaining"] = (window.count >= @limit ? 0 : @limit - window.count).to_s
+    headers["RateLimit-Remaining"] = (count >= @limit ? 0 : @limit - count).to_s
     headers["RateLimit-Reset"] = reset.to_s
-    if window.count > @limit
+    if count > @limit
       headers["Retry-After"] = reset.to_s
       ctx.response.content_type = "text/plain; charset=utf-8"
       ctx.halt(429, "Too Many Requests")
@@ -135,32 +187,10 @@ pub class RateLimitHandler < Handler
     period.to_i64 * 1000_i64
   end
 
-  # The key's open window, or a new one at the back of the table. A window
-  # that has ended was already dropped by `expire`.
-  private def window_for(key : String, now : Int64) : RateWindow
-    if current = @windows[key]?
-      return current
-    end
-    @windows.shift if @windows.size >= @max_keys
-    created = RateWindow.new(now)
-    @windows[key] = created
-    created
-  end
-
-  # Windows open in the order they were added, so every one that has ended
-  # is at the front.
-  private def expire(now : Int64) : Nil
-    while key = @windows.first_key?
-      window = @windows[key]
-      break if now - window.opened < @period_ms
-      @windows.delete(key)
-    end
-  end
-
-  # Whole seconds until *window* ends, rounded up and at least 1, so a
-  # client that waits that long is never told to wait again.
-  private def seconds_left(window : RateWindow, now : Int64) : Int64
-    left = window.opened + @period_ms - now
+  # Whole seconds until a window with *left* milliseconds ends, rounded up
+  # and at least 1, so a client that waits that long is never told to
+  # wait again.
+  private def seconds_left(left : Int64) : Int64
     seconds = (left + 999_i64) // 1000_i64
     seconds < 1_i64 ? 1_i64 : seconds
   end

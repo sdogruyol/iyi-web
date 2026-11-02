@@ -1,0 +1,154 @@
+# Requests on every core, over real sockets: two slow requests on two
+# connections run at the same time, on two threads, when the server has
+# workers, and one after the other, on the thread that accepts, when it
+# has one. The slow route computes rather than sleeps - a sleep parks, and
+# two parked requests overlap on one thread too - so only a second core
+# lets them overlap.
+module iyi_web/parallel_test
+
+import std/socket::{IyiSocket}
+import std/time::{Time, Span}
+import iyi_web/router::{Router}
+import iyi_web/server::{Server}
+import iyi_web/config::{Config}
+import iyi_web/app::{build_server, serial_reason}
+import iyi_web/harness::*
+import iyi_web/spec::*
+
+# Milliseconds on the monotonic clock, which every thread reads alike.
+def now_ms : Int64
+  now = Time.monotonic
+  now.total_seconds_i64 * 1000_i64 + (now.nanoseconds // 1000000).to_i64
+end
+
+# Computes for *ms* milliseconds without parking: a xorshift walk, the
+# clock read every 4096 turns.
+def spin(ms : Int64) : UInt64
+  deadline = now_ms + ms
+  x = 88172645463325252_u64
+  turns = 0
+  while true
+    x = x ^ (x << 13)
+    x = x ^ (x >> 7)
+    x = x ^ (x << 17)
+    turns = turns + 1
+    break if turns % 4096 == 0 && now_ms >= deadline
+  end
+  x
+end
+
+router = Router.new
+# The thread it ran on, and when it started and ended.
+router.get "/spin" do |env|
+  line = IyiThread.current_line
+  started = now_ms
+  spin(300_i64)
+  "#{line} #{started} #{now_ms}"
+end
+router.get "/" do |env|
+  "home"
+end
+
+def quiet(workers : Int32) : Config
+  cfg = Config.new
+  cfg.logging = false
+  cfg.serve_static = false
+  cfg.workers = workers
+  cfg
+end
+
+# One request on a connection of its own; the body.
+def fetch(port : Int32, path : String) : String
+  client = IyiSocket.connect("127.0.0.1", port).or_panic
+  client.write("GET #{path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").or_panic
+  buffer = ""
+  loop do
+    chunk = client.read(65536).or_panic
+    break if chunk.empty?
+    buffer = buffer + chunk
+  end
+  client.close
+  http_body(buffer)
+end
+
+# Two `/spin` requests at once, each on its own connection: their bodies.
+def two_at_once(server : Server) : Array(String)
+  port = server.bound_port
+  bodies = [] of String
+  group do |g|
+    g.spawn do
+      server.listen
+      0
+    end
+    g.spawn do
+      group do |clients|
+        first = clients.spawn { fetch(port, "/spin") }
+        second = clients.spawn { fetch(port, "/spin") }
+        bodies << first.value.as(String)
+        bodies << second.value.as(String)
+        0
+      end
+      server.shutdown(0)
+      0
+    end
+  end
+  bodies
+end
+
+# Thread, start and end of a `/spin` body.
+def spun(body : String) : Tuple(String, Int64, Int64)
+  parts = body.split(' ')
+  {parts[0], parts[1].to_i64, parts[2].to_i64}
+end
+
+describe "A server with workers" do
+  it "runs two slow requests at once, on two threads" do
+    server = build_server(router, quiet(2))
+    assert server.workers == 2
+    server.bind("127.0.0.1", 0)
+    bodies = two_at_once(server)
+    a = spun(bodies[0])
+    b = spun(bodies[1])
+    assert a[0] != b[0]
+    # Each began before the other ended.
+    assert a[1] < b[2] && b[1] < a[2]
+  end
+end
+
+describe "A server with one worker" do
+  it "runs two slow requests one after the other, on the thread that accepts" do
+    server = build_server(router, quiet(1))
+    assert server.workers == 1
+    server.bind("127.0.0.1", 0)
+    bodies = two_at_once(server)
+    a = spun(bodies[0])
+    b = spun(bodies[1])
+    assert a[0] == b[0]
+    assert a[2] <= b[1] || b[2] <= a[1]
+  end
+
+  it "is what a block registered with workers: 1 asks for" do
+    pinned = Router.new
+    pinned.get "/" do |env|
+      "home"
+    end
+    seen = [] of String
+    pinned.get "/seen", workers: 1 do |env|
+      seen << env.request.path
+      seen.size.to_s
+    end
+    cfg = quiet(4)
+    assert serial_reason(pinned, cfg) == "GET /seen"
+    assert build_server(pinned, cfg).workers == 1
+    assert serial_reason(router, cfg).nil?
+  end
+
+  it "refuses any other count on a registration" do
+    other = Router.new
+    assert panics? {
+      other.get "/x", workers: 2 do |env|
+        "x"
+      end
+    }
+  end
+end

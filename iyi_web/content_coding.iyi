@@ -13,6 +13,7 @@
 module iyi_web/content_coding
 
 import std/compress::{Gzip, Zlib}
+import std/list::{List}
 import std/mime::{MIME}
 import std/text
 import iyi_web/headers::{Headers}
@@ -21,14 +22,15 @@ import iyi_web/headers::{Headers}
 pub COMPRESS_MIN_SIZE = 860
 
 # The codings this module can produce, most preferred first: the order
-# breaks ties between codings the client likes equally.
-CONTENT_CODINGS = ["gzip", "deflate"]
+# breaks ties between codings the client likes equally. A `List`, since
+# every worker negotiates and only reads it (SPEC.md III.4.4).
+CONTENT_CODINGS = List.new(["gzip", "deflate"])
 
 # The coding to apply for a request whose `Accept-Encoding` is *accept*,
 # chosen among *available*: `"gzip"`, `"deflate"`, or nil when the body
 # should go out unencoded, whether because the client prefers `identity`,
 # refused every coding, or sent a field value that names none of them.
-pub def select_content_coding(accept : String, available : Array(String) = CONTENT_CODINGS) : String?
+pub def select_content_coding(accept : String, available : List(String) = CONTENT_CODINGS) : String?
   codings = parse_accept_encoding(accept)
   wildcard = codings["*"]?
 

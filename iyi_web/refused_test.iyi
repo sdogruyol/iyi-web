@@ -1,0 +1,116 @@
+# What the compiler says to an application whose blocks or handlers may
+# not run on every worker: each program in iyi_web/refused is checked with
+# `iyi check -f json`, and the refusal must stand on the application's
+# own line - the capture, or the argument given to `use` - not inside
+# iyi_web, and name both ways past it, a lock and `workers: 1`.
+# `serial.iyi`, every one of those registrations with `workers: 1`, must
+# compile with no error and no warning: the harness can tell a refusal
+# from a program that compiles.
+#
+# The compiler is `iyi` on the `PATH`, or the one `IYI` names.
+module iyi_web/refused_test
+
+import std/json::{JSON, Any}
+import std/process::{Process, ProcessResult}
+import iyi_web/spec::*
+
+# A frame of `iyi check -f json`'s report: where, and what.
+struct Frame
+  getter file : String
+  getter line : Int32
+  getter column : Int32
+  getter message : String
+  getter severity : String
+
+  def initialize(@file : String, @line : Int32, @column : Int32, @message : String, @severity : String)
+  end
+end
+
+# The frames `iyi check -f json` reports for *program*, a file in
+# iyi_web/refused, and whether the check passed.
+def check(program : String) : {Bool, Array(Frame)}
+  compiler = Program.env("IYI") || "iyi"
+  ran = Process.run(compiler, ["check", "-f", "json", __DIR__ + "/refused/" + program])
+  raise "#{compiler} did not start: #{ran.inspect}" unless ran.is_a?(ProcessResult)
+  frames = [] of Frame
+  text = ran.stderr.strip
+  unless text.empty?
+    parsed = JSON.parse?(text)
+    list = parsed ? parsed.as_a? : nil
+    raise "iyi check #{program}: not a JSON report: #{text}" unless list
+    list.each do |entry|
+      fields = entry.as_h
+      file = fields["file"]?
+      line = fields["line"]?
+      column = fields["column"]?
+      severity = fields["severity"]?
+      frames << Frame.new(file ? file.as_s? || "" : "", line ? line.as_i? || 0 : 0, column ? column.as_i? || 0 : 0, fields["message"].as_s, severity ? severity.as_s? || "error" : "error")
+    end
+  end
+  {ran.success?, frames}
+end
+
+# The refusal *program* is checked with: the first frame that is not a
+# step of the instantiation trace, nor a warning.
+def refusal(program : String) : Frame
+  result = check(program)
+  raise "iyi check #{program} passed" if result[0]
+  result[1].each do |frame|
+    next if frame.severity == "warning" || frame.message.starts_with?("instantiating")
+    return frame
+  end
+  raise "iyi check #{program} failed with no error frame"
+end
+
+# Whether *frame* is at *line* and *column* of *program*, in iyi_web/refused.
+def at?(frame : Frame, program : String, line : Int32, column : Int32) : Bool
+  frame.file.ends_with?(program) && frame.line == line && frame.column == column
+end
+
+describe "A block or handler that may not run on every worker" do
+  it "is refused at the route's capture, naming a lock and workers: 1" do
+    frame = refusal("route_capture.iyi")
+    assert at?(frame, "route_capture.iyi", 9, 3)
+    assert frame.message == "the block Dsl.get keeps, which may run on other threads captures `seen : Array(String)`, which is not Share: Array(String)'s field @size is assigned in `append`. Put it behind a lock, a `Mutex(Array(String))` (std/mutex), or pass `workers: 1` so the block runs on one thread (SPEC.md III.4.4)"
+  end
+
+  it "is refused at a Router route's capture, naming the method" do
+    frame = refusal("router_capture.iyi")
+    assert at?(frame, "router_capture.iyi", 11, 3)
+    assert frame.message.starts_with?("the block Router#post keeps, which may run on other threads captures `hits : Hash(String, Int32)`, which is not Share: ")
+    assert frame.message.ends_with?("Put it behind a lock, a `Mutex(Hash(String, Int32))` (std/mutex), or pass `workers: 1` so the block runs on one thread (SPEC.md III.4.4)")
+  end
+
+  it "is refused at the argument given to use, not inside iyi_web" do
+    frame = refusal("use_handler.iyi")
+    assert at?(frame, "use_handler.iyi", 23, 13)
+    assert frame.message == "Dsl.use hands `handler : IyiWeb::Refused::UseHandler::Counter` to other threads, several at once, and it is not Share: IyiWeb::Refused::UseHandler::Counter's field @count is given a setter `count=`. Keep what it changes in an `Atomic` or behind a `Mutex` (std/mutex), or pass `workers: 1` so it stays on one thread (SPEC.md III.4.4)"
+  end
+
+  it "is refused at the argument given to Kemal's add_handler" do
+    frame = refusal("add_handler.iyi")
+    assert at?(frame, "add_handler.iyi", 23, 21)
+    assert frame.message.starts_with?("Config.add_handler hands `handler : IyiWeb::Refused::AddHandler::Counter` to other threads, several at once, and it is not Share: ")
+    assert frame.message.ends_with?("Keep what it changes in an `Atomic` or behind a `Mutex` (std/mutex), or give it with `use handler, workers: 1` so it stays on one thread (SPEC.md III.4.4)")
+  end
+
+  it "is refused at the logger given, naming its field" do
+    frame = refusal("logger_value.iyi")
+    assert at?(frame, "logger_value.iyi", 20, 18)
+    assert frame.message.starts_with?("Dsl.logger hands `value : IyiWeb::Refused::LoggerValue::Collected` to other threads, several at once, and it is not Share: ")
+    assert frame.message.ends_with?("Keep its lines behind a `Mutex` (std/mutex), or pass `workers: 1` so it stays on one thread (SPEC.md III.4.4)")
+  end
+
+  it "is refused at a logger assigned to config.logger, which has no workers:" do
+    frame = refusal("config_logger.iyi")
+    assert at?(frame, "config_logger.iyi", 20, 27)
+    assert frame.message.starts_with?("Config#logger= hands `value : IyiWeb::Refused::ConfigLogger::Collected` to other threads, several at once, and it is not Share: ")
+    assert frame.message.ends_with?("Keep its lines behind a `Mutex` (std/mutex), or give it with `logger value, workers: 1` so it stays on one thread (SPEC.md III.4.4)")
+  end
+
+  it "compiles, with no warning, given workers: 1 on every registration" do
+    result = check("serial.iyi")
+    said = result[1].map { |frame| frame.file + ":" + frame.line.to_s + ": " + frame.message }
+    raise "iyi check serial.iyi: " + said.join("\n") unless result[0] && said.empty?
+  end
+end

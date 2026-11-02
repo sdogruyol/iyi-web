@@ -5,6 +5,8 @@ module iyi_web/static_test
 
 import std/file::{File}
 import std/compress::{Gzip, Zlib, Inflater, Envelope}
+import std/mutex::{Mutex}
+import std/shared_proc::{SharedProc}
 import iyi_web/static::{StaticHandler}
 import iyi_web/handler::{chain}
 import iyi_web/context::{Context}
@@ -367,10 +369,11 @@ describe "StaticHandler" do
   end
 
   it "calls the headers hook with the served file" do
-    seen = [] of String
-    hook = ->(env : Context, path : String, info : File::Info) do
-      seen << path
-      env.response.headers["Cache-Control"] = "max-age=" + info.size.to_s
+    seen = Mutex.new { [] of String }
+    hook = SharedProc({Context, String, File::Info}, Nil).of do |args|
+      path = args[1]
+      seen.lock { |paths| paths << path }
+      args[0].response.headers["Cache-Control"] = "max-age=" + args[2].size.to_s
       nil
     end
     app = chain([StaticHandler.new(ROOT, headers_hook: hook), routes { |r|
@@ -379,7 +382,7 @@ describe "StaticHandler" do
       end
     }])
     ctx = dispatch(app, "GET", "/hello.txt")
-    assert seen == [ROOT + "/hello.txt"]
+    assert seen.get { |paths| paths.join(",") } == ROOT + "/hello.txt"
     assert ctx.response.headers["cache-control"] == "max-age=12"
   end
 end

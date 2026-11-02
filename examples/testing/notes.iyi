@@ -3,22 +3,26 @@
 # test (examples/testing_test.iyi) sends it requests in-process.
 module examples/testing/notes
 
+import std/list::{List}
+import std/mutex::{Mutex}
 import iyi_web/router::{Router}
 
 # Every call builds a new router with its own empty list of notes, so each
-# test starts from a clean application.
+# test starts from a clean application. The list is behind a lock, since
+# the routes run on every core at once.
 pub def notes_routes : Router
-  notes = [] of String
+  notes = Mutex.new { [] of String }
   router = Router.new
 
   router.get "/notes" do |env|
-    env.json(notes)
+    env.json(notes.get { |list| List.new(list) }.or_panic.to_a)
   end
 
   router.get "/notes/:index" do |env|
     index = env.params.url["index"].to_i? || -1
-    if index >= 0 && index < notes.size
-      env.text(notes[index])
+    note = notes.get { |list| index >= 0 && index < list.size ? list[index] : nil }.or_panic
+    if note
+      env.text(note)
     else
       env.halt(404, "No such note")
     end
@@ -29,8 +33,8 @@ pub def notes_routes : Router
     if text.empty?
       env.halt(422, "A note needs text")
     else
-      notes << text
-      env.status(201).text("Note " + (notes.size - 1).to_s)
+      count = notes.get { |list| list << text; list.size }.or_panic
+      env.status(201).text("Note " + (count - 1).to_s)
     end
   end
 

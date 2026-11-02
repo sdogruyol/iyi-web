@@ -29,12 +29,13 @@
 # this handler at the front: `use SecurityHeadersHandler.new, 0`.
 module iyi_web/security_headers
 
+import std/list::{List}
 import iyi_web/handler::{Handler}
 import iyi_web/context::{Context}
 import iyi_web/headers::{Headers}
 
 pub class SecurityHeadersHandler < Handler
-  @always : Array(Tuple(String, String))
+  @always : List(Tuple(String, String))
   @hsts : String?
 
   def initialize(content_type_options : String? = "nosniff",
@@ -44,12 +45,13 @@ pub class SecurityHeadersHandler < Handler
                  content_security_policy : String? = nil,
                  strict_transport_security : String? = nil)
     super()
-    @always = [] of Tuple(String, String)
-    keep("X-Content-Type-Options", content_type_options)
-    keep("X-Frame-Options", frame_options)
-    keep("Referrer-Policy", referrer_policy)
-    keep("Cross-Origin-Opener-Policy", cross_origin_opener_policy)
-    keep("Content-Security-Policy", content_security_policy)
+    always = [] of Tuple(String, String)
+    keep(always, "X-Content-Type-Options", content_type_options)
+    keep(always, "X-Frame-Options", frame_options)
+    keep(always, "Referrer-Policy", referrer_policy)
+    keep(always, "Cross-Origin-Opener-Policy", cross_origin_opener_policy)
+    keep(always, "Content-Security-Policy", content_security_policy)
+    @always = List.new(always)
     if hsts = strict_transport_security
       checked("Strict-Transport-Security", hsts)
     end
@@ -58,7 +60,7 @@ pub class SecurityHeadersHandler < Handler
 
   # The headers every response gets, in the order they are written.
   pub def headers : Array(Tuple(String, String))
-    @always
+    @always.to_a
   end
 
   pub def call(ctx : Context) : Nil
@@ -77,10 +79,10 @@ pub class SecurityHeadersHandler < Handler
     !proto.nil? && proto.strip.downcase == "https"
   end
 
-  private def keep(name : String, value : String?) : Nil
+  private def keep(always : Array(Tuple(String, String)), name : String, value : String?) : Nil
     if value
       checked(name, value)
-      @always << {name, value}
+      always << {name, value}
     end
   end
 

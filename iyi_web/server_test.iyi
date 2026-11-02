@@ -4,6 +4,8 @@
 # `accept` and the group ends.
 module iyi_web/server_test
 
+import std/list::{List}
+import std/mutex::{Mutex}
 import std/socket::{IyiSocket}
 import std/http::{HTTP}
 import iyi_web/router::{Router, RouteHandler}
@@ -41,15 +43,21 @@ def read_frame(client : IyiSocket) : String
   size && size <= buffer.bytesize ? buffer[0, size] : buffer
 end
 
+# A logger every worker may write through: its lines behind a lock.
 class Collected < Logger
-  property lines : Array(String)
+  @lines : Mutex(Array(String))
 
   def initialize
-    @lines = [] of String
+    @lines = Mutex.new { [] of String }
   end
 
   pub def write(message : String) : Nil
-    @lines << message
+    @lines.lock { |lines| lines << message }
+  end
+
+  def lines : List(String)
+    held = @lines.get { |lines| List.new(lines) }
+    held.is_a?(List(String)) ? held : List.new([] of String)
   end
 end
 

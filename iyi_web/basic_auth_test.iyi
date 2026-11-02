@@ -3,6 +3,7 @@
 module iyi_web/basic_auth_test
 
 import std/base64::{Base64}
+import std/mutex::{Mutex}
 import iyi_web/basic_auth::{BasicAuthHandler, basic_credentials}
 import iyi_web/handler::{Handler, chain}
 import iyi_web/request::{Request}
@@ -78,9 +79,11 @@ describe "BasicAuthHandler" do
   end
 
   it "asks the verifier block when given one" do
-    seen = [] of String
+    # The block runs on every worker, so what it collects is behind a lock.
+    seen = Mutex.new { [] of String }
     handler = guarded(BasicAuthHandler.new(realm: "API") { |user, password|
-      seen << user + "/" + password
+      line = user + "/" + password
+      seen.lock { |lines| lines << line }
       user == "ada" && password == "lovelace"
     })
     ok = dispatch(handler, authorized("/admin", basic("ada:lovelace")))
@@ -88,7 +91,7 @@ describe "BasicAuthHandler" do
     bad = dispatch(handler, authorized("/admin", basic("ada:babbage")))
     assert bad.response.status_code == 401
     assert bad.response.headers["WWW-Authenticate"] == "Basic realm=\"API\", charset=\"UTF-8\""
-    assert seen == ["ada/lovelace", "ada/babbage"]
+    assert seen.get { |lines| lines.join(",") } == "ada/lovelace,ada/babbage"
   end
 
   it "guards only the paths it is for" do

@@ -31,7 +31,7 @@ pub class CLIParser
     @finishers = [] of Proc(String?)
   end
 
-  # `on "-w COUNT", "--workers COUNT", "Worker count" { |value| ... }`.
+  # `on "-j COUNT", "--jobs COUNT", "Job count" { |value| ... }`.
   pub def on(short : String, long : String, description : String, &block : String -> Nil) : Nil
     add(short, long, description, ->(value : String) { block.call(value); nil.as(String?) })
   end
@@ -147,11 +147,12 @@ pub class CLIParser
   end
 end
 
-# The flags every application understands: `-b/--bind`, `-p/--port`, and
-# Kemal's TLS flags: `-s/--ssl` serves HTTPS under the key and certificate
-# `--ssl-key-file` and `--ssl-cert-file` name, PEM files: the certificate
-# chain leaf first, the key PKCS #8 (Ed25519, P-256, or RSA of 2048 bits
-# or more). The two file flags do nothing without `-s`, as in Kemal.
+# The flags every application understands: `-b/--bind`, `-p/--port`,
+# `-w/--workers`, and Kemal's TLS flags: `-s/--ssl` serves HTTPS under the
+# key and certificate `--ssl-key-file` and `--ssl-cert-file` name, PEM
+# files: the certificate chain leaf first, the key PKCS #8 (Ed25519,
+# P-256, or RSA of 2048 bits or more). The two file flags do nothing
+# without `-s`, as in Kemal.
 pub def cli_parser(config : Config) : CLIParser
   parser = CLIParser.new
   parser.on_checked("-b HOST", "--bind HOST", "Host to bind (defaults to 0.0.0.0)") do |value|
@@ -165,6 +166,15 @@ pub def cli_parser(config : Config) : CLIParser
       nil
     else
       "Invalid port \"" + value + "\": must be an integer between 0 and 65535."
+    end
+  end
+  parser.on_checked("-w WORKERS", "--workers WORKERS", "Threads serving requests (defaults to one per core; 1 serves on one thread)") do |value|
+    count = value.strip == value ? value.to_i? : nil
+    if count && count >= 1
+      config.workers = count
+      nil
+    else
+      "Invalid workers \"" + value + "\": must be a whole number, 1 or more."
     end
   end
   tls = TlsFlags.new

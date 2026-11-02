@@ -72,10 +72,14 @@ struct NoteList
   end
 end
 
-# Kept in memory for as long as the program runs.
+# Kept in memory for as long as the program runs: a bare `Array` of
+# `Note`s, whose tags are an `Array` too. Neither may be shared between
+# workers, so the routes that reach it are registered with `workers: 1`,
+# and the program serves on one thread; `examples/json_api.iyi` keeps its
+# store behind a `Mutex` instead and serves on every core.
 NOTES = [] of Note
 
-post "/notes" do |env|
+post "/notes", workers: 1 do |env|
   # `NoteInput | BodyError`: the error goes back as the route's value and
   # is answered with its status, 400, 415 or 422.
   case input = env.params.json_as(NoteInput)
@@ -88,13 +92,13 @@ post "/notes" do |env|
   end
 end
 
-get "/notes" do |env|
+get "/notes", workers: 1 do |env|
   env.json(NoteList.new(NOTES))
 end
 
 # A `StatusError` returned is answered with its status: here the 404 page
 # below.
-get "/notes/:id" do |env|
+get "/notes/:id", workers: 1 do |env|
   id = env.params.url["id"].to_i? || 0
   note = id > 0 ? NOTES[id - 1]? : nil
   if note

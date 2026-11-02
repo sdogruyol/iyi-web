@@ -1,8 +1,11 @@
 # Process-wide config is one object, not a pile of class variables.
 module iyi_web/config_test
 
+import std/file::{File}
 import iyi_web/config::*
+import iyi_web/context::{Context}
 import iyi_web/handler::{Handler}
+import iyi_web/kept::{Kept}
 import iyi_web/spec::*
 
 import iyi_web/config::{Config}
@@ -53,6 +56,17 @@ describe "Config" do
     fresh = Config.new
     fresh.add_handler(Handler.new)
     assert fresh.custom_handlers.size == 1
+    assert fresh.serial_label.nil?
+  end
+
+  it "says which step registered with workers: 1 keeps it on one thread" do
+    fresh = Config.new
+    fresh.add_step(KeptStep.new(->(ctx : Context) { ctx.call_next }, "use Counter"), 0)
+    assert fresh.serial_label == "use Counter"
+
+    hooked = Config.new
+    hooked.static_headers = KeptStaticHeaders.new(->(args : {Context, String, File::Info}) { nil }, "static_headers")
+    assert hooked.serial_label == "static_headers"
   end
 
   it "is the process singleton behind config()" do

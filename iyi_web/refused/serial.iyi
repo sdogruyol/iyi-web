@@ -1,0 +1,66 @@
+# Accepted: every registration the other programs here are refused for,
+# with `workers: 1`, which keeps each unchecked and the application on one
+# thread. iyi_web/refused_test.iyi checks it compiles with no warning, so
+# the harness tells a refusal from a program that compiles.
+module iyi_web/refused/serial
+
+import iyi_web/dsl::*
+import iyi_web/context::{Context}
+import iyi_web/handler::{Handler}
+import iyi_web/log::{Logger}
+
+class Counter < Handler
+  property count : Int32
+
+  def initialize
+    super()
+    @count = 0
+  end
+
+  pub def call(ctx : Context) : Nil
+    @count = @count + 1
+    call_next(ctx)
+  end
+end
+
+class Collected < Logger
+  @lines : Array(String)
+
+  def initialize
+    @lines = [] of String
+  end
+
+  pub def write(message : String) : Nil
+    @lines << message
+  end
+end
+
+seen = [] of String
+get "/seen", workers: 1 do |env|
+  seen << env.request.path
+  seen.size.to_s
+end
+before_all workers: 1 do |env|
+  seen << "before"
+  ""
+end
+error 404, workers: 1 do |env|
+  seen.size.to_s
+end
+ws "/seen", workers: 1 do |socket, env|
+  seen << "ws"
+  nil
+end
+sse "/events", workers: 1 do |stream, env|
+  seen << "sse"
+  nil
+end
+static_headers workers: 1 do |env, path, info|
+  seen << path
+  nil
+end
+use Counter.new, workers: 1
+use Counter.new, 0, workers: 1
+use "/api", Counter.new, workers: 1
+logger Collected.new, workers: 1
+run

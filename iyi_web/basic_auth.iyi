@@ -26,32 +26,42 @@ module iyi_web/basic_auth
 import std/base64::{Base64}
 import std/crypto::{Subtle}
 import std/digest::{SHA256}
+import std/list::{List}
+import std/shared_proc::{SharedProc}
 import iyi_web/handler::{Handler}
 import iyi_web/context::{Context}
 
+# The verifier runs on whichever worker the request is on, several at once,
+# so it is a `SharedProc`: the block form's block is checked where it is
+# written, and one that captures a table of users wants it in a `List`, a
+# `Hash` behind a `Mutex`, or a constant whose value is `Share`.
 pub class BasicAuthHandler < Handler
   @realm : String
-  @verifier : Proc(String, String, Bool)
+  @verifier : SharedProc({String, String}, Bool)
   @challenge : String
 
   # One fixed user.
   def initialize(username : String, password : String, @realm : String = "Restricted")
     super()
-    user_digest = SHA256.hash_bytes(username)
-    password_digest = SHA256.hash_bytes(password)
-    @verifier = ->(user : String, pass : String) {
+    user_digest = List.new(SHA256.hash_bytes(username))
+    password_digest = List.new(SHA256.hash_bytes(password))
+    @verifier = SharedProc({String, String}, Bool).of { |pair|
       # Both halves are compared whatever the first one answered.
-      user_ok = Subtle.constant_time_compare(SHA256.hash_bytes(user), user_digest)
-      pass_ok = Subtle.constant_time_compare(SHA256.hash_bytes(pass), password_digest)
+      user_ok = Subtle.constant_time_compare(SHA256.hash_bytes(pair[0]), user_digest.to_a)
+      pass_ok = Subtle.constant_time_compare(SHA256.hash_bytes(pair[1]), password_digest.to_a)
       user_ok && pass_ok
     }
     @challenge = challenge_for(@realm)
   end
 
   # Whatever the block accepts: `{ |user, password| USERS.check(user, password) }`.
-  def initialize(@realm : String = "Restricted", &block : String, String -> Bool)
+  @[Share]
+  def self.new(realm : String = "Restricted", &block : String, String -> Bool) : BasicAuthHandler
+    new(realm, SharedProc({String, String}, Bool).of { |pair| block.call(pair[0], pair[1]) })
+  end
+
+  def initialize(@realm : String, @verifier : SharedProc({String, String}, Bool))
     super()
-    @verifier = block
     @challenge = challenge_for(@realm)
   end
 
@@ -62,7 +72,7 @@ pub class BasicAuthHandler < Handler
   pub def call(ctx : Context) : Nil
     return call_next(ctx) unless applies?(ctx)
     credentials = basic_credentials(ctx.request.headers["Authorization"]?)
-    if credentials && @verifier.call(credentials[0], credentials[1])
+    if credentials && @verifier.call(credentials)
       ctx.set("basic_auth.username", credentials[0])
       call_next(ctx)
     else

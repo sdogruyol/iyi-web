@@ -50,6 +50,16 @@ class Stored(T) < StoredObject
   end
 end
 
+# What runs a request's handlers one after another: `call_next` asks it
+# for the handler after the current one. The chain is the runner's and
+# where a request stands in it is the request's, so a chain every worker
+# runs at once holds no position of its own (`iyi_web/handler`'s
+# `Chain`).
+pub abstract class Runner
+  # Runs handler *index* for *ctx*; nothing past the last one.
+  pub abstract def step(ctx : Context, index : Int32) : Nil
+end
+
 pub class Context
   @request : Request
   @response : Response
@@ -62,6 +72,8 @@ pub class Context
   @max_ranges : Int32
   @static_gzip : Bool
   @route_on_raw_path : Bool
+  @runner : Runner?
+  @position : Int32
 
   def initialize(@request : Request, @response : Response, @params : Params)
     @halted = false
@@ -72,6 +84,8 @@ pub class Context
     @max_ranges = 16
     @static_gzip = true
     @route_on_raw_path = false
+    @runner = nil
+    @position = 0
   end
 
   def self.for(request : Request) : Context
@@ -96,6 +110,34 @@ pub class Context
 
   pub def halted? : Bool
     @halted
+  end
+
+  # Runs *runner*'s handlers for this request from the first, and puts back
+  # the chain it was in, so a chain inside a chain returns to its place.
+  pub def run(runner : Runner) : Nil
+    outer = @runner
+    at = @position
+    @runner = runner
+    runner.step(self, 0)
+    @runner = outer
+    @position = at
+  end
+
+  # The handler after the current one, unless the request was halted.
+  pub def call_next : Nil
+    return if @halted
+    if runner = @runner
+      runner.step(self, @position + 1)
+    end
+  end
+
+  # Where the request stands in its chain: `Chain#step` moves it.
+  pub def position : Int32
+    @position
+  end
+
+  pub def position=(index : Int32) : Int32
+    @position = index
   end
 
   pub def halt(status_code : Int32 = 200, body : String = "") : Nil

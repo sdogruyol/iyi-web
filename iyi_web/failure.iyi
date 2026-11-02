@@ -36,14 +36,16 @@ impl HttpError for StatusError
   end
 end
 
-# Renders the first of *pages* - `error` pages for error types, keyed by
-# type name in registration order - that takes *failure*'s type. False
-# when none does. A page answers nil for an error of another type; one it
-# takes answers its body, or writes it with a helper and answers "". The
-# caller sets the status and clears the body first.
-pub def render_error_type_page(ctx : Context, failure : Error, pages : Hash(String, Proc(Context, Error, String?))) : Bool
-  pages.each_value do |page|
-    if body = page.call(ctx, failure)
+# Renders the first of *pages* - `error` pages for error types, in
+# registration order, each called with the context and the failure - that
+# takes *failure*'s type. False when none does. A page answers nil for an
+# error of another type; one it takes answers its body, or writes it with
+# a helper and answers "". The caller sets the status and clears the body
+# first. *pages* are `Proc`s on a server with one worker and `SharedProc`s
+# on one with more (`iyi_web/kept`).
+pub def render_error_type_page(ctx : Context, failure : Error, pages : P) : Bool forall P
+  pages.each do |page|
+    if body = page.call({ctx, failure.as(Error)})
       ctx.response.set_body(body) unless body.empty?
       return true
     end

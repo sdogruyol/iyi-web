@@ -75,11 +75,24 @@ describe "cli_parser" do
   it "runs an application's own flags" do
     seen = [] of String
     parser = cli_parser(Config.new)
-    parser.on("-w COUNT", "--workers COUNT", "Worker count") { |value| seen << value }
+    parser.on("-j COUNT", "--jobs COUNT", "Job count") { |value| seen << value }
     parser.on("--verbose", "Log more") { |value| seen << "verbose" }
-    assert parser.parse(["--workers", "4", "--verbose"]).nil?
+    assert parser.parse(["--jobs", "4", "--verbose"]).nil?
     assert seen == ["4", "verbose"]
     assert parser.parse(["--verbose=1"]) == "Option --verbose takes no value"
-    assert parser.usage.includes?("-w COUNT, --workers COUNT")
+    assert parser.usage.includes?("-j COUNT, --jobs COUNT")
+  end
+
+  it "sets how many threads serve with -w, the cores unless it is given" do
+    cfg = Config.new
+    assert cfg.workers == IyiWorkers.count
+    assert cli_parser(cfg).parse(["-w", "1"]).nil?
+    assert cfg.workers == 1
+    assert cli_parser(cfg).parse(["--workers=6"]).nil?
+    assert cfg.workers == 6
+    assert cli_parser(cfg).parse(["-w", "0"]) == "Invalid workers \"0\": must be a whole number, 1 or more."
+    assert cli_parser(cfg).parse(["-w", "many"]) == "Invalid workers \"many\": must be a whole number, 1 or more."
+    assert cfg.workers == 6
+    assert cli_parser(cfg).usage.includes?("-w WORKERS, --workers WORKERS")
   end
 end

@@ -785,7 +785,9 @@ end
 server_router.ws "/echo" do |socket, env|
   socket.on_message { |text| socket.send(text) }
 end
-server_router.ws "/room/:name" do |socket, env|
+# The room is one `Array` of sockets every connection writes to, which no
+# two workers may share: kept unchecked, for a server on one thread.
+server_router.ws "/room/:name", workers: 1 do |socket, env|
   name = env.params.url["name"]
   ROOM.join(socket)
   socket.on_message { |text| ROOM.broadcast(name + ": " + text) }
