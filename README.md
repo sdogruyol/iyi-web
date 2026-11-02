@@ -50,7 +50,7 @@ a route returns is checked when the program compiles.
 
 ## Requirements
 
-[iyi](https://iyi-lang.com) master after 0.19.1 (the first release that
+[iyi](https://iyi-lang.com) 0.20.0 or later (the first release that
 has what follows): `spawn_parallel`, the pool every connection is served
 on, and the `@[Share(serial: workers, crossing: ...)]` mark every
 registration carries, so a refusal is made on your line and names both

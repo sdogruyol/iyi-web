@@ -6,7 +6,7 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
-Requires iyi master after 0.19.1: `spawn_parallel` (SPEC.md III.4.13)
+Requires iyi 0.20.0 or later: `spawn_parallel` (SPEC.md III.4.13)
 and the `@[Share(serial:, crossing:)]` mark. Exports changed (`iyi mod
 release`): `Handler#next_handler` and `next_handler=` are gone,
 `RouteHandler#lookup` answers a `Match(RouteEntry(...))`,

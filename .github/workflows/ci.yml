@@ -14,11 +14,11 @@ jobs:
         os: [ubuntu-24.04, windows-2025]
         # The oldest iyi this release supports (README, Requirements), and
         # the latest.
-        iyi: ["0.18.0", latest]
+        iyi: ["0.20.0", latest]
         # Windows on the latest only.
         exclude:
           - os: windows-2025
-            iyi: "0.18.0"
+            iyi: "0.20.0"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
