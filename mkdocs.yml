@@ -7,10 +7,6 @@ edit_uri: edit/master/docs/
 docs_dir: docs
 strict: true
 
-# Drafts the release notes are assembled from, not pages.
-exclude_docs: |
-  _changelog/
-
 theme:
   name: material
   features:
@@ -82,6 +78,7 @@ nav:
       - Lifecycle and background tasks: lifecycle-and-background.md
       - Observability: observability.md
       - Databases: database.md
+      - Transport: transport.md
       - Configuration: configuration.md
       - Testing: testing.md
       - Deployment: deployment.md

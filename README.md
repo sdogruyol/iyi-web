@@ -14,10 +14,11 @@ end
 run
 ```
 
-iyi-web serves HTTP/1.1 and HTTPS from native iyi programs. Routes are blocks,
-middleware is a class, and settings live in a single `config` value. It
-began as a port of [Kemal](https://kemalcr.com) to iyi and keeps Kemal's DSL;
-[iyi-web-vs-kemal.md](iyi-web-vs-kemal.md) records where the two differ.
+iyi-web serves HTTP/1.1, HTTP/2 and HTTPS from native iyi programs. Routes
+are blocks, middleware is a class, and settings live in a single `config`
+value. It began as a port of [Kemal](https://kemalcr.com) to iyi and keeps
+Kemal's DSL; [iyi-web-vs-kemal.md](iyi-web-vs-kemal.md) records where the
+two differ.
 
 **Documentation: [the docs site](docs/index.md)**, starting with the
 [tutorial](docs/tutorial.md).
@@ -83,7 +84,7 @@ curl localhost:3000/openapi.json   # id, limit and tag, typed; Swagger UI at /do
   types, `response:` and `status:` for the answer, and `env.params.int(...)`
   and friends for one parameter at a time
 - URL, query-string, form, JSON and `multipart/form-data` parameters, with
-  file uploads
+  file uploads streamed to disk as they arrive
 - JSON bodies read into your own types, with validation and `400`/`422`
   answers that name each bad field
 - Before and after filters for every route, a path pattern or a single method
@@ -121,17 +122,22 @@ curl localhost:3000/openapi.json   # id, limit and tag, typed; Swagger UI at /do
   over OTLP/HTTP
 - An in-process test harness: requests sent to a router without a socket
 
-**Transport**
+**Transport** ([Transport](docs/transport.md))
 
+- HTTP/1.1 and HTTP/2 on the same port: h2c with prior knowledge in the
+  clear, h2 by ALPN over TLS, through iyi's `std/http`
+- HTTPS and `wss://` with iyi's own TLS 1.3 and 1.2, mutual TLS with client
+  certificates, and certificates from Let's Encrypt (`config.autocert`)
+- Request bodies streamed to the route as they arrive (`stream_bodies`)
+- zstd or gzip responses, negotiated per client (`config.compress`)
 - Each request served on whichever core is free, checked for data races
   when the program compiles
 - Streaming responses and server-sent events
 - WebSockets, with an `Origin` check and sends from any fiber
-- HTTPS and `wss://` with iyi's own TLS 1.3
-- Persistent connections, each served by its own fiber
-- Graceful shutdown on `INT` and `TERM`, and timeouts for slow and idle clients
+- Persistent connections, graceful shutdown on `INT` and `TERM`, and
+  timeouts for slow and idle clients
 - IPv4, IPv6 and unix-socket listeners
-- Command-line flags for host, port, workers and TLS
+- Command-line flags for host, port, workers, TLS versions and client CAs
 
 **Tooling**
 

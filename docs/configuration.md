@@ -32,7 +32,10 @@ config.max_request_body_size = 1024 * 1024
 | `write_timeout` | `60` | |
 | `idle_timeout` | `75` | |
 | `unix_socket` | `nil` | |
-| `ssl` | `nil` (plain HTTP) | `-s --ssl-key-file FILE --ssl-cert-file FILE` |
+| `ssl` | `nil` (plain HTTP) | `-s --ssl-key-file FILE --ssl-cert-file FILE`, `--ssl-min-version 1.2`, `--ssl-client-ca FILE` |
+| `autocert` | `nil` | |
+| `stream_bodies` | `false` | |
+| `compress` | `false` | |
 | `websocket_allowed_origins` | `[] of String` (same-origin) | |
 | `websocket_max_message_size` | `8 * 1024 * 1024` | |
 | `app_name` | `"iyi-web"` | |
@@ -41,7 +44,11 @@ config.max_request_body_size = 1024 * 1024
   it is closed.
 - A request whose body is larger than `max_request_body_size` bytes gets
   `413 Content Too Large`, as soon as its `Content-Length` is read, and its
-  connection is closed.
+  connection is closed. std/http refuses any body past 64 MiB whatever this
+  says, so a limit above that has no effect.
+- `autocert`, `stream_bodies` and `compress` (Let's Encrypt certificates,
+  bodies read as they arrive, zstd or gzip answers) are described in
+  [Transport](transport.md).
 - A request line longer than 8 KiB gets `414 URI Too Long`, and header
   fields past 16 KiB `431 Request Header Fields Too Large`, the bounds
   Crystal's server holds Kemal to. Neither is a setting.
@@ -126,8 +133,11 @@ logger JSONLogger.new
 bracketed (`-b ::1`, `-b '[::1]'`); `::` takes IPv6 connections only. An
 unknown flag or an invalid port stops the program with the reason and the
 list of flags. `-s` (`--ssl`) serves HTTPS with the PEM files `--ssl-key-file`
-and `--ssl-cert-file` name; a missing or unreadable file, or a key TLS
-refuses, stops the program with the reason. `extra_options` adds your own:
+and `--ssl-cert-file` name; `--ssl-min-version 1.2` takes TLS 1.2 clients as
+well as 1.3's, and `--ssl-client-ca FILE` asks every client for a
+certificate those roots issued (mutual TLS). A missing or unreadable file,
+or a key TLS refuses, stops the program with the reason. `extra_options`
+adds your own:
 
 ```iyi
 extra_options do |parser|
@@ -162,15 +172,20 @@ import std/file::{File}
 import std/tls::{TlsServerConfig}
 
 tls = TlsServerConfig.from_pem(File.read("chain.pem"), File.read("key.pem")).or_panic
-tls.alpn = ["http/1.1"]
 config.ssl = tls
 ```
 
-TLS is `std/tls`, iyi's own, TLS 1.3 only. The certificate chain comes leaf
-first; the key is PKCS #8, Ed25519, P-256 or RSA of 2048 bits or more. Each
-connection's handshake runs in its own fiber within `read_timeout`, and one
-that fails closes that connection only. Streaming, server-sent events,
-WebSockets (`wss://`) and the unix socket listener work over TLS.
-`Server#bind_tls(host, port, tls)` does the same without the DSL. `std/tls`
-has not been audited yet; until it is, a reverse proxy remains the
-conservative choice in front of a public site.
+TLS is `std/tls`, iyi's own: TLS 1.3, and TLS 1.2 as well when
+`tls.min_version = TlsVersion::TLS12` (or `--ssl-min-version 1.2`). A
+config that names no ALPN protocol is offered `["h2", "http/1.1"]`, so
+browsers get HTTP/2; set `tls.alpn = ["http/1.1"]` to keep to HTTP/1.1.
+The certificate chain comes leaf first; the key is PKCS #8, Ed25519, P-256
+or RSA of 2048 bits or more. Each connection's handshake runs in its own
+fiber within `read_timeout`, and one that fails closes that connection
+only. Streaming, server-sent events, WebSockets (`wss://`) and the unix
+socket listener work over TLS. `Server#bind_tls(host, port, tls)` does the
+same without the DSL. Mutual TLS, TLS 1.2's requirements and certificates
+from Let's Encrypt (`config.autocert`) are in
+[Transport](transport.md#tls-13-and-12-mutual-tls). `std/tls` has not been
+audited yet; until it is, a reverse proxy remains the conservative choice
+in front of a public site.

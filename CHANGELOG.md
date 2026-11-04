@@ -9,11 +9,10 @@ All notable changes to iyi-web are recorded here. The format follows
 Requires iyi 0.20.1 or later. Breaking: templates escape `<%= %>` output,
 a layout's `content` and `yield_content` are `SafeHTML`, and
 `iyi_web/templates` no longer re-exports `std/eiy` (see Changed and
-Removed, and `docs/templates.md` for the migration).
-
-<!-- Transport (HTTP/2, streaming bodies, TLS 1.2, mTLS, autocert, zstd):
-     the entries of docs/_changelog/transport.md go into the sections below,
-     each in its own group after the bullets already there. -->
+Removed, and `docs/templates.md` for the migration). The transport is
+std/http's: `Response#attach` takes `(sink, head)`, `Response#reusable?`
+and `iyi_web/intake` are gone, and std/http caps every request body at
+64 MiB (see Changed and Removed, and `docs/transport.md`).
 
 <!-- Release: bump WEB_VERSION in cmd/scaffold.iyi (0.5.1) to the release
      that ships the iyi-web command, so new projects require it. -->
@@ -121,7 +120,8 @@ Removed, and `docs/templates.md` for the migration).
   - `iyi-web new DIR [--api | --full] [--web-path PATH]` writes a project
     that builds and passes its own test: `iyi.mod` requiring iyi-web as
     `web`, `app.iyi`, routes in their own module, an in-process
-    `app_test.iyi`, `.gitignore`; `--api` a validated JSON CRUD, `--full`
+    `app_test.iyi`, `.gitignore`; `--api` a validated JSON CRUD of typed
+    routes (`path: Int32`, `body:`, `response:`) over a `Store`, `--full`
     views in a layout and `public/`. `--web-path` adds a `replace` line
     for a local checkout. A non-empty directory is refused before anything
     is written.
@@ -140,7 +140,8 @@ Removed, and `docs/templates.md` for the migration).
   Kemal and Go `net/http`, and a runner (`bash bench/compare/run.sh`) that
   builds, checks, warms up and measures each with oha, skips missing
   toolchains with the reason, and writes `results.json` and `results.md`.
-- Docs: `docs/cli.md`, `docs/database.md`, `docs/benchmarks.md`.
+- Docs: `docs/cli.md`, `docs/database.md`, `docs/benchmarks.md`,
+  `docs/transport.md`.
 - A documentation site: `mkdocs.yml` builds `docs/` with mkdocs-material
   (`mkdocs build --strict`, run by CI's new `docs` job). The README's
   reference sections are guide pages there (routing, parameters, requests
@@ -148,6 +149,27 @@ Removed, and `docs/templates.md` for the migration).
   static files, every core, configuration, testing, WebSockets and SSE,
   deployment, modules), and `docs/tutorial.md` builds a typed JSON API
   step by step, from `iyi-web new --api` to a release build.
+- HTTP/2 (`docs/transport.md`): h2c with prior knowledge beside HTTP/1.1
+  on the same port, and h2 over TLS by ALPN. A TLS config that names no
+  protocol is offered `["h2", "http/1.1"]` when the server binds it, and
+  `-s` offers it too.
+- TLS 1.2 beside 1.3 (`config.ssl.min_version`, `--ssl-min-version 1.2`;
+  std/tls requires the extended master secret on 1.2, so LibreSSL's 1.2
+  clients are refused) and mutual TLS (`config.ssl.client_roots`,
+  `--ssl-client-ca FILE`), with the client's chain in
+  `env.request.peer_certificates`.
+- `config.autocert` (std/autocert, Let's Encrypt): `tls-alpn-01` answered
+  on the TLS port and renewals run beside the accept loop; `LETS_ENCRYPT`,
+  `LETS_ENCRYPT_STAGING`, `Config#tls_config`, `Server#autocert=`.
+- `config.stream_bodies`: bodies left on the connection for the route to
+  read as they arrive, with `env.request.body_io` (`RequestBody#read`),
+  `env.request.body_failure` (`BodyFailure`) and `body_pending?`.
+- `config.compress`: zstd or gzip, negotiated by std/http.
+- `multipart/form-data` uploads stream to disk as they arrive
+  (`parse_multipart(RequestBody, ...)`), so an upload costs a read's worth
+  of memory, not its size.
+- `params.body_error` reports a body that could not be read (413, 408,
+  400).
 
 ### Changed
 
@@ -188,12 +210,36 @@ Removed, and `docs/templates.md` for the migration).
 - The README is an introduction that links the docs site; what it held is
   in `docs/`, with stale statements fixed (the rate limiter's lock, the
   WebSocket chat needing `workers: 1`, `@v0.5.1` in the install lines).
+- The transport is std/http's `Server.handle`, one call per connection;
+  iyi-web keeps its accept loop, worker pool, drain, timeouts, `408`, head
+  bounds (`414`/`431`) and body limit (`413`) in a thin layer over the
+  socket. A request head is no longer copied into a string and parsed
+  twice: bench/micro's GET parse went from 5966 ns to 3397 ns, a form POST
+  from 2267 ns to 1688 ns.
+- **Breaking:** `Response#attach(sink, head)` replaces
+  `attach(sink, version, keepalive, head)`; the sink gets unframed body
+  pieces (framing is std/http's). `Response#no_entity?` is public.
+- **Breaking:** std/http refuses any request body past 64 MiB
+  (`Server::MAX_BODY`), whatever `max_request_body_size` says; a limit set
+  above that has no effect.
+- HTTP/1.0 requests are answered with an `HTTP/1.1` status line (std/http's,
+  as RFC 9110 allows).
+- A drain also closes a connection whose next head was still arriving or
+  that was in its TLS handshake.
+- A head that misses `read_timeout` under TLS or HTTP/2 is closed (close
+  notify or GOAWAY) rather than answered `408`.
+- `params.raw_body` is empty for a multipart request: its body streamed to
+  its files.
+- bench/micro: `intake.get` / `intake.post_form` are `wire.get` /
+  `wire.post_form`.
 
 ### Removed
 
 - **Breaking:** `iyi_web/templates` (and through it `iyi_web/dsl`) no longer
   re-exports `std/eiy`; a program that names `Eiy` imports `std/eiy` itself.
   `ContentBlocks#capture` yields an `HTMLBuffer`, not an `Eiy::Buffer`.
+- **Breaking:** `iyi_web/intake` (`Intake`, `TooLarge`, `HeadTooLarge`),
+  `Closed` and `TimedOut` from `iyi_web/server`, and `Response#reusable?`.
 
 ### Security
 

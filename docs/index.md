@@ -14,11 +14,11 @@ end
 run
 ```
 
-iyi-web serves HTTP from native iyi programs, on every core. Routes are
-blocks, middleware is a class, and settings live in a single `config` value.
-Its DSL follows [Kemal](https://kemalcr.com)'s, and what the type of a route
-returns, what it reads and what it shares between threads are all checked
-when the program compiles.
+iyi-web serves HTTP/1.1, HTTP/2 and HTTPS from native iyi programs, on
+every core. Routes are blocks, middleware is a class, and settings live in
+a single `config` value. Its DSL follows [Kemal](https://kemalcr.com)'s,
+and what the type of a route returns, what it reads and what it shares
+between threads are all checked when the program compiles.
 
 ## Where to start
 
@@ -39,7 +39,7 @@ when the program compiles.
 | APIs | [OpenAPI](openapi.md), [Dependencies and auth](dependencies-and-auth.md), [Databases](database.md) |
 | Around requests | [Middleware](middleware.md), [Security](security.md), [Lifecycle and background tasks](lifecycle-and-background.md), [Observability](observability.md), [Plugins](plugins.md) |
 | Concurrency | [Every core](every-core.md), [Shared state with `Store`](state.md) |
-| Running it | [Configuration](configuration.md), [Testing](testing.md), [Deployment](deployment.md) |
+| Running it | [Transport](transport.md), [Configuration](configuration.md), [Testing](testing.md), [Deployment](deployment.md) |
 
 [Modules](modules.md) lists every module and what it provides, and
 [Benchmarks](benchmarks.md) compares iyi-web with FastAPI, Express, Kemal and

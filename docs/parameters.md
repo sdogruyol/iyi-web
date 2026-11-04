@@ -23,7 +23,8 @@ end
 `url`, `query` and `body` are `Hash(String, String)` tables of percent-decoded
 values; `env.params["name"]?` searches them in that order. Indexing without
 `?` panics when the key is missing, so use `[]?` for optional values.
-`env.params.raw_body` is the body as it arrived.
+`env.params.raw_body` is the body as it arrived (empty for a
+`multipart/form-data` request, whose files [stream to disk](transport.md#request-bodies)).
 
 These are strings. To read one as a number or a flag, with a `422` naming
 it when it is not one, use `env.params.int("id")`, `int64`, `float`, `bool`

@@ -111,7 +111,7 @@ Not in Kemal's core, but seen in its examples:
 ## 5. Status
 
 iyi-web `master`, on iyi 0.20.1, the oldest it supports. `iyi test iyi_web`
-passes in all 53 test files and `iyi test examples` in its one. Every example
+passes in all 52 test files and `iyi test examples` in its one. Every example
 was built, run and exercised with curl; WebSockets with Node's client, and
 over TLS with Python's.
 
@@ -123,7 +123,10 @@ panics, one reader and one writer per descriptor, IPv6, unix sockets and
 iyi 0.18.0 lifted TLS: std/tls has a server (`TlsServer`,
 `TlsServerConfig`), which iyi-web serves HTTPS and `wss://` over. Its
 streaming compressor (`Deflater`) and media-type table (`std/mime`) closed
-the last static-file gaps.
+the last static-file gaps. Since then iyi-web's transport is std/http's own
+connection handler (`Server.handle`), which brought HTTP/2, TLS 1.2, mutual
+TLS, Let's Encrypt certificates, streamed request bodies and zstd
+([Transport](docs/transport.md)).
 
 ### Fixed defects
 
@@ -189,8 +192,8 @@ Found later and fixed:
 | Cookies | `domain`, `expires`, `delete_cookie`; values are encoded and decoded |
 | Logging | `Logger` / `StdoutLogger`, `logger`, `log "message"`, `logging false` |
 | Shutdown | INT and TERM drain: the listener closes, idle connections close, requests in flight finish within `shutdown_timeout` (30 s); a second signal cuts off at once; `shutdown_message` |
-| Command line | `-b` (IPv4 or IPv6), `-p`, `-s`, `--ssl-key-file`, `--ssl-cert-file`, `-h`, `extra_options` |
-| TLS | `config.ssl` (a `TlsServerConfig`), `bind_tls`, `wss://`; TLS 1.3 over iyi's own std/tls |
+| Command line | `-b` (IPv4 or IPv6), `-p`, `-s`, `--ssl-key-file`, `--ssl-cert-file`, `-h`, `extra_options`; also `--ssl-min-version 1.2` and `--ssl-client-ca FILE` (not in Kemal) |
+| TLS | `config.ssl` (a `TlsServerConfig`), `bind_tls`, `wss://`; TLS 1.3 and 1.2 over iyi's own std/tls, with mutual TLS (`client_roots`, `env.request.peer_certificates`) |
 | Listening options | IPv6 and `unix_socket` (with TLS too); `read_timeout`, `write_timeout` and `idle_timeout` (not in Kemal) |
 | Installation | `iyi get github.com/sdogruyol/iyi-web` writes `require github.com/sdogruyol/iyi-web v0.5.1` to `iyi.mod`, and files write `import github.com/sdogruyol/iyi-web/iyi_web/dsl::*`; with `--as web` the line ends `as web` and files write `import web/iyi_web/dsl::*` (iyi 0.18.0 and later); `iyi-web new` writes a project that already requires it |
 | Examples | Fifteen programs and a PostgreSQL project, from `hello` to a JSON API, typed routes with OpenAPI and JWT sign-in, uploads, templates, routers, middleware, SSE, a WebSocket chat room, cookies, metrics and tracing, and in-process testing |
@@ -214,6 +217,11 @@ the direction of FastAPI:
   [Observability](docs/observability.md)).
 - The `iyi-web` command: `new` scaffolds a project, `dev` rebuilds it on
   every save ([cli](docs/cli.md)).
+- HTTP/2 beside HTTP/1.1 (h2c, and h2 by ALPN over TLS), certificates from
+  Let's Encrypt (`config.autocert`), request bodies read as they arrive
+  (`stream_bodies`), multipart uploads streamed to disk, and zstd or gzip
+  answers (`config.compress`) ([Transport](docs/transport.md)). Kemal
+  serves HTTP/1.1 and leaves certificates to the operator.
 
 ### Remaining
 
@@ -227,19 +235,19 @@ Possible within iyi-web:
   WebSocket sessions are not closed with `1001` when the server drains; they
   are cut off at `shutdown_timeout`.
 - A command-line flag for `unix_socket`.
-- A 64 MB request body peaks at several times its size in memory: the bytes
-  are copied into a string for `std/http`'s parser, which copies the body out
-  again.
 
-Differences that come from iyi's TLS: std/tls's server speaks TLS 1.3 only,
-with Ed25519, P-256 or RSA certificates and PKCS #8 keys, where Kemal takes
-whatever OpenSSL does; and std/tls has not been audited yet.
+Differences that come from iyi's TLS: std/tls's server speaks TLS 1.3 and
+1.2 (1.2 only with the extended master secret, so LibreSSL's 1.2 clients
+are refused), with Ed25519, P-256 or RSA certificates and PKCS #8 keys,
+where Kemal takes whatever OpenSSL does; and std/tls has not been audited
+yet.
 
 Needing changes in iyi first:
 
 | Missing in iyi | iyi-web feature waiting on it |
 |---|---|
 | SO_REUSEPORT in std/socket (not in 0.20.1) | `reuse_port` |
+| A body limit in std/http above its fixed 64 MiB (`Server::MAX_BODY`) | `max_request_body_size` above 64 MiB; std/http refuses a larger body whatever the setting says |
 | A caught panic that the runtime does not print (0.18.0 still prints it) | No `iyi: panic:` line on stderr when a client disconnects mid-response, or a write times out |
 
 Problems found in iyi and worked around in iyi-web. The first four were fixed

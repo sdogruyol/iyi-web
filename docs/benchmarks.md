@@ -136,12 +136,14 @@ bash bench/run.sh --help       # durations, connections, port, a filter
 
 - `bench/micro.iyi` times the paths every request takes with `std/benchmark`:
   route lookup in a tree of about a hundred static, parameter and wildcard
-  routes (`radix.*`, `router.*`), reading a request head off the wire
-  (`intake.*`), query, form and JSON parameters (`params.*`), the header table
-  (`headers.*`), and a whole in-process dispatch through `RouteHandler`
-  (`dispatch.*`) and through `handler_chain` (`chain.*`). Each case is checked
-  once before it is timed, so one that stops doing its job aborts rather than
-  reporting a fast nothing.
+  routes (`radix.*`, `router.*`), parsing a request off the wire with
+  std/http's parser as the server does (`wire.get`, `wire.post_form`; before
+  the move onto std/http these were `intake.*`), query, form and JSON
+  parameters (`params.*`), the header table (`headers.*`), and a whole
+  in-process dispatch through `RouteHandler` (`dispatch.*`) and through
+  `handler_chain` (`chain.*`). Each case is checked once before it is
+  timed, so one that stops doing its job aborts rather than reporting a
+  fast nothing.
 - `bench/load.iyi` is a load generator for Linux and Windows alike (no `wrk`):
   N tasks, one keep-alive connection each, request `bench/server.iyi`'s hello,
   JSON and parameter routes for a fixed time and report req/s, p50 and p99
@@ -161,3 +163,23 @@ at 2 s per case, puts the comparison in the job summary, and fails on such a
 regression. End-to-end changes are shown, not gated: loopback timings move by
 more than that between identical runs. A push to master keeps its results as
 the `bench-results` artifact.
+
+### Before and after the move onto std/http
+
+The transport moved from iyi-web's own HTTP/1.1 reader onto std/http's
+connection handler (`Server.handle`). `bench/run.sh` before and after, on
+the same machine (a busy one, so read the end-to-end rows as a direction,
+not a number):
+
+| Case | Before | After |
+|---|---:|---:|
+| Request parse, GET (`intake.get` → `wire.get`) | 5966 ns | 3397 ns |
+| Request parse, form POST (`intake.post_form` → `wire.post_form`) | 2267 ns | 1688 ns |
+| End to end, hello | 22,064 req/s | 28,242 req/s |
+| End to end, JSON | 21,083 req/s | 29,245 req/s |
+| End to end, parameter route | 25,310 req/s | 27,004 req/s |
+
+A request head is no longer copied into a string and parsed a second time.
+`bench/compare` with iyi-web alone after the move gave 65,780 req/s on
+`/plaintext`, 60,286 on `/json` and 81,050 on `/users/42`, with no
+non-200 answers; the cross-framework table above predates it.
