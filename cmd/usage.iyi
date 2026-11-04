@@ -1,0 +1,17 @@
+# A command line `iyi-web` cannot act on. Each command's parser answers one
+# instead of options, and the entry prints its message with a pointer to
+# `iyi-web help` and exits 2, as a shell expects of a usage error.
+module cmd/usage
+
+pub class UsageError
+  @message : String
+
+  def initialize(@message : String)
+  end
+end
+
+impl Error for UsageError
+  def message : String
+    @message
+  end
+end

@@ -1,0 +1,261 @@
+# The OpenAPI document of a sample application, read back as JSON: paths
+# in `{param}` form from every mount, parameters from the typed structs,
+# schemas with what is required, and the security each route depends on.
+module iyi_web/openapi_test
+
+import std/json::{JSON, Any, serializable}
+import iyi_web/router::{Router, RouteHandler}
+import iyi_web/harness::*
+import iyi_web/context::{Context}
+import iyi_web/openapi::*
+import iyi_web/deps::{Dep}
+import iyi_web/auth::*
+import iyi_web/spec::*
+
+enum Status
+  Open
+  InReview
+end
+
+struct Author
+  getter name : String
+  getter email : String?
+  derive serializable
+end
+
+struct NoteInput
+  getter title : String
+  getter body : String = ""
+  getter stars : Int32 = 3
+  getter tags : Array(String) = [] of String
+  getter status : Status = Status::Open
+  getter author : Author?
+  @[JSON::Field(key: "due-at")]
+  getter due_at : Int64?
+  derive serializable
+end
+
+struct Note
+  getter id : Int64
+  getter title : String
+  @[JSON::Field(ignore: true)]
+  getter secret : String = ""
+  @[JSON::Field(ignore_deserialize: true)]
+  getter created : Int64 = 0_i64
+  getter author : Author?
+  derive serializable
+
+  def initialize(@id : Int64, @title : String)
+    @author = nil
+  end
+end
+
+struct Page
+  getter page : Int32 = 1
+  getter q : String?
+  getter tag : Array(String) = [] of String
+  derive serializable
+end
+
+struct NoteRef
+  getter user : String
+  getter id : Int64
+  derive serializable
+end
+
+struct Trace
+  getter x_request_id : String
+  derive serializable
+end
+
+SECRET = "openapi-test-secret-of-32-bytes-or-more"
+USER   = jwt_auth(SECRET)
+KEY    = api_key_auth("X-API-Key")
+
+def sample : Router
+  api = Router.new
+  api.get "/notes", query: Page, response: Array(Note), summary: "List notes", tags: ["notes"] do |env, page|
+    [] of Note
+  end
+  api.post "/notes", body: NoteInput, response: Note, status: 201, deps: USER, tags: ["notes"], description: "Creates a note." do |env, input, claims|
+    Note.new(1, input.title)
+  end
+  api.get "/notes/:id", path: Int64, response: Note do |env, id|
+    Note.new(id, "x")
+  end
+  api.delete "/users/:user/notes/:id", path: NoteRef, headers: Trace, deps: Dep.all(user: USER, key: KEY), status: 204 do |env, ref, trace, deps|
+    nil
+  end
+  api.query "/search" do |env|
+    "found"
+  end
+  root = Router.new
+  root.get "/" do |env|
+    "hi"
+  end
+  root.get "/files/*path" do |env|
+    "file"
+  end
+  root.namespace "/v1" do |v1|
+    v1.mount "/api", api
+  end
+  root.openapi("Notes", "1.2.0", description: "A sample")
+  root
+end
+
+def document : Any
+  ctx = dispatch(RouteHandler.new(sample), http_request("GET", "/openapi.json"))
+  assert ctx.response.status_code == 200
+  assert ctx.response.content_type == "application/json; charset=utf-8"
+  JSON.parse(ctx.response.body)
+end
+
+def names(list : Any) : Array(String)
+  list.as_a.map { |item| item.as_s }
+end
+
+describe "openapi document" do
+  doc = document
+  paths = doc["paths"]
+  schemas = doc["components"]["schemas"]
+
+  it "says what it is" do
+    assert doc["openapi"].as_s == "3.1.0"
+    assert doc["info"]["title"].as_s == "Notes"
+    assert doc["info"]["version"].as_s == "1.2.0"
+    assert doc["info"]["description"].as_s == "A sample"
+  end
+
+  it "lists every route under its full path in {param} form, and no QUERY or docs route" do
+    keys = paths.as_h.keys
+    assert keys.includes?("/")
+    assert keys.includes?("/files/{path}")
+    assert keys.includes?("/v1/api/notes")
+    assert keys.includes?("/v1/api/notes/{id}")
+    assert keys.includes?("/v1/api/users/{user}/notes/{id}")
+    assert !keys.includes?("/v1/api/search")
+    assert !keys.includes?("/openapi.json")
+    assert !keys.includes?("/docs")
+    assert paths["/v1/api/notes"].as_h.keys.sorted == ["get", "post"]
+  end
+
+  it "gives an untyped route its captures as string parameters" do
+    param = paths["/files/{path}"]["get"]["parameters"][0]
+    assert param["name"].as_s == "path"
+    assert param["in"].as_s == "path"
+    assert param["required"].as_bool
+    assert param["schema"]["type"].as_s == "string"
+    assert paths["/"]["get"]["responses"]["200"]["description"].as_s == "OK"
+  end
+
+  it "reads query parameters from the struct, with defaults and what is required" do
+    list = paths["/v1/api/notes"]["get"]
+    assert list["summary"].as_s == "List notes"
+    assert names(list["tags"]) == ["notes"]
+    params = list["parameters"].as_a
+    assert params.map(&.["name"].as_s) == ["page", "q", "tag"]
+    assert params.all? { |param| param["in"].as_s == "query" && !param["required"].as_bool }
+    assert params[0]["schema"]["type"].as_s == "integer"
+    assert params[0]["schema"]["default"].as_i == 1
+    assert params[1]["schema"]["type"].as_s == "string"
+    assert params[2]["schema"]["type"].as_s == "array"
+    response = list["responses"]["200"]["content"]["application/json"]["schema"]
+    assert response["type"].as_s == "array"
+    assert response["items"]["$ref"].as_s == "#/components/schemas/Note"
+    assert list["responses"]["422"]["content"]["application/json"]["schema"]["$ref"].as_s == "#/components/schemas/Error"
+  end
+
+  it "types path parameters, scalar and struct, and header parameters" do
+    one = paths["/v1/api/notes/{id}"]["get"]["parameters"][0]
+    assert one["name"].as_s == "id"
+    assert one["schema"]["format"].as_s == "int64"
+    removal = paths["/v1/api/users/{user}/notes/{id}"]["delete"]
+    params = removal["parameters"].as_a
+    assert params.map { |param| param["name"].as_s + "@" + param["in"].as_s } == ["user@path", "id@path", "x-request-id@header"]
+    assert params[2]["required"].as_bool
+    assert removal["responses"].as_h.has_key?("204")
+    assert !removal["responses"]["204"].as_h.has_key?("content")
+  end
+
+  it "describes the body and the response with schemas under components" do
+    create = paths["/v1/api/notes"]["post"]
+    assert create["description"].as_s == "Creates a note."
+    assert create["requestBody"]["required"].as_bool
+    assert create["requestBody"]["content"]["application/json"]["schema"]["$ref"].as_s == "#/components/schemas/NoteInput"
+    assert create["responses"]["201"]["content"]["application/json"]["schema"]["$ref"].as_s == "#/components/schemas/Note"
+    assert create["responses"].as_h.keys.sorted == ["201", "400", "401", "415", "422"]
+
+    input = schemas["NoteInput"]
+    assert input["type"].as_s == "object"
+    assert names(input["required"]) == ["title"]
+    properties = input["properties"]
+    assert properties.as_h.keys == ["title", "body", "stars", "tags", "status", "author", "due-at"]
+    assert properties["stars"]["default"].as_i == 3
+    assert properties["tags"]["items"]["type"].as_s == "string"
+    assert names(properties["status"]["enum"]) == ["open", "in_review"]
+    assert properties["author"]["anyOf"][0]["$ref"].as_s == "#/components/schemas/Author"
+    assert properties["author"]["anyOf"][1]["type"].as_s == "null"
+
+    note = schemas["Note"]
+    assert names(note["required"]) == ["id", "title"]
+    assert !note["properties"].as_h.has_key?("secret")
+    assert note["properties"]["created"]["readOnly"].as_bool
+    assert names(schemas["Author"]["required"]) == ["name"]
+    assert schemas["Error"]["properties"]["fields"]["type"].as_s == "object"
+  end
+
+  it "lists the security schemes and each route's requirement" do
+    schemes = doc["components"]["securitySchemes"]
+    assert schemes["bearerAuth"]["type"].as_s == "http"
+    assert schemes["bearerAuth"]["scheme"].as_s == "bearer"
+    assert schemes["bearerAuth"]["bearerFormat"].as_s == "JWT"
+    assert schemes["apiKeyAuth"]["type"].as_s == "apiKey"
+    assert schemes["apiKeyAuth"]["in"].as_s == "header"
+    assert schemes["apiKeyAuth"]["name"].as_s == "X-API-Key"
+    assert paths["/v1/api/notes"]["post"]["security"][0].as_h.keys == ["bearerAuth"]
+    assert paths["/v1/api/users/{user}/notes/{id}"]["delete"]["security"][0].as_h.keys.sorted == ["apiKeyAuth", "bearerAuth"]
+    assert !paths["/v1/api/notes"]["get"].as_h.has_key?("security")
+  end
+end
+
+describe "docs page" do
+  it "serves Swagger UI pointing at the document" do
+    ctx = dispatch(RouteHandler.new(sample), http_request("GET", "/docs"))
+    assert ctx.response.status_code == 200
+    assert ctx.response.content_type == "text/html; charset=utf-8"
+    assert ctx.response.body.starts_with?("<!DOCTYPE html>")
+    assert ctx.response.body.includes?("swagger-ui-bundle.js")
+    assert ctx.response.body.includes?(%(url: "/openapi.json"))
+  end
+
+  it "follows the router's prefix and other paths, or leaves the page out" do
+    router = Router.new("/api")
+    router.get "/ping" do |env|
+      "pong"
+    end
+    router.openapi("Ping", "1", path: "/spec.json", docs: nil)
+    handler = RouteHandler.new(router)
+    spec = JSON.parse(dispatch(handler, http_request("GET", "/api/spec.json")).response.body)
+    assert spec["paths"].as_h.keys == ["/api/ping"]
+    assert dispatch(handler, http_request("GET", "/api/docs")).response.status_code == 404
+  end
+
+  it "refuses two different types under one schema name" do
+    one = Router.new
+    one.post "/a", body: Author do |env, author|
+      "a"
+    end
+    one.post "/b", body: Other::Author do |env, author|
+      "b"
+    end
+    one.openapi("Clash", "1")
+    assert panics? { RouteHandler.new(one); nil }
+  end
+end
+
+module Other
+  struct Author
+    getter nick : String
+    derive serializable
+  end
+end

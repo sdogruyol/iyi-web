@@ -1,0 +1,164 @@
+# Lifecycle hooks: start hooks in order and the first failure ending the
+# start, stop hooks in reverse with every one run, and the DSL's `run`
+# calling them around a real server - after the background work a request
+# started has finished - and refusing to start when a hook fails.
+module iyi_web/lifecycle_test
+
+import std/process::{Process, ProcessResult}
+import std/shared_proc::{SharedProc}
+import std/socket::{IyiSocket}
+import iyi_web/dsl::*
+import iyi_web/config::{config}
+import iyi_web/kept::{Kept}
+import iyi_web/lifecycle::{Lifecycle, LifecycleHook, hook_outcome, lifecycle_hook}
+import iyi_web/store::{Store}
+import iyi_web/harness::{http_body}
+import iyi_web/spec::*
+
+struct Refusal
+  getter message : String
+
+  def initialize(@message : String)
+  end
+end
+
+impl Error for Refusal
+end
+
+EVENTS = Store.new { [] of String }
+
+def note(event : String) : Nil
+  EVENTS.update { |events| events << event; nil }
+end
+
+def hook(event : String) : LifecycleHook
+  lifecycle_hook { note(event) }
+end
+
+def fetch(port : Int32, path : String) : String
+  client = IyiSocket.connect("127.0.0.1", port).or_panic
+  client.write("GET #{path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").or_panic
+  buffer = ""
+  loop do
+    chunk = client.read(65536).or_panic
+    break if chunk.empty?
+    buffer = buffer + chunk
+  end
+  client.close
+  http_body(buffer)
+end
+
+# *program*, in iyi_web/lifecycle_apps, run to its end.
+def run_app(program : String) : ProcessResult
+  compiler = Program.env("IYI") || "iyi"
+  ran = Process.run(compiler, ["run", __DIR__ + "/lifecycle_apps/" + program])
+  raise "#{compiler} did not start: #{ran.inspect}" unless ran.is_a?(ProcessResult)
+  ran
+end
+
+describe "Lifecycle" do
+  it "runs start hooks in order and stop hooks in reverse" do
+    EVENTS.update { |e| e.size.times { e.pop }; nil }
+    hooks = Lifecycle.new
+    hooks.add_start(hook("start 1"), "a.iyi:1")
+    hooks.add_start(hook("start 2"), "a.iyi:2")
+    hooks.add_stop(hook("stop 1"), "a.iyi:3")
+    hooks.add_stop(hook("stop 2"), "a.iyi:4")
+    assert_nil hooks.run_start
+    assert_eq [] of String, hooks.run_stop
+    assert_eq ["start 1", "start 2", "stop 2", "stop 1"], EVENTS.to_a
+  end
+
+  it "stops the start at the first hook that answers an error or panics" do
+    EVENTS.update { |e| e.size.times { e.pop }; nil }
+    hooks = Lifecycle.new
+    hooks.add_start(hook("first"), "a.iyi:1")
+    hooks.add_start(lifecycle_hook { Refusal.new("no database") }, "a.iyi:2")
+    hooks.add_start(hook("never"), "a.iyi:3")
+    assert_eq "on_start (a.iyi:2) failed: no database", hooks.run_start
+    assert_eq ["first"], EVENTS.to_a
+
+    panicking = Lifecycle.new
+    panicking.add_start(lifecycle_hook { raise "bad config" }, "b.iyi:7")
+    assert_eq "on_start (b.iyi:7) panicked: bad config", panicking.run_start
+  end
+
+  it "runs every stop hook when one of them fails" do
+    EVENTS.update { |e| e.size.times { e.pop }; nil }
+    hooks = Lifecycle.new
+    hooks.add_stop(hook("closed pool"), "a.iyi:1")
+    hooks.add_stop(lifecycle_hook { raise "flush failed" }, "a.iyi:2")
+    hooks.add_stop(lifecycle_hook { Refusal.new("socket gone") }, "a.iyi:3")
+    assert_eq ["on_stop (a.iyi:3) failed: socket gone", "on_stop (a.iyi:2) panicked: flush failed"], hooks.run_stop
+    assert_eq ["closed pool"], EVENTS.to_a
+  end
+
+  it "treats an answer that is not an error as success" do
+    assert_nil hook_outcome(42)
+    assert_nil hook_outcome(nil)
+    assert_eq "no", hook_outcome(Refusal.new("no"))
+  end
+end
+
+describe "run" do
+  it "calls on_start before serving and on_stop after the drain and the background work" do
+    EVENTS.update { |e| e.size.times { e.pop }; nil }
+    logging false
+    config.shutdown_message = false
+
+    on_start { note("start 1") }
+    on_start { note("start 2") }
+    on_stop { note("stop 1") }
+    on_stop { note("stop 2") }
+
+    get "/hello" do |env|
+      note("request")
+      "hello"
+    end
+
+    get "/later" do |env|
+      env.background do
+        sleep(200)
+        note("background done")
+      end
+      note("answered")
+      "queued"
+    end
+
+    bodies = [] of String
+    group do |g|
+      g.spawn do
+        run(0, args: nil)
+        0
+      end
+      g.spawn do
+        while !running?
+          sleep(5)
+        end
+        port = config.port
+        bodies << fetch(port, "/hello")
+        bodies << fetch(port, "/later")
+        stop
+        0
+      end
+    end
+    assert_eq ["hello", "queued"], bodies
+    assert_eq ["start 1", "start 2", "request", "answered", "background done", "stop 2", "stop 1"], EVENTS.to_a
+  end
+
+  it "exits naming the on_start hook that answered an error, before serving" do
+    ran = run_app("failing_start.iyi")
+    assert_eq 1, ran.exit_code
+    assert_includes ran.stdout, "hook one"
+    assert !ran.stdout.includes?("hook three"), ran.stdout
+    assert !ran.stdout.includes?("ready to lead"), ran.stdout
+    assert_includes ran.stderr, "could not start: on_start (failing_start.iyi:26) failed: database unreachable"
+  end
+
+  it "exits naming the on_start hook that panicked" do
+    ran = run_app("panicking_start.iyi")
+    assert_eq 1, ran.exit_code
+    assert !ran.stdout.includes?("ready to lead"), ran.stdout
+    assert_includes ran.stderr, "could not start: on_start (panicking_start.iyi:10) panicked: config file missing"
+  end
+end

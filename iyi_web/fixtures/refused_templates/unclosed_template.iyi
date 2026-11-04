@@ -1,0 +1,8 @@
+# A template with a `<%=` that is never closed: refused at the build, with
+# the tag's line and column (iyi_web/templates_test.iyi).
+module iyi_web/fixtures/refused_templates/unclosed_template
+
+import iyi_web/templates::{render}
+
+name = "world"
+print render("unclosed.eiy")

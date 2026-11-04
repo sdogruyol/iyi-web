@@ -18,7 +18,7 @@ import std/time::{Time, Span}
 # in it in a field every write moves, with no lock: two workers writing
 # at once race on it. Every `StdoutLogger` writes under this one lock,
 # whichever worker its request is on.
-STDOUT_LOCK = Mutex.new { 0 }
+pub STDOUT_LOCK = Mutex.new { 0 }
 
 pub abstract class Logger
   # One finished request. *ctx* carries the status that was sent; the

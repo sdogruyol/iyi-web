@@ -1,0 +1,170 @@
+# The watcher `iyi-web dev` polls with: what it watches, and the changes
+# it must not miss - above all two saves within one second of the same
+# size, which modification times in whole seconds cannot tell apart.
+# Times are set with `File.touch`, so nothing here waits for a clock.
+module cmd/watch_test
+
+import std/dir::{Dir}
+import std/file::{File}
+import std/file_utils::{FileUtils}
+import std/process::{Process}
+import std/text
+import cmd/watch::*
+import iyi_web/spec::*
+
+ROOT = File.join(Dir.tempdir, "iyi-web-watch-" + Process.pid.to_s)
+T    = 1_800_000_000_i64
+
+def put(relative : String, text : String, mtime : Int64 = T) : String
+  path = File.join([ROOT] + relative.split("/"))
+  Dir.mkdir_p(File.dirname(path))
+  File.write(path, text)
+  File.touch(path, mtime)
+  path
+end
+
+def fresh : Nil
+  FileUtils.rm_rf(ROOT)
+  Dir.mkdir_p(ROOT)
+end
+
+describe "watched_kind" do
+  it "rebuilds for sources and the manifest" do
+    assert watched_kind("app.iyi") == Kind::Source
+    assert watched_kind("routes/home.iyi") == Kind::Source
+    assert watched_kind("views/index.eiy") == Kind::Source
+    assert watched_kind("views/old.ecr") == Kind::Source
+    assert watched_kind("iyi.mod") == Kind::Source
+  end
+
+  it "treats everything under public/ as an asset, whatever its name" do
+    assert watched_kind("public/css/app.css") == Kind::Asset
+    assert watched_kind("public/app.iyi") == Kind::Asset
+  end
+
+  it "ignores the rest" do
+    assert watched_kind("README.md").nil?
+    assert watched_kind("iyi.sum").nil?
+    assert watched_kind("app.exe").nil?
+    assert watched_kind("lib/iyi.mod").nil?
+    assert watched_kind("publicity.iyi") == Kind::Source
+  end
+end
+
+describe "snapshot" do
+  it "finds watched files and skips dot directories" do
+    fresh
+    app = put("app.iyi", "module app")
+    view = put("views/index.eiy", "<p>")
+    css = put("public/app.css", "body{}")
+    put("README.md", "x")
+    put(".iyi-web/dev/app.iyi", "build copy")
+    put(".git/HEAD.iyi", "nope")
+    files = snapshot([ROOT], T + 100).files
+    assert files.keys.sorted == [app, css, view].sorted
+    assert files[css].kind == Kind::Asset
+    assert files[app].size == 10
+    assert files[app].mtime == T
+  end
+
+  it "keeps the text of files modified this second or the one before only" do
+    fresh
+    old = put("old.iyi", "a", T - 2)
+    last = put("last.iyi", "b", T - 1)
+    now = put("now.iyi", "c", T)
+    files = snapshot([ROOT], T).files
+    assert files[old].text.nil?
+    assert files[last].text == "b"
+    assert files[now].text == "c"
+  end
+
+  it "walks several roots" do
+    fresh
+    a = put("one/a.iyi", "a")
+    b = put("two/b.iyi", "b")
+    assert snapshot([File.join(ROOT, "one"), File.join(ROOT, "two")], T + 100).files.keys.sorted == [a, b].sorted
+  end
+
+  it "is empty for a root that is not there" do
+    assert snapshot([File.join(ROOT, "missing")], T).files.empty?
+  end
+end
+
+describe "changes" do
+  it "sees a new modification time" do
+    fresh
+    path = put("app.iyi", "aaaa")
+    before = snapshot([ROOT], T + 100)
+    File.touch(path, T + 50)
+    assert snapshot([ROOT], T + 100, before).changes(before) == [path]
+  end
+
+  it "sees a new size at the same time" do
+    fresh
+    path = put("app.iyi", "aaaa")
+    before = snapshot([ROOT], T + 100)
+    put("app.iyi", "aaaaa")
+    assert snapshot([ROOT], T + 100, before).changes(before) == [path]
+  end
+
+  it "sees two saves within one second that keep the size" do
+    fresh
+    path = put("app.iyi", "aaaa")
+    before = snapshot([ROOT], T)
+    put("app.iyi", "bbbb")
+    assert snapshot([ROOT], T, before).changes(before) == [path]
+  end
+
+  it "still sees one when the walk comes seconds later" do
+    fresh
+    put("app.iyi", "aaaa")
+    before = snapshot([ROOT], T)
+    quiet = snapshot([ROOT], T + 5, before)
+    assert quiet.changes(before).empty?
+    path = put("app.iyi", "bbbb")
+    assert snapshot([ROOT], T + 9, quiet).changes(quiet) == [path]
+  end
+
+  it "reports files added and removed" do
+    fresh
+    gone = put("gone.iyi", "x")
+    before = snapshot([ROOT], T + 100)
+    File.delete(gone)
+    added = put("added.iyi", "y")
+    assert snapshot([ROOT], T + 100, before).changes(before) == [added, gone].sorted
+  end
+
+  it "is empty when nothing moved" do
+    fresh
+    put("app.iyi", "a")
+    put("public/x.css", "b")
+    before = snapshot([ROOT], T)
+    assert snapshot([ROOT], T, before).changes(before).empty?
+  end
+end
+
+describe "rebuild?" do
+  it "rebuilds for a source and not for an asset alone" do
+    fresh
+    put("app.iyi", "a")
+    css = put("public/x.css", "b")
+    before = snapshot([ROOT], T + 100)
+    File.touch(css, T + 1)
+    after = snapshot([ROOT], T + 100, before)
+    assert !after.rebuild?(after.changes(before), before)
+    app = put("app.iyi", "aa")
+    later = snapshot([ROOT], T + 100, after)
+    assert later.rebuild?(later.changes(after), after)
+  end
+
+  it "rebuilds when a source is deleted" do
+    fresh
+    gone = put("routes/old.iyi", "x")
+    before = snapshot([ROOT], T + 100)
+    File.delete(gone)
+    after = snapshot([ROOT], T + 100, before)
+    assert after.rebuild?(after.changes(before), before)
+  end
+end
+
+FileUtils.rm_rf(ROOT)

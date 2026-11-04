@@ -1,0 +1,423 @@
+# Tracing: `traceparent` and `tracestate` parsed as W3C Trace Context
+# says (version ff, lengths, case, zero ids), a request's span the child
+# of its caller's with ids of its own, the HTTP attributes and the route's
+# own, and the batch processor - batches no larger than asked, a full
+# queue dropping rather than waiting, a flush - and both exporters, the
+# OTLP one against a collector listening on a socket.
+module iyi_web/tracing_test
+
+import std/json::{JSON, Any}
+import std/list::{List}
+import std/time::{Span, Time}
+import iyi_web/tracing::*
+import iyi_web/background::{Background}
+import iyi_web/store::{Store}
+import iyi_web/router::{Router}
+import iyi_web/server::{Server}
+import iyi_web/config::{Config}
+import iyi_web/app::{build_server}
+import iyi_web/handler::{Handler, chain}
+import iyi_web/request::{Request}
+import iyi_web/harness::*
+import iyi_web/spec::*
+
+TRACE  = "4bf92f3577b34da6a3ce929d0e0e4736"
+PARENT = "00f067aa0ba902b7"
+
+# Every batch an exporter was given.
+class Collected
+  @batches : Store(Array(Array(SpanData)))
+  # Milliseconds each export takes, to show a request does not wait.
+  @pause : Int32
+  # While 1, `export` waits: a collector that does not answer.
+  @gate : Atomic(Int32)
+
+  def initialize(@pause : Int32 = 0)
+    @batches = Store.new { [] of Array(SpanData) }
+    @gate = Atomic(Int32).new(0)
+  end
+
+  def close_gate : Nil
+    @gate.set(1)
+  end
+
+  def open_gate : Nil
+    @gate.set(0)
+  end
+
+  def export(spans : Array(SpanData)) : Nil
+    while @gate.get == 1
+      sleep(5)
+    end
+    sleep(@pause) if @pause > 0
+    copy = List.new(spans)
+    @batches.update { |all| all << copy.to_a; nil }
+  end
+
+  def sizes : Array(Int32)
+    @batches.read { |all| List.new(all.map(&.size)) }.to_a
+  end
+
+  def spans : Array(SpanData)
+    @batches.read { |all| List.new(all.flatten) }.to_a
+  end
+end
+
+impl SpanExporter for Collected
+end
+
+def span_named(name : String) : SpanData
+  RequestSpan.server(nil, nil, name).finish
+end
+
+def traced(handler : TraceHandler) : Handler
+  chain([handler, routes { |r|
+    r.get "/users/:id" do |env|
+      if span = current_span(env)
+        span.set_attribute("user.id", env.params.url["id"])
+        span.add_event("cache miss", {"layer" => "redis"} of String => AttributeValue)
+      end
+      "user"
+    end
+    r.get "/boom" do |env|
+      env.response.status_code = 503
+      "down"
+    end
+    r.get "/downstream" do |env|
+      span = current_span(env)
+      span ? span.traceparent : ""
+    end
+  }])
+end
+
+def with_parent(path : String, traceparent : String, tracestate : String? = nil) : Request
+  req = http_request("GET", path)
+  req.headers["traceparent"] = traceparent
+  if state = tracestate
+    req.headers["tracestate"] = state
+  end
+  req
+end
+
+def hex?(text : String, size : Int32) : Bool
+  text.bytesize == size && text.chars.all? { |c| ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') }
+end
+
+describe "parse_traceparent" do
+  it "reads a version 00 header" do
+    found = parse_traceparent("00-#{TRACE}-#{PARENT}-01")
+    assert !found.nil?
+    if found
+      assert_eq TRACE, found.trace_id
+      assert_eq PARENT, found.parent_id
+      assert found.sampled?
+    end
+    unsampled = parse_traceparent(" 00-#{TRACE}-#{PARENT}-00 ")
+    assert !unsampled.nil? && !unsampled.as(TraceParent).sampled?
+  end
+
+  it "refuses version ff, upper case, zero ids and wrong lengths" do
+    assert_nil parse_traceparent("ff-#{TRACE}-#{PARENT}-01")
+    assert_nil parse_traceparent("00-#{TRACE.upcase}-#{PARENT}-01")
+    assert_nil parse_traceparent("00-#{"0" * 32}-#{PARENT}-01")
+    assert_nil parse_traceparent("00-#{TRACE}-#{"0" * 16}-01")
+    assert_nil parse_traceparent("00-#{TRACE}-#{PARENT}-01-extra")
+    assert_nil parse_traceparent("00-#{TRACE[0, 31]}-#{PARENT}-01")
+    assert_nil parse_traceparent("00-#{TRACE}-#{PARENT}-1")
+    assert_nil parse_traceparent("00_#{TRACE}-#{PARENT}-01")
+    assert_nil parse_traceparent("0g-#{TRACE}-#{PARENT}-01")
+    assert_nil parse_traceparent("00-#{TRACE}-#{PARENT}-0x")
+    assert_nil parse_traceparent("")
+  end
+
+  it "reads a later version, ignoring what follows a dash" do
+    later = parse_traceparent("01-#{TRACE}-#{PARENT}-01-what-comes-next")
+    assert !later.nil? && later.as(TraceParent).trace_id == TRACE && later.as(TraceParent).version == "01"
+    assert !parse_traceparent("cc-#{TRACE}-#{PARENT}-00").nil?
+    assert_nil parse_traceparent("01-#{TRACE}-#{PARENT}-01x")
+  end
+end
+
+describe "parse_tracestate" do
+  it "keeps a valid list, trimmed, without empty members" do
+    assert_eq "congo=t61rcWkgMzE,rojo=00f067aa0ba902b7", parse_tracestate(" congo=t61rcWkgMzE , ,rojo=00f067aa0ba902b7 ")
+    assert_eq "tenant1@vendor=x,1tenant@sys=y", parse_tracestate("tenant1@vendor=x,1tenant@sys=y")
+  end
+
+  it "discards the whole header for a bad key, a repeated key or too many members" do
+    assert_nil parse_tracestate("Congo=x")
+    assert_nil parse_tracestate("congo=x,congo=y")
+    assert_nil parse_tracestate("congo")
+    assert_nil parse_tracestate("congo=a,b")
+    assert_nil parse_tracestate("congo=a=b")
+    assert_nil parse_tracestate((1..33).map { |i| "k#{i}=v" }.join(","))
+    assert !parse_tracestate((1..32).map { |i| "k#{i}=v" }.join(",")).nil?
+  end
+end
+
+describe "TraceHandler" do
+  it "makes the request's span a child of the caller's" do
+    spans = Collected.new
+    tracer = TraceHandler.new(spans)
+    ctx = dispatch(traced(tracer), with_parent("/users/7", "00-#{TRACE}-#{PARENT}-01", "rojo=1"))
+    tracer.flush
+    span = spans.spans[0]
+    assert_eq TRACE, span.trace_id
+    assert_eq PARENT, span.parent_span_id
+    assert hex?(span.span_id, 16), span.span_id
+    assert span.span_id != PARENT
+    assert_eq "rojo=1", span.tracestate
+    assert_eq TRACE, ctx.get("trace_id")
+  end
+
+  it "starts a new trace for a request without a valid traceparent" do
+    spans = Collected.new
+    tracer = TraceHandler.new(spans)
+    dispatch(traced(tracer), with_parent("/users/7", "ff-#{TRACE}-#{PARENT}-01", "rojo=1"))
+    dispatch(traced(tracer), "GET", "/users/8")
+    tracer.flush
+    first = spans.spans[0]
+    second = spans.spans[1]
+    assert first.trace_id != TRACE
+    assert hex?(first.trace_id, 32) && hex?(second.trace_id, 32)
+    assert first.trace_id != second.trace_id
+    assert_nil first.parent_span_id
+    assert_nil first.tracestate
+  end
+
+  it "names the span by the route and sets the HTTP attributes and the route's own" do
+    spans = Collected.new
+    tracer = TraceHandler.new(spans)
+    dispatch(traced(tracer), "GET", "/users/42")
+    tracer.flush
+    span = spans.spans[0]
+    assert_eq "GET /users/:id", span.name
+    assert_eq "GET", span.attribute("http.request.method")
+    assert_eq "/users/:id", span.attribute("http.route")
+    assert_eq "/users/42", span.attribute("url.path")
+    assert_eq 200_i64, span.attribute("http.response.status_code")
+    assert_eq "localhost", span.attribute("server.address")
+    assert_eq "42", span.attribute("user.id")
+    assert_nil span.error
+    assert_eq 1, span.events.size
+    assert_eq "cache miss", span.events[0].name
+    assert span.end_unix_nano >= span.start_unix_nano
+  end
+
+  it "marks a 5xx answer an error, and names an unrouted request by its method" do
+    spans = Collected.new
+    tracer = TraceHandler.new(spans)
+    dispatch(traced(tracer), "GET", "/boom")
+    dispatch(traced(tracer), "GET", "/nowhere")
+    tracer.flush
+    boom = spans.spans[0]
+    assert_eq "HTTP 503", boom.error
+    assert_eq "503", boom.attribute("error.type")
+    missing = spans.spans[1]
+    assert_eq "GET", missing.name
+    assert_nil missing.attribute("http.route")
+    assert_nil missing.error
+  end
+
+  it "hands on a traceparent naming its own span, and exports no unsampled span" do
+    spans = Collected.new
+    tracer = TraceHandler.new(spans)
+    sent = dispatch(traced(tracer), with_parent("/downstream", "00-#{TRACE}-#{PARENT}-00")).response.body
+    tracer.flush
+    assert_eq 0, spans.spans.size
+    found = parse_traceparent(sent)
+    assert !found.nil?
+    if found
+      assert_eq TRACE, found.trace_id
+      assert found.parent_id != PARENT
+      assert !found.sampled?
+    end
+  end
+end
+
+describe "BatchSpanProcessor" do
+  it "without a runner, sends each full batch at once and the rest on flush" do
+    spans = Collected.new
+    processor = BatchSpanProcessor.new(spans, max_queue: 10, batch_size: 3, runner: Background.new)
+    7.times { |i| processor.on_end(span_named("s#{i}")) }
+    assert_eq [3, 3], spans.sizes
+    assert_eq 1, processor.queued
+    processor.flush
+    assert_eq [3, 3, 1], spans.sizes
+    assert_eq ["s0", "s1", "s2", "s3", "s4", "s5", "s6"], spans.spans.map(&.name)
+    assert_eq 7, processor.exported
+  end
+
+  it "sends from a background task, batches no larger than asked, without the caller waiting" do
+    runner = Background.new
+    spans = Collected.new(pause: 100)
+    processor = BatchSpanProcessor.new(spans, max_queue: 100, batch_size: 2, delay: Span.milliseconds(50), runner: runner)
+    longest = Span.zero
+    group do |g|
+      g.spawn do
+        runner.run
+        0
+      end
+      g.spawn do
+        while !runner.running?
+          sleep(1)
+        end
+        5.times do |i|
+          started = Time.monotonic
+          processor.on_end(span_named("s#{i}"))
+          took = Time.monotonic - started
+          longest = took if took > longest
+        end
+        runner.close(Span.seconds(10))
+        0
+      end
+    end
+    assert longest < Span.milliseconds(50), "on_end waited " + longest.total_milliseconds.to_s + "ms"
+    assert_eq 5, spans.spans.size
+    assert spans.sizes.all? { |size| size <= 2 }, spans.sizes.inspect
+    assert_eq 0, processor.queued
+  end
+
+  it "drops spans past max_queue rather than waiting for the exporter" do
+    runner = Background.new
+    spans = Collected.new
+    spans.close_gate
+    processor = BatchSpanProcessor.new(spans, max_queue: 3, batch_size: 3, delay: Span.milliseconds(10), runner: runner)
+    group do |g|
+      g.spawn do
+        runner.run
+        0
+      end
+      g.spawn do
+        while !runner.running?
+          sleep(1)
+        end
+        # The first three are taken by the sending task, which then waits
+        # at the closed gate; three more fill the queue; two are dropped.
+        3.times { |i| processor.on_end(span_named("a#{i}")) }
+        while processor.queued > 0
+          sleep(5)
+        end
+        5.times { |i| processor.on_end(span_named("b#{i}")) }
+        assert_eq 2, processor.dropped
+        spans.open_gate
+        runner.close(Span.seconds(10))
+        0
+      end
+    end
+    assert_eq 6, spans.spans.size
+    assert_eq ["a0", "a1", "a2", "b0", "b1", "b2"], spans.spans.map(&.name)
+  end
+
+  it "sends what is queued when the runner closes before the delay is up" do
+    runner = Background.new
+    spans = Collected.new
+    processor = BatchSpanProcessor.new(spans, batch_size: 100, delay: Span.seconds(60), runner: runner)
+    started = Time.monotonic
+    group do |g|
+      g.spawn do
+        runner.run
+        0
+      end
+      g.spawn do
+        while !runner.running?
+          sleep(1)
+        end
+        processor.on_end(span_named("last"))
+        runner.close(Span.seconds(10))
+        0
+      end
+    end
+    assert Time.monotonic - started < Span.seconds(5)
+    assert_eq ["last"], spans.spans.map(&.name)
+  end
+end
+
+describe "JsonLinesExporter" do
+  it "writes one JSON object per span per line" do
+    lines = Store.new { [] of String }
+    exporter = JsonLinesExporter.to { |line| lines.update { |l| l << line; nil } }
+    span = RequestSpan.server(parse_traceparent("00-#{TRACE}-#{PARENT}-01"), nil, "GET /x")
+    span.set_attribute("http.response.status_code", 200)
+    span.set_attribute("ok", true)
+    exporter.export([span.finish, span_named("other")])
+    written = lines.to_a
+    assert_eq 2, written.size
+    assert !written[0].includes?("\n")
+    parsed = JSON.parse(written[0])
+    assert_eq TRACE, parsed["trace_id"].as_s
+    assert_eq PARENT, parsed["parent_span_id"].as_s
+    assert_eq "GET /x", parsed["name"].as_s
+    assert_eq 200_i64, parsed["attributes"]["http.response.status_code"].as_i64
+    assert_eq true, parsed["attributes"]["ok"].as_bool
+    assert !parsed["parent_span_id"].as_s?.nil?
+    assert JSON.parse(written[1])["parent_span_id"].raw.nil?
+  end
+end
+
+describe "otlp_json" do
+  it "writes ExportTraceServiceRequest in OTLP's JSON mapping" do
+    span = RequestSpan.server(parse_traceparent("00-#{TRACE}-#{PARENT}-01"), "rojo=1", "GET /users/:id")
+    span.set_attribute("http.response.status_code", 500)
+    span.set_attribute("ratio", 0.5)
+    span.add_event("retry")
+    span.error("HTTP 500")
+    parsed = JSON.parse(otlp_json([span.finish], "shop"))
+    resource = parsed["resourceSpans"][0]
+    assert_eq "service.name", resource["resource"]["attributes"][0]["key"].as_s
+    assert_eq "shop", resource["resource"]["attributes"][0]["value"]["stringValue"].as_s
+    sent = resource["scopeSpans"][0]["spans"][0]
+    assert_eq TRACE, sent["traceId"].as_s
+    assert_eq PARENT, sent["parentSpanId"].as_s
+    assert_eq "rojo=1", sent["traceState"].as_s
+    assert_eq 2_i64, sent["kind"].as_i64
+    assert sent["startTimeUnixNano"].as_s.to_i64 > 0
+    assert_eq "http.response.status_code", sent["attributes"][0]["key"].as_s
+    assert_eq "500", sent["attributes"][0]["value"]["intValue"].as_s
+    assert_eq 0.5, sent["attributes"][1]["value"]["doubleValue"].as_f
+    assert_eq "retry", sent["events"][0]["name"].as_s
+    assert_eq 2_i64, sent["status"]["code"].as_i64
+    assert_eq "HTTP 500", sent["status"]["message"].as_s
+  end
+end
+
+describe "OtlpHttpExporter" do
+  it "posts a batch to a collector, and counts a refused post as failed" do
+    received = Store.new { [] of String }
+    collector = Router.new
+    collector.post "/v1/traces" do |env|
+      body = env.request.body
+      type = env.request.headers["Content-Type"]? || ""
+      received.update { |r| r << type + "\n" + body; nil }
+      "{}"
+    end
+    cfg = Config.new
+    cfg.logging = false
+    cfg.serve_static = false
+    server = build_server(collector, cfg)
+    port = server.bind("127.0.0.1", 0)
+    exporter = OtlpHttpExporter.new("http://127.0.0.1:#{port}/v1/traces", service_name: "shop", headers: {"X-Key" => "k"})
+    refused = OtlpHttpExporter.new("http://127.0.0.1:#{port}/elsewhere")
+    group do |g|
+      g.spawn do
+        server.listen
+        0
+      end
+      g.spawn do
+        exporter.export([span_named("GET /a"), span_named("GET /b")])
+        refused.export([span_named("GET /c")])
+        server.shutdown(0)
+        0
+      end
+    end
+    assert_eq 1, exporter.sent
+    assert_eq 0, exporter.failed
+    assert_eq 1, refused.failed
+    posts = received.to_a
+    assert_eq 1, posts.size
+    type, body = posts[0].split("\n", 2)
+    assert_eq "application/json", type
+    names = JSON.parse(body)["resourceSpans"][0]["scopeSpans"][0]["spans"].as_a.map { |s| s["name"].as_s }
+    assert_eq ["GET /a", "GET /b"], names
+  end
+end

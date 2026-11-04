@@ -1,12 +1,26 @@
-# Templates: render with the caller's locals, layouts, content_for, and the
-# path rule. Every relative path here is beside this file or, inside a
-# template, beside that template; iyi_web/templates.iyi has no views of its
-# own, so a path read beside the macro's file would not be found.
+# Templates: render with the caller's locals, layouts, content_for, the
+# path rule, and autoescape. Every relative path here is beside this file
+# or, inside a template, beside that template; iyi_web/templates.iyi has no
+# views of its own, so a path read beside the macro's file would not be
+# found.
 module iyi_web/templates_test
 
-import iyi_web/templates::{render, content_for, yield_content}
+import std/process::{Process, ProcessResult}
+import iyi_web/templates::{render, content_for, yield_content, raw, SafeHTML, HTMLBuffer}
 import iyi_web/harness::*
 import iyi_web/spec::*
+
+SCRIPT  = "<script>alert(\"x\" & 'y')</script>"
+ESCAPED = "&lt;script&gt;alert(&quot;x&quot; &amp; &#39;y&#39;)&lt;/script&gt;"
+
+# What `iyi check` says about *program*, a file in
+# fixtures/refused_templates: whether it passed, and its report.
+def check_refused(program : String) : {Bool, String}
+  compiler = Program.env("IYI") || "iyi"
+  ran = Process.run(compiler, ["check", "-f", "json", __DIR__ + "/fixtures/refused_templates/" + program])
+  raise "#{compiler} did not start: #{ran.inspect}" unless ran.is_a?(ProcessResult)
+  {ran.success?, ran.stderr}
+end
 
 # A render in a method, the way a controller renders: the macro expands in
 # this file, which imports `iyi_web/templates` and not `std/eiy`.
@@ -115,5 +129,89 @@ describe "content_for and yield_content" do
     page = render "fixtures/views/nested.eiy", "fixtures/views/nested_layout.eiy"
     view = "[" + WITH_META + "]\n"
     assert page == "outer|<html>Hello world\n</html>\n|" + view + "|outer\n"
+  end
+end
+
+describe "autoescape" do
+  it "escapes what <%= %> prints and leaves the template's own text alone" do
+    name = SCRIPT
+    markup = "<em>trusted</em>"
+    count = 3
+    nothing = nil
+    page = render "fixtures/views/escaped.eiy"
+    assert page == "<b>Hello</b> " + ESCAPED + "|<em>trusted</em>|3||<%= name %>\n"
+  end
+
+  it "escapes a request's text in a route" do
+    handler = routes do |r|
+      r.get "/view" do |env|
+        name = env.params.query["name"]
+        render "fixtures/views/page.eiy"
+      end
+    end
+    request = http_request("GET", "/view", "name=%3Cb%3E%22hi%22")
+    assert dispatch(handler, request).response.body == "Hello &lt;b&gt;&quot;hi&quot;\n"
+  end
+
+  it "prints raw(...) as is, and decides per value when a value may be either" do
+    markup = "<em>trusted</em>"
+    trusted = true
+    assert render("fixtures/views/choice.eiy") == "<em>trusted</em>"
+    trusted = false
+    assert render("fixtures/views/choice.eiy") == "&lt;em&gt;trusted&lt;/em&gt;"
+  end
+
+  it "does not escape a partial rendered inside a template a second time" do
+    name = SCRIPT
+    item = "<li>" + ESCAPED + "</li>"
+    # Rendered in iyi code, a page is a String: printed by a template, it is
+    # text like any other String, and raw(...) is how it prints as markup.
+    page = render "fixtures/views/escaped_item.eiy"
+    assert page == item
+    once_more = item.gsub("&", "&amp;").gsub("<", "&lt;").gsub(">", "&gt;")
+    assert render("fixtures/views/escaped_list.eiy") == "<ul>" + item + "</ul>|" + once_more + "|" + item + "\n"
+  end
+
+  it "does not escape the view in a layout's content, nor a yield_content, a second time" do
+    name = SCRIPT
+    page = render "fixtures/views/escaped_content_for.eiy", "fixtures/views/layout_with_yield.eiy"
+    framed = "<head><title>" + ESCAPED + "</title></head>\n<body><p>" + ESCAPED + "</p>\n</body>\n<aside>[]</aside>\n"
+    assert page == framed
+    assert render("fixtures/views/escaped_nested.eiy") == "[" + framed + "]\n"
+  end
+end
+
+describe "SafeHTML and HTMLBuffer" do
+  it "prints text as written, values escaped, and SafeHTML as is" do
+    buffer = HTMLBuffer.new
+    buffer.print("<p>")
+    buffer.output(SCRIPT)
+    buffer.output(42)
+    buffer.output(raw("<br>"))
+    buffer.output(nil)
+    buffer.print("</p>")
+    assert buffer.to_s == "<p>" + ESCAPED + "42<br></p>"
+    assert buffer.to_html == raw("<p>" + ESCAPED + "42<br></p>")
+  end
+
+  it "makes markup of any value's to_s" do
+    assert raw(7).to_s == "7"
+    assert raw("").empty?
+    assert !(raw("<a>") == raw("&lt;a&gt;"))
+  end
+end
+
+describe "a template the build refuses" do
+  it "names an unclosed tag's line and column in the template" do
+    passed, report = check_refused("unclosed_template.iyi")
+    assert !passed
+    assert report.includes?("unclosed.eiy: unterminated <%= tag at line 2, column 4")
+  end
+
+  it "puts an error inside a tag at the template's own line and column" do
+    passed, report = check_refused("undefined_template.iyi")
+    assert !passed
+    assert report.includes?("undefined.eiy\",\"line\":2,\"column\":8")
+    assert report.includes?("undefined local variable or method 'nonexistent_name'")
   end
 end

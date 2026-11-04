@@ -1,0 +1,116 @@
+# HS256 tokens: what is signed verifies, and every way a token can be
+# wrong - expired, early, tampered, unsigned, another algorithm - is
+# refused, saying which.
+module iyi_web/jwt_test
+
+import std/json::{JSON, serializable}
+import std/time::{Time, Span}
+import std/digest::{SHA256}
+import std/crypto::{HMAC}
+import iyi_web/jwt::*
+import iyi_web/token::{encode_base64url}
+import iyi_web/spec::*
+
+SECRET = "a-secret-of-at-least-thirty-two-bytes!"
+NOW    = Time.unix(1_800_000_000_i64)
+
+struct Session
+  getter sub : String
+  getter role : String
+  getter exp : Int64
+  derive serializable
+
+  def initialize(@sub : String, @role : String, @exp : Int64)
+  end
+end
+
+def refusal(result : T | JWTError) : String forall T
+  result.is_a?(JWTError) ? result.message : raise("the token was accepted")
+end
+
+# A token with this header and payload, signed with SECRET as given.
+def forged(header : String, payload : String) : String
+  signing = encode_base64url(header) + "." + encode_base64url(payload)
+  bytes = HMAC.digest(SHA256, SECRET, signing)
+  signing + "." + encode_base64url(String.new(bytes.size) { |target| target.copy_from(bytes.to_unsafe, bytes.size) })
+end
+
+describe "JWT" do
+  token = JWT.sign(Claims.new(sub: "ada", expires_in: Span.new(hours: 1), scope: "notes:read notes:write", now: NOW), SECRET)
+
+  it "verifies what it signed and reads the claims" do
+    claims = JWT.verify(token, SECRET, now: NOW + Span.new(minutes: 59)).or_panic
+    assert claims.sub == "ada"
+    assert claims.iat == 1_800_000_000_i64
+    assert claims.exp == 1_800_003_600_i64
+    assert claims.scopes == ["notes:read", "notes:write"]
+  end
+
+  it "reads the payload into a type of the application's own" do
+    signed = JWT.sign(Session.new("bo", "admin", NOW.to_unix + 60), SECRET)
+    session = JWT.verify(signed, SECRET, Session, now: NOW).or_panic
+    assert session.role == "admin"
+    assert refusal(JWT.verify(token, SECRET, Session, now: NOW)).starts_with?("invalid token claims: ")
+  end
+
+  it "refuses an expired token, with leeway taken into account" do
+    after = NOW + Span.new(hours: 1)
+    assert refusal(JWT.verify(token, SECRET, now: after)) == "token has expired"
+    assert JWT.verify(token, SECRET, leeway: 30, now: after).is_a?(Claims)
+    assert refusal(JWT.verify(token, SECRET, leeway: 30, now: after + Span.new(seconds: 30))) == "token has expired"
+  end
+
+  it "refuses a token not valid yet or issued in the future" do
+    early = forged(%({"alg":"HS256","typ":"JWT"}), %({"sub":"ada","nbf":#{NOW.to_unix + 100}}))
+    assert refusal(JWT.verify(early, SECRET, now: NOW)) == "token is not valid yet"
+    assert JWT.verify(early, SECRET, now: NOW + Span.new(seconds: 100)).is_a?(Claims)
+    future = forged(%({"alg":"HS256"}), %({"sub":"ada","iat":#{NOW.to_unix + 100}}))
+    assert refusal(JWT.verify(future, SECRET, now: NOW)) == "token was issued in the future"
+    wordy = forged(%({"alg":"HS256"}), %({"exp":"tomorrow"}))
+    assert refusal(JWT.verify(wordy, SECRET, now: NOW)) == "token exp is not a number"
+  end
+
+  it "refuses a token whose payload or signature was changed" do
+    parts = token.split('.')
+    other = encode_base64url(%({"sub":"eve","exp":#{NOW.to_unix + 3600}}))
+    assert refusal(JWT.verify(parts[0] + "." + other + "." + parts[2], SECRET, now: NOW)) == "invalid token signature"
+    last = parts[2]
+    flipped = last[0, last.bytesize - 1] + (last.ends_with?("A") ? "B" : "A")
+    assert refusal(JWT.verify(parts[0] + "." + parts[1] + "." + flipped, SECRET, now: NOW)) == "invalid token signature"
+    assert refusal(JWT.verify(token, SECRET + "x", now: NOW)) == "invalid token signature"
+  end
+
+  it "refuses alg none and every algorithm but HS256" do
+    payload = encode_base64url(%({"sub":"ada"}))
+    unsigned = encode_base64url(%({"alg":"none","typ":"JWT"})) + "." + payload + "."
+    assert refusal(JWT.verify(unsigned, SECRET, now: NOW)) == "malformed token"
+    signed_none = forged(%({"alg":"none"}), %({"sub":"ada"}))
+    assert refusal(JWT.verify(signed_none, SECRET, now: NOW)) == "unsupported token algorithm: only HS256 is accepted"
+    assert refusal(JWT.verify(forged(%({"alg":"HS512"}), %({"sub":"ada"})), SECRET, now: NOW)) == "unsupported token algorithm: only HS256 is accepted"
+    assert refusal(JWT.verify(forged(%({"alg":"hs256"}), %({"sub":"ada"})), SECRET, now: NOW)) == "unsupported token algorithm: only HS256 is accepted"
+    assert refusal(JWT.verify(forged(%({"typ":"JWT"}), %({"sub":"ada"})), SECRET, now: NOW)) == "unsupported token algorithm: only HS256 is accepted"
+  end
+
+  it "refuses what is not a token" do
+    assert refusal(JWT.verify("", SECRET)) == "malformed token"
+    assert refusal(JWT.verify("a.b", SECRET)) == "malformed token"
+    assert refusal(JWT.verify("a.b.c.d", SECRET)) == "malformed token"
+    assert refusal(JWT.verify("!!!.e30.sig", SECRET)) == "malformed token header"
+    assert refusal(JWT.verify(forged(%({"alg":"HS256"}), "[1]"), SECRET)) == "malformed token payload"
+    assert refusal(JWT.verify(forged(%({"alg":"HS256","crit":["exp"]}), "{}"), SECRET)) == "unsupported token header: crit"
+  end
+
+  it "checks issuer and audience when asked" do
+    issued = forged(%({"alg":"HS256"}), %({"iss":"https://id.example","aud":["api","web"]}))
+    claims = JWT.verify(issued, SECRET, issuer: "https://id.example", audience: "web").or_panic
+    assert claims.audiences == ["api", "web"]
+    assert JWT.verify(JWT.sign(Claims.new(aud: "api"), SECRET), SECRET, audience: "api").or_panic.audiences == ["api"]
+    assert refusal(JWT.verify(issued, SECRET, issuer: "https://evil.example")) == "token issuer is not accepted"
+    assert refusal(JWT.verify(issued, SECRET, audience: "admin")) == "token audience is not accepted"
+  end
+
+  it "answers 401 and refuses a short secret" do
+    assert JWTError.new("x").status == 401
+    assert panics? { JWT.sign(Claims.new(sub: "ada"), "short"); nil }
+  end
+end

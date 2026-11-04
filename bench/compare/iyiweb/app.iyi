@@ -1,0 +1,39 @@
+# iyi-web's side of bench/compare: the three endpoints every framework
+# there implements, with request logging and static files off, served on
+# every core (the default `workers`). bench/compare/run.iyi builds it with
+# `--release` and starts it with `-p PORT`.
+module bench/compare/iyiweb/app
+
+import std/json::{serializable}
+import iyi_web/dsl::*
+
+struct User
+  getter id : Int64
+  getter name : String
+  getter fields : String
+  derive serializable
+
+  def initialize(@id : Int64, @fields : String)
+    @name = "user-" + @id.to_s
+  end
+end
+
+get "/plaintext" do |env|
+  env.text("Hello, World!")
+end
+
+get "/json" do |env|
+  env.json({"message" => "Hello, World!"})
+end
+
+get "/users/:id" do |env|
+  if id = env.params.url["id"].to_i64?
+    env.json(User.new(id, env.params.query["fields"]? || ""))
+  else
+    env.halt(404, "Not Found")
+  end
+end
+
+logging(false)
+serve_static(false)
+run

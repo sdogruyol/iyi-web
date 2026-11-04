@@ -1,7 +1,8 @@
-<% content_for "title" do %><%= HTML.escape(book.title) %><% end -%>
+<% content_for "title" do %><%= book.title %><% end -%>
 <% content_for "head" do -%>
-<meta name="author" content="<%= HTML.escape(book.author) %>">
+<meta name="author" content="<%= book.author %>">
 <% end -%>
-<h1><%= HTML.escape(book.title) %></h1>
-<p>by <%= HTML.escape(book.author) %>, <%= book.year %></p>
+<h1><%= book.title %></h1>
+<p>by <%= book.author %>, <%= book.year %></p>
+<%= raw(stars(book.rating)) %>
 <p><a href="/">All books</a></p>

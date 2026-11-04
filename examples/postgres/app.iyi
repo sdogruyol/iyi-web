@@ -1,0 +1,50 @@
+# A JSON API over PostgreSQL: iyi-web for HTTP, iyilang/db for the
+# connection pool and iyilang/pg for the driver. A project of its own
+# (iyi.mod beside this file), run from this directory:
+#
+#   export DATABASE_URL=postgres://postgres:secret@127.0.0.1:5432/todos
+#   iyi run app.iyi                     # creates the tables, serves :3000
+#   bash smoke.sh                       # create, read, update, delete
+#
+#   curl localhost:3000/todos
+#   curl -X POST localhost:3000/todos -H 'Content-Type: application/json' -d '{"title":"Write docs"}'
+#   curl -X PATCH localhost:3000/todos/1 -H 'Content-Type: application/json' -d '{"done":true}'
+#   curl -X DELETE localhost:3000/todos/1
+#
+# DATABASE_URL takes iyi-db's pool options in its query string:
+# `?max_pool_size=20&max_idle_pool_size=20&checkout_timeout=2`. Without
+# DATABASE_URL the libpq variables (PGHOST, PGUSER, ...) and their
+# defaults apply, as `postgres:///` reads them.
+module app
+
+import db
+import pg
+import db/db/core::{Database}
+import db/db/errors::{DBError}
+import web/iyi_web/dsl::*
+import migrations::{migrate}
+import routes::{todo_routes}
+
+url = ENV["DATABASE_URL"]? || "postgres:///"
+
+# The pool, opened once. A database that cannot be reached at start stops
+# the program with the reason, before it listens: better than a server
+# that answers 503 to everything.
+database = case opened = Db.open(url)
+           in Database then opened
+           in DBError
+             STDERR.puts "cannot open " + url + ": " + opened.message
+             exit 1
+           end
+
+case applied = migrate(database)
+in Int32
+  puts "migrations: " + applied.to_s + " applied" if applied > 0
+in DBError
+  STDERR.puts "migration failed: " + applied.message
+  exit 1
+end
+
+mount todo_routes(database)
+
+run
