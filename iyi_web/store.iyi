@@ -1,0 +1,141 @@
+# State every worker shares, without the lock showing.
+#
+# A route may run on every core at once, so a table it changes has to be
+# behind a `Mutex` (SPEC.md III.4.4), and the `Mutex` asks three things of
+# every caller: a `.or_panic` for the `Cancelled` a wait may answer, a
+# `get` whose answer is `Share` because it leaves the lock, and so a
+# `List.new(todos.values)` where the route wanted `todos.values`.
+# `examples/typed_json.iyi` ran on one thread rather than pay that. A
+# `Store` pays it once:
+#
+#     TODOS = Store.new { {} of Int32 => Todo }
+#
+#     get "/todos" do |env|
+#       env.json(TODOS.values)                      # a copy, taken under the lock
+#     end
+#
+#     post "/todos" do |env|
+#       todo = Todo.new(TODOS.update { |todos| todos.size + 1 }, "new")
+#       TODOS.update { |todos| todos[todo.id] = todo }
+#       env.status(201).json(todo)
+#     end
+#
+# `read` and `update` run a block with the lock held and answer what it
+# answers; the answer still has to be `Share` - a number, a string, a
+# struct of those, a `List` - and a block that answers an `Array` or a
+# `Hash` is refused where it is written. The snapshot helpers (`values`,
+# `keys`, `to_a`, `to_h`, `[]?`, `size`) do the copying for the two
+# collections a store usually holds, and answer the plain `Array` and
+# `Hash` a route wants: the copy is the caller's, and nothing another
+# worker does reaches it.
+#
+# Each call is one critical section: a read followed by an update is two,
+# and another worker may come between them. Do the read and the change in
+# one `update` when the change depends on what was read.
+#
+# A `Store` is `Share` - a `Mutex` is its only field - so a route, a
+# handler or a background task captures one as it is, on every worker.
+module iyi_web/store
+
+import std/list::{List}
+import std/mutex::{Mutex}
+
+pub class Store(T)
+  @mutex : Mutex(T)
+
+  # The value is the block's, made here, so nothing outside the store
+  # holds it: `Store.new { {} of String => Int32 }`. The block is checked
+  # as `Mutex.new`'s is: it may capture only `Share` values.
+  @[Share]
+  def self.new(&block : -> U) : Store(U) forall U
+    Store(U).wrap(Mutex.new(&block))
+  end
+
+  protected def self.wrap(mutex : Mutex(T)) : Store(T)
+    new(mutex)
+  end
+
+  private def initialize(@mutex : Mutex(T))
+  end
+
+  # The block's answer, worked out with the lock held. Meant for looking:
+  # nothing stops the block from changing the value, but `update` says so
+  # to the reader.
+  @[Share]
+  pub def read(&block : T -> R) : R forall R
+    outcome = @mutex.get(&block)
+    raise CANCELLED if outcome.is_a?(Cancelled)
+    outcome
+  end
+
+  # Changes the value in place - a `Hash` or an `Array` - with the lock
+  # held, and answers the block's answer: an id handed out, the count after
+  # the change, or nil.
+  @[Share]
+  pub def update(&block : T -> R) : R forall R
+    outcome = @mutex.get(&block)
+    raise CANCELLED if outcome.is_a?(Cancelled)
+    outcome
+  end
+
+  # The value replaced by the block's answer, with the lock held: what a
+  # number or a struct wants, which a block cannot change in place.
+  #
+  #     HITS = Store.new { 0 }
+  #     HITS.replace { |n| n + 1 }
+  @[Share]
+  pub def replace(&block : T -> T) : Nil
+    outcome = @mutex.update(&block)
+    raise CANCELLED if outcome.is_a?(Cancelled)
+  end
+
+  # The value itself, for a `Share` one: a number, a string, a struct.
+  pub def get : T
+    read { |value| value }
+  end
+
+  # Replaces the value; *value* must be `Share`, since the store keeps it.
+  pub def set(value : T) : Nil
+    replace { |_| value }
+  end
+
+  # How many entries a collection holds.
+  pub def size : Int32
+    read { |value| value.size }
+  end
+
+  # The entry under *key* of a `Hash`, or the element at *key* of an
+  # `Array`; nil when there is none.
+  pub def []?(key)
+    read { |value| value[key]? }
+  end
+
+  # A `Hash`'s values, copied out in insertion order.
+  pub def values
+    read { |value| List.new(value.values) }.to_a
+  end
+
+  # A `Hash`'s keys, copied out in insertion order.
+  pub def keys
+    read { |value| List.new(value.keys) }.to_a
+  end
+
+  # An `Array`'s elements, or a `Hash`'s key-value pairs, copied out.
+  pub def to_a
+    read { |value| List.new(value.to_a) }.to_a
+  end
+
+  # A copy of a `Hash`, entries in the same order.
+  pub def to_h
+    pairs = read { |value| List.new(value.to_a) }
+    copy = {} of typeof(pairs[0][0]) => typeof(pairs[0][1])
+    pairs.each { |pair| copy[pair[0]] = pair[1] }
+    copy
+  end
+end
+
+# What a task cancelled while it waited for a store's lock panics with. It
+# is being cut off - a request at shutdown, a background task past the
+# drain - and has nothing to give its caller, so it ends there, as
+# `.or_panic` would end it.
+CANCELLED = "Store: cancelled while waiting for the lock"

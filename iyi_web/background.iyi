@@ -1,0 +1,297 @@
+# Work a request starts and does not wait for: the welcome mail after a
+# sign-up, the cache warmed after a write, a batch of spans sent to a
+# collector. FastAPI's `BackgroundTasks`, without the catch that the work
+# runs on the request's own event loop after the response.
+#
+#     post "/signup" do |env|
+#       email = env.params.body["email"]
+#       env.background { send_welcome(email) }
+#       env.status(201).text("welcome")
+#     end
+#
+# **Why a runner, and not a spawn.** iyi has no bare spawn (SPEC.md
+# III.4.1): every task belongs to a group, and a group's block cannot end
+# before its tasks do. A request's task ends when the response is written,
+# so work that must outlive it needs a group that lives longer: the
+# runner's. `run` holds that group for as long as the server serves (the
+# DSL's `run` starts it beside the listener), takes each job from a queue
+# and starts it with `spawn_parallel`, on whichever worker is free.
+#
+# **Isolation.** Each job runs inside a task of its own whose value the
+# runner reads, which is where iyi catches a panic (SPEC.md III.1.4): a
+# job that panics is reported (`on_panic`, standard error by default) and
+# counted, and neither the runner nor the server notices. The runtime
+# still prints its own panic line at the site.
+#
+# **Drain.** `close` stops taking jobs, waits for the ones queued and
+# running to finish for at most the time it is given - the DSL gives it
+# `shutdown_timeout` - and cancels what is left: a job waiting on a socket
+# or a sleep then answers `Cancelled`. A job computing without waiting is
+# not interrupted; the stop waits for it.
+#
+# **No runner.** Outside a running server - a test driven through
+# `iyi_web/harness`, a script, an `on_start` hook, or after the stop has
+# begun - nothing would ever take a queued job. `spawn` then runs the work
+# at once, on the caller's task, still isolated: a panic is reported and
+# the caller goes on.
+#
+# The block is checked as a route's is (SPEC.md III.4.4): it runs on
+# another worker, so it may capture only `Share` values - copy what it
+# needs from the request into locals first, and keep shared state in a
+# `Store`, an `Atomic` or behind a `Mutex`.
+module iyi_web/background
+
+import std/mutex::{Mutex}
+import std/shared_proc::{SharedProc}
+import std/time::{Span, Time}
+
+# One piece of background work, checked where it was written.
+pub alias BackgroundJob = SharedProc(Nil, Nil)
+
+# Standard error is one stream every worker may write to: a report takes
+# this lock, as `iyi_web/log`'s `StdoutLogger` takes its own for standard
+# output.
+STDERR_LOCK = Mutex.new { 0 }
+
+# The jobs waiting for the runner and what the runner is doing, behind
+# the `Background`'s lock.
+class BackgroundQueue
+  @jobs : Array(BackgroundJob)
+  # A runner is taking jobs: `run` started and `close` has not been
+  # called since.
+  @open : Bool
+  # `close` was called: the runner is to finish what it has and stop.
+  @closing : Bool
+  @deadline : Span?
+  # The runner's group has ended.
+  @finished : Bool
+  @reporter : SharedProc(String, Nil)?
+
+  def initialize
+    @jobs = [] of BackgroundJob
+    @open = false
+    @closing = false
+    @deadline = nil
+    @finished = true
+    @reporter = nil
+  end
+
+  def start : Bool
+    return false if @open || !@finished
+    @open = true
+    @closing = false
+    @deadline = nil
+    @finished = false
+    true
+  end
+
+  # Queued when a runner takes jobs; false when the caller must run it.
+  def offer(job : BackgroundJob) : Bool
+    return false unless @open
+    @jobs << job
+    true
+  end
+
+  # The next job, false once the runner is to stop taking them, or nil
+  # while there is nothing to do, which `wait_for` waits through.
+  def take : BackgroundJob | Bool | Nil
+    return @jobs.shift unless @jobs.empty?
+    @closing ? false : nil
+  end
+
+  def close(deadline : Span) : Nil
+    @open = false
+    @closing = true
+    @deadline = deadline
+  end
+
+  def deadline : Span?
+    @deadline
+  end
+
+  def finish : Nil
+    @finished = true
+    @open = false
+  end
+
+  def finished? : Bool
+    @finished
+  end
+
+  def open? : Bool
+    @open
+  end
+
+  def queued : Int32
+    @jobs.size
+  end
+
+  def reporter : SharedProc(String, Nil)?
+    @reporter
+  end
+
+  def reporter=(value : SharedProc(String, Nil)) : SharedProc(String, Nil)
+    @reporter = value
+  end
+end
+
+pub class Background
+  @queue : Mutex(BackgroundQueue)
+  # Jobs started and not yet ended, inline ones included.
+  @active : Atomic(Int32)
+  @panics : Atomic(Int32)
+  @completed : Atomic(Int32)
+
+  def initialize
+    @queue = Mutex.new { BackgroundQueue.new }
+    @active = Atomic(Int32).new(0)
+    @panics = Atomic(Int32).new(0)
+    @completed = Atomic(Int32).new(0)
+  end
+
+  # Runs *block* off the caller's path: on a worker, through the runner
+  # when one is running, else at once (see the module comment).
+  @[Share]
+  pub def spawn(&block : -> Nil) : Nil
+    submit(SharedProc(Nil, Nil).of { |_| block.call })
+  end
+
+  # *job* as `spawn` runs a block: the form a def that was handed a block
+  # and checked it (`SharedProc.of`) passes on.
+  pub def submit(job : BackgroundJob) : Nil
+    queued = @queue.get { |q| q.offer(job) }
+    run_inline(job) unless queued == true
+  end
+
+  # Where a job's panic is reported: *block* gets the panic's message. The
+  # default writes `background task panicked: MESSAGE` to standard error.
+  @[Share]
+  pub def on_panic(&block : String -> Nil) : Nil
+    reporter = SharedProc(String, Nil).of { |message| block.call(message) }
+    held(@queue.lock { |q| q.reporter = reporter })
+  end
+
+  # Takes jobs until `close`, each on a worker of its own, and returns
+  # once the last has ended or been cut off. One runner at a time: a
+  # second call while one runs panics.
+  pub def run : Nil
+    started = @queue.get { |q| q.start }
+    raise "Background#run: a runner is already taking jobs" unless started == true
+    me = self
+    group do |g|
+      while true
+        item = @queue.wait_for { |q| q.take }
+        break unless item.is_a?(BackgroundJob)
+        launch(g, item)
+      end
+      me.settle(g)
+    end
+    held(@queue.lock { |q| q.finish })
+  end
+
+  # Stops taking jobs and waits for the runner to finish the ones it has:
+  # at most *timeout*, after which what is still running is cancelled.
+  # Returns at once when no runner runs.
+  pub def close(timeout : Span) : Nil
+    deadline = Time.monotonic + timeout
+    held(@queue.lock { |q| q.close(deadline) })
+    while true
+      done = @queue.wait_for { |q| q.finished? ? true : nil }
+      return unless done.is_a?(Cancelled)
+    end
+  end
+
+  # Whether a runner is taking jobs now.
+  pub def running? : Bool
+    @queue.get { |q| q.open? } == true
+  end
+
+  # Jobs queued or running: what a stop would wait for.
+  pub def pending : Int32
+    queued = @queue.get { |q| q.queued }
+    (queued.is_a?(Int32) ? queued : 0) + @active.get
+  end
+
+  # Jobs that panicked, since the start.
+  pub def panics : Int32
+    @panics.get
+  end
+
+  # Jobs that ended without a panic, since the start.
+  pub def completed : Int32
+    @completed.get
+  end
+
+  # A parameter, not the loop's variable: a block spawned in a `while`
+  # would capture the one `job` the next turn overwrites.
+  private def launch(g : IyiGroup, job : BackgroundJob) : Nil
+    me = self
+    @active.add(1)
+    g.spawn_parallel do
+      me.isolated(job)
+      0
+    end
+  end
+
+  protected def isolated(job : BackgroundJob) : Nil
+    outcome = group do |inner|
+      task = inner.spawn do
+        job.call(nil)
+        0
+      end
+      task.value
+    end
+    @active.sub(1)
+    if outcome.is_a?(Panicked)
+      @panics.add(1)
+      report_panic(outcome.message)
+    else
+      @completed.add(1)
+    end
+  end
+
+  private def run_inline(job : BackgroundJob) : Nil
+    @active.add(1)
+    isolated(job)
+  end
+
+  # After `close`: the running jobs are given until the deadline, then
+  # cancelled; the group's end waits for them to stop.
+  protected def settle(g : IyiGroup) : Nil
+    found = @queue.get { |q| q.deadline }
+    deadline = found.is_a?(Span) ? found : Time.monotonic
+    while @active.get > 0 && Time.monotonic < deadline
+      sleep(10)
+    end
+    left = @active.get
+    return if left == 0
+    to_stderr("#{left} background task#{left == 1 ? "" : "s"} still running at the stop: cancelled")
+    g.cancel_children
+  end
+
+  private def report_panic(message : String) : Nil
+    found = @queue.get { |q| q.reporter }
+    if found.is_a?(SharedProc(String, Nil))
+      found.call(message)
+    else
+      to_stderr("background task panicked: " + message)
+    end
+  end
+
+  private def to_stderr(line : String) : Nil
+    held(STDERR_LOCK.lock { |_| stderr.puts(line) })
+  end
+
+  # A lock refused only because this task was cancelled while it waited:
+  # nothing it would do next is wanted.
+  private def held(outcome : Nil | Cancelled) : Nil
+  end
+end
+
+# The process's runner: the DSL's `background` and `Context#background`
+# hand their work to it, and `run` starts it beside the listener.
+pub BACKGROUND = Background.new
+
+pub def background_runner : Background
+  BACKGROUND
+end

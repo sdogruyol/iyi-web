@@ -63,4 +63,10 @@ use Counter.new, workers: 1
 use Counter.new, 0, workers: 1
 use "/api", Counter.new, workers: 1
 logger Collected.new, workers: 1
+on_start workers: 1 do
+  seen << "start"
+end
+on_stop workers: 1 do
+  seen << "stop"
+end
 run

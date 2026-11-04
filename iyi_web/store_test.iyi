@@ -1,0 +1,83 @@
+# Store: no update lost when every worker changes one value at once, the
+# snapshot helpers' copies untouched by later changes, and a store a route
+# captures served on more than one worker.
+module iyi_web/store_test
+
+import iyi_web/store::{Store}
+import iyi_web/spec::*
+
+struct Item
+  getter id : Int32
+  getter name : String
+
+  def initialize(@id : Int32, @name : String)
+  end
+end
+
+describe "Store" do
+  it "loses no update when parallel tasks change it at once" do
+    counts = Store.new { {} of String => Int32 }
+    total = Store.new { 0 }
+    group do |g|
+      8.times do |worker|
+        g.spawn_parallel do
+          1000.times do
+            counts.update { |h| h["hits"] = (h["hits"]? || 0) + 1 }
+            total.replace { |n| n + 1 }
+          end
+          counts.update { |h| h["worker"] = worker }
+          0
+        end
+      end
+    end
+    assert_eq 8000, counts["hits"]?
+    assert_eq 8000, total.get
+    assert_eq 2, counts.size
+  end
+
+  it "hands out ids no two tasks share, in one critical section" do
+    items = Store.new { {} of Int32 => Item }
+    group do |g|
+      4.times do
+        g.spawn_parallel do
+          250.times do
+            items.update { |h| id = h.size + 1; h[id] = Item.new(id, "n"); id }
+          end
+          0
+        end
+      end
+    end
+    assert_eq 1000, items.size
+    assert_eq (1..1000).to_a, items.keys.sorted
+  end
+
+  it "answers copies the store's later changes do not reach" do
+    items = Store.new { {} of Int32 => Item }
+    items.update { |h| h[1] = Item.new(1, "one"); h[2] = Item.new(2, "two") }
+    values = items.values
+    copy = items.to_h
+    items.update { |h| h.delete(1); h[3] = Item.new(3, "three") }
+    assert_eq ["one", "two"], values.map(&.name)
+    assert_eq [1, 2], copy.keys
+    assert_eq [2, 3], items.keys
+    three = items[3]?
+    assert_eq "three", three ? three.name : ""
+    assert_nil items[1]?
+  end
+
+  it "copies an array out with to_a" do
+    log = Store.new { [] of String }
+    log.update { |a| a << "a"; a << "b" }
+    snapshot = log.to_a
+    log.update { |a| a.delete("a"); a.delete("b") }
+    assert_eq ["a", "b"], snapshot
+    assert_eq 0, log.size
+  end
+
+  it "reads and sets a plain value" do
+    name = Store.new { "first" }
+    name.set("second")
+    assert_eq "second", name.get
+    assert_eq 6, name.read { |s| s.bytesize }
+  end
+end
