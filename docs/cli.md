@@ -37,7 +37,7 @@ of `DIR` is the project's name and has to be a module path: a lower-case
 letter, then lower-case letters, digits, `_` and `-` (`my-shop` yes, `My
 Shop` no).
 
-Every project has the same shape, the one [Testing](../README.md#testing)
+Every project has the same shape, the one [Testing](testing.md)
 describes: the routes are in their own module, as a function that builds a
 `Router`; `app.iyi` mounts it and serves it, and `app_test.iyi` sends it
 requests in-process, without opening a port.

@@ -7,7 +7,7 @@
 # holds something before it has written a single file into it: a half
 # scaffold over somebody's work is worse than none.
 #
-# Every kind has the same skeleton, the one README's "Testing" section
+# Every kind has the same skeleton, the one docs/testing.md
 # describes: the routes in their own module, as a function that builds a
 # `Router`, which `app.iyi` mounts and serves and `app_test.iyi` dispatches
 # to in-process. `iyi test` in the new directory runs the test with no port

@@ -2,7 +2,7 @@
 
 A route may run on every core at once, so state it changes has to be behind
 a lock, and the compiler refuses a route that captures a bare `Array` or
-`Hash` (see "Every core" in the README). `std/mutex`'s `Mutex` is the lock,
+`Hash` (see [Every core](every-core.md)). `std/mutex`'s `Mutex` is the lock,
 and it asks three things of every caller: a `.or_panic` for the `Cancelled`
 a wait may answer, an answer that is `Share` because it leaves the lock, and
 so a `List.new(todos.values)` where the route wanted `todos.values`.
@@ -30,8 +30,8 @@ get "/todos" do |env|
   env.json(TODOS.values)                # a copy, taken under the lock
 end
 
-get "/todos/:id" do |env|
-  todo = TODOS[env.params.url["id"].to_i? || 0]?
+get "/todos/:id", path: Int32 do |env, id|
+  todo = TODOS[id]?
   todo ? env.json(todo) : env.status(404).text("not found")
 end
 

@@ -209,8 +209,8 @@ end
 `body: T` reads the JSON body exactly as `env.params.json_as(T)` does, with
 the same answers: `415` for a body that is not declared JSON, `400` for one
 that does not parse (with line and column), `422` naming every field that is
-missing, of the wrong kind or fails `Validate`. See the README's "Typed JSON
-bodies" section for the full table.
+missing, of the wrong kind or fails `Validate`. See
+[Typed JSON bodies](parameters.md#typed-json-bodies) for the full table.
 
 ```iyi
 post "/notes", body: NoteInput do |env, input|
