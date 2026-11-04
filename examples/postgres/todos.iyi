@@ -1,0 +1,86 @@
+# The todos, as rows: the type a row is read into and written out as JSON,
+# the body a client sends, and one function per statement. Nothing here
+# knows about HTTP; routes.iyi turns these answers into responses.
+#
+# Every function takes the `Database` - iyi-db's pool - and answers its
+# value or a `DBError`. `!` hands a `DBError` up the moment a statement
+# fails, so each function reads as the statements it runs.
+module todos
+
+import std/json::{serializable}
+import db/db/core::{Database}
+import db/db/errors::{DBError}
+import db/db/serializable::{db_serializable}
+import web/iyi_web/validation::{Validate, Validator}
+
+# A row of `todos`. `db_serializable` reads it from a result set, column by
+# column into the field of the same name; `serializable` writes it as JSON.
+# Plain values only, so a `Todo` may cross between workers.
+pub struct Todo
+  getter id : Int64
+  getter title : String
+  getter done : Bool
+  derive db_serializable
+  derive serializable
+end
+
+# What a client sends to create a todo. `done` may be left out.
+pub struct NewTodo
+  getter title : String
+  getter done : Bool = false
+  derive serializable
+end
+
+impl Validate for NewTodo
+  def validate(v : Validator) : Nil
+    v.required("title", title)
+    v.length("title", title, max: 200)
+  end
+end
+
+# What a client sends to change a todo: either field, or both. One left
+# out keeps its value.
+pub struct TodoChange
+  getter title : String? = nil
+  getter done : Bool? = nil
+  derive serializable
+end
+
+impl Validate for TodoChange
+  def validate(v : Validator) : Nil
+    if text = title
+      v.required("title", text)
+      v.length("title", text, max: 200)
+    end
+  end
+end
+
+COLUMNS = "id, title, done"
+
+pub def all_todos(db : Database) : Array(Todo) | DBError
+  db.query_all("SELECT " + COLUMNS + " FROM todos ORDER BY id", as: Todo)
+end
+
+# nil when there is no such todo.
+pub def find_todo(db : Database, id : Int64) : Todo | Nil | DBError
+  db.query_one?("SELECT " + COLUMNS + " FROM todos WHERE id = $1", id, as: Todo)
+end
+
+pub def create_todo(db : Database, title : String, done : Bool) : Todo | DBError
+  db.query_one("INSERT INTO todos (title, done) VALUES ($1, $2) RETURNING " + COLUMNS, title.strip, done, as: Todo)
+end
+
+# Changes what *change* names and keeps the rest, in one statement: two
+# PATCHes at once each change their own fields and lose neither. nil when
+# there is no such todo.
+pub def update_todo(db : Database, id : Int64, change : TodoChange) : Todo | Nil | DBError
+  title = change.title
+  db.query_one?(
+    "UPDATE todos SET title = COALESCE($2, title), done = COALESCE($3, done) WHERE id = $1 RETURNING " + COLUMNS,
+    id, title ? title.strip : nil, change.done, as: Todo)
+end
+
+# Whether a todo was there to delete.
+pub def delete_todo(db : Database, id : Int64) : Bool | DBError
+  db.exec("DELETE FROM todos WHERE id = $1", id)!.rows_affected > 0
+end

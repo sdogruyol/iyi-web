@@ -1,0 +1,195 @@
+# `iyi-web new`'s files: the names it takes, the directories it refuses,
+# and - the check that matters - that each kind of project it writes
+# builds and passes its own test. That last part writes each kind into a
+# temporary directory with `replace` pointing at this checkout and runs
+# `iyi test` there, through the `iyi` on the PATH or the one `IYI` names.
+module cmd/scaffold_test
+
+import std/dir::{Dir}
+import std/file::{File}
+import std/file_utils::{FileUtils}
+import std/process::{Process, ProcessResult, ProcessError}
+import std/text
+import std/enumerable
+import cmd/scaffold::*
+import cmd/usage::{UsageError}
+import iyi_web/spec::*
+
+IYI  = ENV["IYI"]? || "iyi"
+ROOT = File.dirname(__DIR__)
+
+def scratch(label : String) : String
+  path = File.join(Dir.tempdir, "iyi-web-new-" + label + "-" + Process.pid.to_s)
+  FileUtils.rm_rf(path)
+  path
+end
+
+def content(files : Array(ScaffoldFile), path : String) : String
+  found = files.find { |file| file.path == path }
+  found ? found.content : ""
+end
+
+def iyi(args : Array(String), dir : String) : ProcessResult
+  case result = Process.run(IYI, args, chdir: dir)
+  in ProcessResult then result
+  in ProcessError  then raise "could not run " + IYI + ": " + result.reason
+  in Cancelled     then raise "cancelled"
+  end
+end
+
+describe "project_name?" do
+  it "takes the last path segment" do
+    assert project_name?("myapp") == "myapp"
+    assert project_name?("../work/my-app") == "my-app"
+    assert project_name?("C:\\work\\shop_2") == "shop_2"
+    assert project_name?("blog/") == "blog"
+  end
+
+  it "refuses what is not a module path" do
+    assert project_name?("MyApp").nil?
+    assert project_name?("2fast").nil?
+    assert project_name?("my app").nil?
+    assert project_name?("").nil?
+    assert project_name?("-x").nil?
+  end
+end
+
+def parsed(args : Array(String)) : NewOptions
+  result = parse_new_args(args)
+  raise "refused: " + result.message if result.is_a?(UsageError)
+  result
+end
+
+def refusal(args : Array(String)) : String
+  result = parse_new_args(args)
+  result.is_a?(UsageError) ? result.message : ""
+end
+
+describe "parse_new_args" do
+  it "writes a basic project unless --api or --full, the last one winning" do
+    assert parsed(["shop"]).kind == Kind::Basic
+    assert parsed(["--api", "shop"]).kind == Kind::Api
+    assert parsed(["shop", "--full"]).kind == Kind::Full
+    assert parsed(["--api", "shop", "--full"]).kind == Kind::Full
+  end
+
+  it "names the project after the directory's last segment" do
+    o = parsed(["work/my-shop"])
+    assert o.directory == "work/my-shop"
+    assert o.name == "my-shop"
+    assert o.web_path.nil?
+  end
+
+  it "makes --web-path absolute, with / separators" do
+    path = parsed(["shop", "--web-path", ROOT]).web_path || ""
+    assert path == ROOT.gsub("\\", "/")
+    assert !path.includes?("\\")
+  end
+
+  it "refuses a missing directory, a second one, a bad name and unknown options" do
+    assert refusal([] of String).includes?("needs a directory")
+    assert refusal(["a", "b"]).includes?("one directory")
+    assert refusal(["My Shop"]).includes?("not a project name")
+    assert refusal(["shop", "--rails"]).includes?("unknown option --rails")
+  end
+
+  it "refuses a --web-path that does not hold iyi-web" do
+    assert refusal(["shop", "--web-path"]).includes?("needs a directory")
+    assert refusal(["shop", "--web-path", __DIR__]).includes?("does not hold iyi-web")
+  end
+end
+
+describe "scaffold_files" do
+  it "requires iyi-web as web at the pinned release" do
+    files = scaffold_files("shop", Kind::Basic)
+    manifest = content(files, "iyi.mod")
+    assert manifest.includes?("module shop\n")
+    assert manifest.includes?("require github.com/sdogruyol/iyi-web v" + WEB_VERSION + " as web\n")
+    assert !manifest.includes?("replace")
+  end
+
+  it "replaces iyi-web with a local checkout when given one, quoted if it has a space" do
+    assert content(scaffold_files("shop", Kind::Basic, "/src/iyi-web"), "iyi.mod").includes?("replace github.com/sdogruyol/iyi-web => /src/iyi-web\n")
+    assert content(scaffold_files("shop", Kind::Basic, "C:/my code/iyi-web"), "iyi.mod").includes?(%(=> "C:/my code/iyi-web"\n))
+  end
+
+  it "gives every kind an entry, a routes module, a test and a .gitignore" do
+    [Kind::Basic, Kind::Api, Kind::Full].each do |kind|
+      paths = scaffold_files("shop", kind).map(&.path)
+      ["iyi.mod", "app.iyi", "app_test.iyi", ".gitignore", "README.md"].each do |path|
+        assert paths.includes?(path)
+      end
+      assert paths.any?(&.starts_with?("routes/"))
+    end
+  end
+
+  it "writes views/ and public/ only for --full" do
+    full = scaffold_files("shop", Kind::Full).map(&.path)
+    assert full.includes?("views/layout.eiy")
+    assert full.includes?("public/css/app.css")
+    assert content(scaffold_files("shop", Kind::Full), "app.iyi").includes?(%(public_folder "public"))
+    [Kind::Basic, Kind::Api].each do |kind|
+      assert scaffold_files("shop", kind).none? { |file| file.path.starts_with?("views/") || file.path.starts_with?("public/") }
+    end
+  end
+
+  it "names the project in the generated code" do
+    assert content(scaffold_files("shop", Kind::Basic), "routes/home.iyi").includes?(%("Hello from shop!"))
+    assert content(scaffold_files("shop", Kind::Full), "routes/pages.iyi").includes?(%(title = "shop"))
+  end
+end
+
+describe "write_project" do
+  it "writes every file, creating the directories on the way" do
+    dir = scratch("write")
+    assert write_project(dir, scaffold_files("shop", Kind::Full)).nil?
+    assert File.read(File.join(dir, "views/index.eiy")).includes?("<h1>")
+    assert File.file?(File.join(dir, "public/css/app.css"))
+    FileUtils.rm_rf(dir)
+  end
+
+  it "takes an empty directory that already exists" do
+    dir = scratch("empty")
+    Dir.mkdir_p(dir)
+    assert write_project(dir, scaffold_files("shop", Kind::Basic)).nil?
+    assert File.file?(File.join(dir, "app.iyi"))
+    FileUtils.rm_rf(dir)
+  end
+
+  it "refuses a directory with anything in it, and writes nothing" do
+    dir = scratch("busy")
+    Dir.mkdir_p(dir)
+    File.write(File.join(dir, "notes.txt"), "mine")
+    error = write_project(dir, scaffold_files("shop", Kind::Basic))
+    assert error.is_a?(ScaffoldError)
+    assert error.as(ScaffoldError).message.includes?("not empty")
+    assert Dir.children(dir) == ["notes.txt"]
+    FileUtils.rm_rf(dir)
+  end
+
+  it "refuses a file in the way" do
+    dir = scratch("file")
+    File.write(dir, "x")
+    assert write_project(dir, scaffold_files("shop", Kind::Basic)).is_a?(ScaffoldError)
+    File.delete(dir)
+  end
+end
+
+# The generated projects against this checkout: each builds and its own
+# test passes.
+describe "a new project" do
+  [Kind::Basic, Kind::Api, Kind::Full].each do |kind|
+    it "of kind " + kind.to_s + " passes its test and builds" do
+      dir = scratch(kind.to_s.downcase)
+      assert write_project(dir, scaffold_files("shop", kind, ROOT)).nil?
+      tested = iyi(["test"], dir)
+      puts tested.stdout + tested.stderr unless tested.success?
+      assert tested.success?
+      assert tested.stdout.includes?("1 passed, 0 failed")
+      built = iyi(["build", "app.iyi", "-o", "app"], dir)
+      puts built.stdout + built.stderr unless built.success?
+      assert built.success?
+      FileUtils.rm_rf(dir)
+    end
+  end
+end

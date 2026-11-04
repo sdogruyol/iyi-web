@@ -1,0 +1,194 @@
+# `iyi-web dev`: its arguments, and the loop itself, end to end. The second
+# part builds the `iyi-web` command, writes a new project that builds
+# against this checkout, runs `iyi-web dev` on it and drives it as a person
+# would: a saved edit is served after a rebuild, a syntax error leaves the
+# last good build answering, and the fix is served again. It takes the time
+# four builds take, a few seconds each.
+module cmd/dev_test
+
+import std/dir::{Dir}
+import std/file::{File}
+import std/file_utils::{FileUtils}
+import std/process::{Process, ProcessResult, ProcessError, ChildProcess, Redirect}
+import std/socket::{IyiSocket, SocketError}
+import std/text
+import std/enumerable
+import cmd/dev::*
+import cmd/scaffold::{Kind, scaffold_files, write_project}
+import cmd/usage::{UsageError}
+import iyi_web/harness::{http_body}
+import iyi_web/spec::*
+
+IYI  = ENV["IYI"]? || "iyi"
+ROOT = File.dirname(__DIR__)
+
+def options(args : Array(String)) : DevOptions
+  parsed = parse_dev_args(args)
+  raise "refused: " + parsed.message if parsed.is_a?(UsageError)
+  parsed
+end
+
+def refusal(args : Array(String)) : String
+  parsed = parse_dev_args(args)
+  parsed.is_a?(UsageError) ? parsed.message : ""
+end
+
+describe "parse_dev_args" do
+  it "runs app.iyi every 500 ms with no arguments" do
+    o = options([] of String)
+    assert o.entry == "app.iyi"
+    assert o.interval_ms == 500
+    assert o.app_args.empty?
+    assert o.watch.empty?
+  end
+
+  it "takes an entry, watched directories and an interval" do
+    o = options(["server.iyi", "--watch", "../lib", "--interval", "250", "--watch", "shared"])
+    assert o.entry == "server.iyi"
+    assert o.watch == ["../lib", "shared"]
+    assert o.interval_ms == 250
+  end
+
+  it "hands everything after -- to the program, options included" do
+    o = options(["app.iyi", "--", "-p", "8080", "--watch", "x", "--"])
+    assert o.entry == "app.iyi"
+    assert o.app_args == ["-p", "8080", "--watch", "x", "--"]
+    assert o.watch.empty?
+    assert options(["--"]).app_args.empty?
+  end
+
+  it "refuses what it does not know, naming --" do
+    assert refusal(["-p", "8080"]).includes?("arguments for the program go after --")
+    assert refusal(["a.iyi", "b.iyi"]).includes?("one entry file")
+    assert refusal(["--watch"]).includes?("--watch needs a directory")
+    assert refusal(["--interval", "fast"]).includes?("milliseconds")
+    assert refusal(["--interval", "10"]).includes?("at least 50")
+    assert refusal(["--interval"]).includes?("milliseconds")
+  end
+end
+
+# The response body of GET *path*, or nil while nothing answers.
+def get(port : Int32, path : String) : String?
+  client = IyiSocket.connect("127.0.0.1", port, 1000)
+  return nil unless client.is_a?(IyiSocket)
+  sent = client.write("GET " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+  buffer = ""
+  unless sent.is_a?(SocketError) || sent.is_a?(Cancelled)
+    loop do
+      chunk = client.read(65536)
+      break unless chunk.is_a?(String)
+      break if chunk.empty?
+      buffer = buffer + chunk
+    end
+  end
+  client.close
+  buffer.starts_with?("HTTP/1.1 200") ? http_body(buffer) : nil
+end
+
+# Polls *check* every 100 ms for up to *seconds*.
+def within(seconds : Int32, &check : -> Bool) : Bool
+  tries = 0
+  while tries < seconds * 10
+    return true if check.call
+    sleep(100)
+    tries += 1
+  end
+  false
+end
+
+class Lines
+  getter all : Array(String) = [] of String
+
+  def initialize
+  end
+
+  def count(text : String) : Int32
+    @all.count(&.includes?(text))
+  end
+end
+
+def run_iyi(args : Array(String), dir : String) : Nil
+  case result = Process.run(IYI, args, chdir: dir)
+  in ProcessResult
+    raise "iyi " + args.join(" ") + " failed:\n" + result.stdout + result.stderr unless result.success?
+  in ProcessError
+    raise "could not run " + IYI + ": " + result.reason
+  in Cancelled
+    raise "cancelled"
+  end
+end
+
+describe "iyi-web dev" do
+  it "rebuilds and restarts on a change, and keeps the last good build through a broken one" do
+    scratch = File.join(Dir.tempdir, "iyi-web-dev-" + Process.pid.to_s)
+    FileUtils.rm_rf(scratch)
+    project = File.join(scratch, "shop")
+    Dir.mkdir_p(scratch)
+    run_iyi(["build", File.join(ROOT, "cmd", "iyi_web.iyi"), "-o", File.join(scratch, "iyi-web")], ROOT)
+    assert write_project(project, scaffold_files("shop", Kind::Basic, ROOT.gsub("\\", "/"))).nil?
+    routes = File.join(project, "routes", "home.iyi")
+    source = File.read(routes)
+    port = 39000 + (Process.pid % 1000).to_i32
+    command = File.join(scratch, {{ flag?(:win32) }} ? "iyi-web.exe" : "iyi-web")
+
+    dev = Process.spawn(command, ["dev", "--interval", "200", "--", "-p", port.to_s], output: Redirect::Pipe, error: Redirect::Pipe, chdir: project)
+    raise "could not start iyi-web: " + dev.reason if dev.is_a?(ProcessError)
+    lines = Lines.new
+    passed = false
+
+    group do |g|
+      # Both streams: the compiler writes its errors to one of them.
+      [dev.stdout, dev.stderr].each do |stream|
+        g.spawn do
+          while line = stream.read_line
+            break unless line.is_a?(String)
+            lines.all << line
+          end
+          0
+        end
+      end
+      g.spawn do
+        # The first build, then the program on the port.
+        assert within(120) { get(port, "/") == "Hello from shop!" }
+        assert lines.count("[dev] started app.iyi") == 1
+
+        # A saved edit: rebuilt, the old program stopped, the new one served.
+        File.write(routes, source.sub(%("Hello from shop!"), %("Edited!")))
+        assert within(120) { get(port, "/") == "Edited!" }
+        assert lines.count("[dev] started app.iyi") == 2
+        assert lines.count("[dev] changed routes") == 1
+
+        # A syntax error: the build fails and says why, and the program
+        # that was running answers as before.
+        File.write(routes, source.sub(%("Hello from shop!"), %("Broken" +)))
+        assert within(120) { lines.count("build failed; the previous build keeps running") == 1 }
+        assert lines.count("Error: ") >= 1
+        assert get(port, "/") == "Edited!"
+        assert get(port, "/hello/ada") == "Hello, ada!"
+        assert lines.count("[dev] started app.iyi") == 2
+
+        # Fixed: served again, by a third program.
+        File.write(routes, source.sub(%("Hello from shop!"), %("Fixed!")))
+        assert within(120) { get(port, "/") == "Fixed!" }
+        assert lines.count("[dev] started app.iyi") == 3
+
+        # A file under public/ is reported and changes nothing else.
+        Dir.mkdir_p(File.join(project, "public"))
+        File.write(File.join(project, "public", "note.txt"), "static")
+        assert within(30) { lines.count("nothing to rebuild") == 1 }
+        assert get(port, "/note.txt") == "static"
+        assert lines.count("[dev] building") == 4
+        passed = true
+
+        # Stopping dev stops the program it started.
+        dev.terminate
+        dev.wait
+        assert within(30) { get(port, "/").nil? }
+        0
+      end
+    end
+    puts lines.all.join("\n") unless passed
+    assert passed
+    FileUtils.rm_rf(scratch)
+  end
+end
