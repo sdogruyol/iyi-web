@@ -1,0 +1,18 @@
+# An application whose `on_start` hook panics: run by
+# iyi_web/lifecycle_test.iyi, which expects the start to stop and the exit
+# to carry the panic's message.
+module iyi_web/lifecycle_apps/panicking_start
+
+import iyi_web/dsl::*
+
+logging false
+
+on_start do
+  raise "config file missing"
+end
+
+get "/" do |env|
+  "never served"
+end
+
+run 0

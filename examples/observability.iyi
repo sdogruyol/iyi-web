@@ -1,0 +1,110 @@
+# Observability and the life around requests: a `Store` every worker
+# shares, Prometheus metrics at /metrics, a trace span per request sent to
+# an OpenTelemetry collector (or printed as JSON lines), work done in the
+# background after the response, and hooks that run once at start and
+# stop. Run from the repository root with
+# `iyi run examples/observability.iyi`; set `OTLP_ENDPOINT` to send spans
+# to a collector instead of standard output:
+#
+#   OTLP_ENDPOINT=http://localhost:4318/v1/traces iyi run examples/observability.iyi
+#
+#   curl -X POST -d 'item=tea' localhost:3000/orders
+#   curl -H 'traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' localhost:3000/orders/1
+#   curl localhost:3000/orders
+#   curl localhost:3000/metrics
+module examples/observability
+
+import std/json::{ToJSON, Builder}
+import std/time::{Span}
+import iyi_web/dsl::*
+import iyi_web/store::{Store}
+import iyi_web/metrics::{MetricsHandler, METRICS}
+import iyi_web/tracing::{TraceHandler, OtlpHttpExporter, JsonLinesExporter, SpanExporter, current_span}
+
+struct Order
+  getter id : Int32
+  getter item : String
+  getter receipt_sent : Bool
+
+  def initialize(@id : Int32, @item : String, @receipt_sent : Bool = false)
+  end
+
+  def with_receipt : Order
+    Order.new(@id, @item, true)
+  end
+
+  def to_json(json : Builder) : Nil
+    json.object do
+      json.field "id", @id
+      json.field "item", @item
+      json.field "receipt_sent", @receipt_sent
+    end
+  end
+end
+
+impl ToJSON for Order
+end
+
+# Every worker reads and writes this one table; the `Store` holds the lock.
+ORDERS = Store.new { {} of Int32 => Order }
+
+ORDERS_CREATED = METRICS.counter("orders_created_total", "Orders taken, by item.", ["item"])
+RECEIPTS_SENT  = METRICS.counter("receipts_sent_total", "Receipts sent in the background.")
+
+def exporter : SpanExporter
+  if endpoint = Program.env("OTLP_ENDPOINT")
+    OtlpHttpExporter.new(endpoint, service_name: "observability-example")
+  else
+    JsonLinesExporter.new
+  end
+end
+
+logging false
+
+# First in the chain: every request is counted and traced, static files too.
+use MetricsHandler.new, 0
+tracer = TraceHandler.new(exporter, delay: Span.milliseconds(500))
+tracer.exclude ["/metrics"]
+use tracer, 1
+
+on_start do
+  ORDERS.update { |orders| orders[1] = Order.new(1, "coffee", true); nil }
+  puts "on_start: seeded #{ORDERS.size} order"
+end
+
+on_stop do
+  puts "on_stop: #{ORDERS.size} orders, #{RECEIPTS_SENT.value.to_i} receipts sent"
+end
+
+get "/orders" do |env|
+  env.json(ORDERS.values)
+end
+
+get "/orders/:id" do |env|
+  id = env.params.url["id"].to_i? || 0
+  order = ORDERS[id]?
+  if span = current_span(env)
+    span.set_attribute("order.id", id)
+    span.add_event(order ? "order found" : "order missing")
+  end
+  if order
+    env.json(order)
+  else
+    env.status(404).json({"error" => "not found"})
+  end
+end
+
+post "/orders" do |env|
+  item = env.params.body["item"]? || "unknown"
+  id = ORDERS.update { |orders| next_id = orders.size + 1; orders[next_id] = Order.new(next_id, item); next_id }
+  ORDERS_CREATED.inc([item])
+  # The response goes now; the receipt is sent after it, on another worker.
+  env.background do
+    sleep(100)
+    ORDERS.update { |orders| (found = orders[id]?) ? (orders[id] = found.with_receipt) : nil; nil }
+    RECEIPTS_SENT.inc
+  end
+  env.status(201).json({"id" => id})
+end
+
+run

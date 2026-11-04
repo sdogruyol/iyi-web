@@ -1,0 +1,141 @@
+# What an application does once when it starts and once when it stops:
+# open the database pool, warm a cache, check a migration has run; flush
+# what is buffered and close what was opened. FastAPI's `lifespan`, as two
+# hooks.
+#
+#     on_start do
+#       DB.connect(ENV_URL)     # a returned error, or a panic, stops the start
+#     end
+#
+#     on_stop do
+#       DB.close                # after the last request has been answered
+#     end
+#
+# **Start.** The DSL's `run` calls every `on_start` hook, in the order
+# they were registered, before the server is bound, so nothing is
+# accepted until they have all returned. A hook that answers an `Error`
+# value or panics ends the start: the hooks after it do not run, and the
+# program exits naming the hook (its file and line) and the failure. A
+# server that cannot reach its database should say so before it takes
+# traffic, not on the first request.
+#
+# **Stop.** On `stop`, or the first INT or TERM, the listener closes, the
+# requests in flight finish (`shutdown_timeout`), the background tasks
+# still running get what is left of that time, and then the `on_stop`
+# hooks run, the last registered first - what was opened last is closed
+# first, as `defer`s unwind. A hook that fails is reported and the others
+# still run: one broken cleanup must not skip the rest.
+#
+# A hook's block is checked where it is written, as a route's is (SPEC.md
+# III.4.4): it usually touches the same state the routes do. `workers: 1`
+# keeps it unchecked; unlike a route, that does not put the server on one
+# thread, since a hook runs once, on the thread that calls `run`, while no
+# request is being served.
+module iyi_web/lifecycle
+
+import std/shared_proc::{SharedProc}
+import iyi_web/kept::{Kept}
+
+# A hook as the lifecycle keeps it: what it answers is nil, or why it
+# failed.
+pub alias LifecycleHook = Kept(Nil, String?)
+
+# One registered hook and where it was written, for the message that
+# names it.
+struct Registered
+  getter hook : LifecycleHook
+  getter site : String
+
+  def initialize(@hook : LifecycleHook, @site : String)
+  end
+end
+
+pub class Lifecycle
+  @start : Array(Registered)
+  @stop : Array(Registered)
+
+  def initialize
+    @start = [] of Registered
+    @stop = [] of Registered
+  end
+
+  pub def add_start(hook : LifecycleHook, site : String) : Nil
+    @start << Registered.new(hook, site)
+  end
+
+  pub def add_stop(hook : LifecycleHook, site : String) : Nil
+    @stop << Registered.new(hook, site)
+  end
+
+  pub def start_hooks : Int32
+    @start.size
+  end
+
+  pub def stop_hooks : Int32
+    @stop.size
+  end
+
+  # Runs the start hooks in order until one fails; nil when all of them
+  # succeeded, or `on_start (app.iyi:12) failed: why` for the one that did
+  # not.
+  pub def run_start : String?
+    @start.each do |entry|
+      if problem = run_hook(entry.hook)
+        return "on_start (" + entry.site + ") " + problem
+      end
+    end
+    nil
+  end
+
+  # Runs every stop hook, the last registered first, and answers what the
+  # failing ones said, in the order they ran.
+  pub def run_stop : Array(String)
+    failures = [] of String
+    @stop.reversed.each do |entry|
+      if problem = run_hook(entry.hook)
+        failures << "on_stop (" + entry.site + ") " + problem
+      end
+    end
+    failures
+  end
+
+  # Forgets every hook: for a test that registers its own.
+  pub def clear : Nil
+    @start = [] of Registered
+    @stop = [] of Registered
+  end
+end
+
+# *hook* in a task of its own, which is where a panic is caught: nil, or
+# what went wrong.
+private def run_hook(hook : LifecycleHook) : String?
+  call = hook.serial
+  outcome = group do |g|
+    task = g.spawn { call.call(nil) }
+    task.value
+  end
+  return "panicked: " + outcome.message if outcome.is_a?(Panicked)
+  outcome ? "failed: " + outcome : nil
+end
+
+# A hook's block as the lifecycle keeps it: an answer that is an `Error`
+# becomes its message, anything else success. Widened to `String?`
+# whatever the block answered, so every hook is one proc type.
+pub def hook_outcome(value : T) : String? forall T
+  found = value.is_a?(Error) ? value.message : nil
+  found.as(String?)
+end
+
+# *block* as a hook every thread may run: checked where it is written, as
+# `on_start`'s block is.
+@[Share]
+pub def lifecycle_hook(&block : -> T) : LifecycleHook forall T
+  LifecycleHook.new(SharedProc(Nil, String?).of { |_| hook_outcome(block.call) })
+end
+
+# The application's hooks; the DSL's `on_start` and `on_stop` add to it.
+pub LIFECYCLE = Lifecycle.new
+
+pub def lifecycle : Lifecycle
+  LIFECYCLE
+end
