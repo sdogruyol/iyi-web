@@ -122,6 +122,10 @@ class BackgroundQueue
     @open
   end
 
+  def closing? : Bool
+    @closing && !@finished
+  end
+
   def queued : Int32
     @jobs.size
   end
@@ -204,6 +208,13 @@ pub class Background
   # Whether a runner is taking jobs now.
   pub def running? : Bool
     @queue.get { |q| q.open? } == true
+  end
+
+  # Whether `close` has been called and the runner is finishing: a job
+  # that waits on purpose - a batch held back for more to arrive - stops
+  # waiting when it sees this.
+  pub def closing? : Bool
+    @queue.get { |q| q.closing? } == true
   end
 
   # Jobs queued or running: what a stop would wait for.

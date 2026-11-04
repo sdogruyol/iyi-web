@@ -1,0 +1,770 @@
+# Distributed tracing: one span per request, carried across services in
+# W3C Trace Context headers and sent to a collector in batches, off the
+# request path.
+#
+#     tracer = TraceHandler.new(OtlpHttpExporter.new("http://localhost:4318/v1/traces", service_name: "shop"))
+#     use tracer, 0
+#
+#     get "/orders/:id" do |env|
+#       if span = current_span(env)
+#         span.set_attribute("order.id", env.params.url["id"])
+#         span.add_event("cache miss")
+#       end
+#       ...
+#     end
+#
+# **Propagation.** An incoming `traceparent` (W3C Trace Context level 1)
+# that parses makes the request's span its child: the same trace id, the
+# caller's span as the parent, the caller's sampled flag. One that does not
+# parse - a wrong length, upper-case hex, an all-zero id, version `ff` - is
+# ignored, and so is its `tracestate`, and the span starts a new trace with
+# ids from `iyi_web/token` (the operating system's random source). A valid
+# `tracestate` is kept as it came, trimmed, and passed on. `Span#traceparent`
+# is the header to send downstream so the next service joins the trace.
+#
+# **The span.** Named `GET /orders/:id` - the route pattern, never the raw
+# path, as metrics label it - or just the method when no route matched.
+# Its attributes follow OpenTelemetry's HTTP semantic conventions:
+# `http.request.method`, `url.path`, `http.route`,
+# `http.response.status_code`, `server.address`, and `error.type` with an
+# error status for a 5xx answer. `current_span(env)` is the request's span,
+# for the route's own attributes and events.
+#
+# **Export.** A finished, sampled span goes to a `BatchSpanProcessor`: a
+# bounded queue (spans past `max_queue` are dropped and counted, never
+# waited for), drained by a background task (`iyi_web/background`) that
+# sends up to `batch_size` spans at a time once a batch is full or `delay`
+# has passed since the first span waiting. The request never waits for the
+# collector. When the server stops, the background drain lets that task
+# send what is left; `flush` sends it at once from wherever it is called.
+# Exporters are a trait: `JsonLinesExporter` writes one JSON object per
+# span per line, `OtlpHttpExporter` posts OTLP/HTTP JSON to a collector.
+module iyi_web/tracing
+
+import std/json::{JSON, Builder}
+import std/http::{HTTP, Response}
+import std/list::{List}
+import std/mutex::{Mutex}
+import std/shared_proc::{SharedProc}
+import std/time::{Span, Time}
+import iyi_web/background::{BACKGROUND, Background}
+import iyi_web/context::{Context}
+import iyi_web/handler::{Handler}
+import iyi_web/log::{STDOUT_LOCK}
+import iyi_web/token::{random_hex}
+
+# What a span attribute may hold, as OpenTelemetry's scalar attribute
+# values: every member `Share`, so a finished span crosses workers.
+pub alias AttributeValue = String | Int64 | Float64 | Bool
+
+# Where `TraceHandler` keeps the request's span in `env`.
+SPAN_KEY = "iyi_web.span"
+
+# A parsed `traceparent`: who called, and whether they record the trace.
+pub struct TraceParent
+  getter version : String
+  getter trace_id : String
+  getter parent_id : String
+  getter flags : Int32
+
+  def initialize(@version : String, @trace_id : String, @parent_id : String, @flags : Int32)
+  end
+
+  pub def sampled? : Bool
+    @flags & 1 == 1
+  end
+end
+
+# *header* as W3C Trace Context reads it, or nil when it is not one to
+# trust: `VERSION-TRACEID-PARENTID-FLAGS`, lower-case hex, 2-32-16-2
+# digits; neither id all zeros; version `ff` refused. Version `00` is
+# exactly 55 characters; a later version may carry more after a `-`,
+# which is ignored, as the specification asks of a parser that does not
+# know that version.
+pub def parse_traceparent(header : String) : TraceParent?
+  text = header.strip
+  return nil if text.bytesize < 55
+  version = text[0, 2]
+  return nil unless lower_hex?(version)
+  return nil if version == "ff"
+  return nil if version == "00" && text.bytesize != 55
+  return nil if text.bytesize > 55 && text.to_unsafe[55] != 45_u8
+  return nil unless text.to_unsafe[2] == 45_u8 && text.to_unsafe[35] == 45_u8 && text.to_unsafe[52] == 45_u8
+  trace_id = text[3, 32]
+  parent_id = text[36, 16]
+  flags = text[53, 2]
+  return nil unless lower_hex?(trace_id) && lower_hex?(parent_id) && lower_hex?(flags)
+  return nil if zeros?(trace_id) || zeros?(parent_id)
+  TraceParent.new(version, trace_id, parent_id, flags.to_i(16))
+end
+
+# *header* as a `tracestate` to pass on: its list members trimmed and
+# joined with `,`, empty ones dropped - or nil when it is not one, which
+# the specification says to discard whole: more than 32 members, a key
+# twice, a key or a value outside its grammar.
+pub def parse_tracestate(header : String) : String?
+  members = [] of String
+  keys = [] of String
+  header.split(",").each do |raw|
+    member = raw.strip
+    next if member.empty?
+    equals = member.index("=")
+    return nil unless equals
+    key = member[0, equals]
+    value = member[equals + 1, member.bytesize - equals - 1]
+    return nil unless tracestate_key?(key) && tracestate_value?(value)
+    return nil if keys.includes?(key)
+    keys << key
+    members << member
+  end
+  return nil if members.empty? || members.size > 32
+  members.join(",")
+end
+
+# `lcalpha *(lcalpha / DIGIT / "_" / "-" / "*" / "/")`, at most 256, or
+# the multi-tenant `tenant@system` form: a tenant of at most 241 that may
+# start with a digit, a system of at most 14 that starts with a letter.
+private def tracestate_key?(key : String) : Bool
+  at = key.index("@")
+  unless at
+    return key.bytesize <= 256 && key_part?(key, false)
+  end
+  tenant = key[0, at]
+  system = key[at + 1, key.bytesize - at - 1]
+  tenant.bytesize <= 241 && system.bytesize <= 14 && key_part?(tenant, true) && key_part?(system, false)
+end
+
+private def key_part?(part : String, digit_first : Bool) : Bool
+  return false if part.empty?
+  bytes = part.to_unsafe
+  index = 0
+  while index < part.bytesize
+    byte = bytes[index]
+    lower = byte >= 97_u8 && byte <= 122_u8
+    digit = byte >= 48_u8 && byte <= 57_u8
+    if index == 0
+      return false unless lower || (digit_first && digit)
+    else
+      return false unless lower || digit || byte == 95_u8 || byte == 45_u8 || byte == 42_u8 || byte == 47_u8
+    end
+    index += 1
+  end
+  true
+end
+
+# Printable ASCII but `,` and `=`, at most 256, not ending in a space.
+private def tracestate_value?(value : String) : Bool
+  return false if value.empty? || value.bytesize > 256
+  bytes = value.to_unsafe
+  index = 0
+  while index < value.bytesize
+    byte = bytes[index]
+    return false if byte < 32_u8 || byte > 126_u8 || byte == 44_u8 || byte == 61_u8
+    index += 1
+  end
+  bytes[value.bytesize - 1] != 32_u8
+end
+
+private def lower_hex?(text : String) : Bool
+  bytes = text.to_unsafe
+  index = 0
+  while index < text.bytesize
+    byte = bytes[index]
+    return false unless (byte >= 48_u8 && byte <= 57_u8) || (byte >= 97_u8 && byte <= 102_u8)
+    index += 1
+  end
+  true
+end
+
+private def zeros?(text : String) : Bool
+  bytes = text.to_unsafe
+  index = 0
+  while index < text.bytesize
+    return false unless bytes[index] == 48_u8
+    index += 1
+  end
+  true
+end
+
+# *count* random bytes as hex, never all zeros, which Trace Context
+# reserves for "no id".
+pub def random_trace_hex(count : Int32) : String
+  while true
+    id = random_hex(count)
+    return id unless zeros?(id)
+  end
+end
+
+# The wall clock in nanoseconds since the Unix epoch, as OTLP writes times.
+pub def unix_nanos : Int64
+  now = Time.utc
+  now.to_unix * 1_000_000_000_i64 + now.nanosecond.to_i64
+end
+
+# Something that happened during a span, at a time.
+pub struct SpanEvent
+  getter name : String
+  getter time_unix_nano : Int64
+  getter attributes : List({String, AttributeValue})
+
+  def initialize(@name : String, @time_unix_nano : Int64, @attributes : List({String, AttributeValue}))
+  end
+end
+
+# A request's span while it runs: the request's own, written by one task,
+# so it is a plain class. `finish` makes the `SpanData` that leaves it.
+pub class RequestSpan
+  @trace_id : String
+  @span_id : String
+  @parent_span_id : String?
+  @sampled : Bool
+  @tracestate : String?
+  @name : String
+  @start_unix_nano : Int64
+  @attributes : Hash(String, AttributeValue)
+  @events : Array(SpanEvent)
+  @error : String?
+
+  def initialize(@trace_id : String, @span_id : String, @parent_span_id : String?, @sampled : Bool, @tracestate : String?, @name : String)
+    @start_unix_nano = unix_nanos
+    @attributes = {} of String => AttributeValue
+    @events = [] of SpanEvent
+    @error = nil
+  end
+
+  # A server span for a request that carried *parent* (nil: a new trace)
+  # and *tracestate*. A root span is sampled when *sample* says so.
+  def self.server(parent : TraceParent?, tracestate : String?, name : String, sample : Bool = true) : RequestSpan
+    if found = parent
+      new(found.trace_id, random_trace_hex(8), found.parent_id, found.sampled?, tracestate, name)
+    else
+      new(random_trace_hex(16), random_trace_hex(8), nil, sample, nil, name)
+    end
+  end
+
+  pub def trace_id : String
+    @trace_id
+  end
+
+  pub def span_id : String
+    @span_id
+  end
+
+  pub def parent_span_id : String?
+    @parent_span_id
+  end
+
+  pub def sampled? : Bool
+    @sampled
+  end
+
+  pub def tracestate : String?
+    @tracestate
+  end
+
+  pub def name : String
+    @name
+  end
+
+  pub def name=(value : String) : String
+    @name = value
+  end
+
+  # The `traceparent` to send with a call this request makes, so the next
+  # service's span is a child of this one.
+  pub def traceparent : String
+    "00-" + @trace_id + "-" + @span_id + "-" + (@sampled ? "01" : "00")
+  end
+
+  pub def set_attribute(key : String, value : String | Int64 | Float64 | Bool) : Nil
+    @attributes[key] = value
+  end
+
+  pub def set_attribute(key : String, value : Int32) : Nil
+    @attributes[key] = value.to_i64
+  end
+
+  pub def attribute(key : String) : AttributeValue?
+    @attributes[key]?
+  end
+
+  pub def add_event(name : String, attributes : Hash(String, AttributeValue) = {} of String => AttributeValue) : Nil
+    @events << SpanEvent.new(name, unix_nanos, List.new(attributes.to_a))
+  end
+
+  # Marks the span failed, with *message* as its status message.
+  pub def error(message : String) : Nil
+    @error = message
+  end
+
+  pub def error? : Bool
+    !@error.nil?
+  end
+
+  pub def finish : SpanData
+    SpanData.new(@trace_id, @span_id, @parent_span_id, @tracestate, @name, @start_unix_nano, unix_nanos, List.new(@attributes.to_a), List.new(@events), @error)
+  end
+end
+
+# A finished span, as exporters get it: every field written once and
+# `Share`, so a batch crosses to the background task that sends it.
+pub struct SpanData
+  getter trace_id : String
+  getter span_id : String
+  getter parent_span_id : String?
+  getter tracestate : String?
+  getter name : String
+  getter start_unix_nano : Int64
+  getter end_unix_nano : Int64
+  getter attributes : List({String, AttributeValue})
+  getter events : List(SpanEvent)
+  # The error status message; nil for a span that did not fail.
+  getter error : String?
+
+  def initialize(@trace_id : String, @span_id : String, @parent_span_id : String?, @tracestate : String?, @name : String, @start_unix_nano : Int64, @end_unix_nano : Int64, @attributes : List({String, AttributeValue}), @events : List(SpanEvent), @error : String?)
+  end
+
+  pub def attribute(key : String) : AttributeValue?
+    @attributes.each { |pair| return pair[1] if pair[0] == key }
+    nil
+  end
+
+  # One line of `JsonLinesExporter`: the span's fields, its attributes as
+  # an object, times in Unix nanoseconds.
+  pub def to_json_line : String
+    data = self
+    JSON.build do |json|
+      json.object do
+        json.field "trace_id", data.trace_id
+        json.field "span_id", data.span_id
+        json.field "parent_span_id", data.parent_span_id
+        json.field "name", data.name
+        json.field "start_unix_nano", data.start_unix_nano
+        json.field "end_unix_nano", data.end_unix_nano
+        json.field "duration_ms", (data.end_unix_nano - data.start_unix_nano).to_f64 / 1_000_000.0
+        json.field "attributes" do
+          json.object do
+            data.attributes.each { |pair| write_plain(json, pair[0], pair[1]) }
+          end
+        end
+        json.field "events" do
+          json.array do
+            data.events.each do |event|
+              json.object do
+                json.field "name", event.name
+                json.field "time_unix_nano", event.time_unix_nano
+                json.field "attributes" do
+                  json.object do
+                    event.attributes.each { |pair| write_plain(json, pair[0], pair[1]) }
+                  end
+                end
+              end
+            end
+          end
+        end
+        json.field "error", data.error
+        if state = data.tracestate
+          json.field "tracestate", state
+        end
+      end
+    end
+  end
+end
+
+private def write_plain(json : Builder, key : String, value : AttributeValue) : Nil
+  case value
+  when String  then json.field key, value
+  when Int64   then json.field key, value
+  when Float64 then json.field key, value
+  when Bool    then json.field key, value
+  end
+end
+
+# Where finished spans go. An exporter is called from a background task,
+# one batch at a time, never from a request; it is `Share`, since the
+# task may be on any worker. A failure is the exporter's to report: the
+# spans of a batch it could not send are dropped, not retried.
+pub trait SpanExporter
+  abstract def export(spans : Array(SpanData)) : Nil
+end
+
+# Each span as one line of JSON through *writer* - standard output by
+# default, under the lock `StdoutLogger` writes under, so a span's line
+# and a request's never interleave.
+#
+#     TraceHandler.new(JsonLinesExporter.new)
+#     TraceHandler.new(JsonLinesExporter.to { |line| LINES.update { |l| l << line } })
+pub class JsonLinesExporter
+  @writer : SharedProc(String, Nil)
+
+  def initialize(@writer : SharedProc(String, Nil) = SharedProc(String, Nil).of { |line| STDOUT_LOCK.lock { |_| puts line }; nil })
+  end
+
+  # Lines through *block*, which is checked as a route's is.
+  @[Share]
+  def self.to(&block : String -> Nil) : JsonLinesExporter
+    new(SharedProc(String, Nil).of { |line| block.call(line) })
+  end
+
+  pub def export(spans : Array(SpanData)) : Nil
+    spans.each { |span| @writer.call(span.to_json_line) }
+  end
+end
+
+impl SpanExporter for JsonLinesExporter
+end
+
+# Batches as OTLP/HTTP JSON (`application/json`, the protobuf message
+# `ExportTraceServiceRequest` in its JSON mapping) posted to *url* - an
+# OpenTelemetry Collector's `http://HOST:4318/v1/traces`, or a vendor's
+# endpoint with its key in *headers*. One request per batch, with
+# *timeout_ms* to answer; a refused or failed post is reported on standard
+# error with its status, and the batch is dropped.
+pub class OtlpHttpExporter
+  @url : String
+  @service_name : String
+  @headers : List({String, String})
+  @timeout_ms : Int32
+  @sent : Atomic(Int32)
+  @failed : Atomic(Int32)
+
+  def initialize(@url : String, @service_name : String = "iyi-web", headers : Hash(String, String) = {} of String => String, @timeout_ms : Int32 = 10_000)
+    @headers = List.new(headers.to_a)
+    @sent = Atomic(Int32).new(0)
+    @failed = Atomic(Int32).new(0)
+  end
+
+  pub def url : String
+    @url
+  end
+
+  # Batches the collector accepted, and batches that failed.
+  pub def sent : Int32
+    @sent.get
+  end
+
+  pub def failed : Int32
+    @failed.get
+  end
+
+  pub def export(spans : Array(SpanData)) : Nil
+    return if spans.empty?
+    headers = {"Content-Type" => "application/json"}
+    @headers.each { |pair| headers[pair[0]] = pair[1] }
+    answer = HTTP.request("POST", @url, headers, otlp_json(spans, @service_name), timeout_ms: @timeout_ms)
+    if answer.is_a?(Response) && answer.status >= 200 && answer.status < 300
+      @sent.add(1)
+    else
+      @failed.add(1)
+      why = answer.is_a?(Response) ? "HTTP " + answer.status.to_s : answer.message
+      line = "OTLP export of #{spans.size} span#{spans.size == 1 ? "" : "s"} to #{@url} failed: #{why}"
+      STDOUT_LOCK.lock { |_| stderr.puts(line) }
+    end
+  end
+end
+
+impl SpanExporter for OtlpHttpExporter
+end
+
+# *spans* as one `ExportTraceServiceRequest` in OTLP's JSON mapping: ids
+# as hex, 64-bit integers as strings, kind 2 (server), status code 2
+# (error) with its message for a failed span.
+pub def otlp_json(spans : Array(SpanData), service_name : String) : String
+  JSON.build do |json|
+    json.object do
+      json.field "resourceSpans" do
+        json.array do
+          json.object do
+            json.field "resource" do
+              json.object do
+                json.field "attributes" do
+                  json.array { otlp_attribute(json, "service.name", service_name) }
+                end
+              end
+            end
+            json.field "scopeSpans" do
+              json.array do
+                json.object do
+                  json.field "scope" do
+                    json.object { json.field "name", "iyi_web/tracing" }
+                  end
+                  json.field "spans" do
+                    json.array { spans.each { |span| otlp_span(json, span) } }
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+private def otlp_span(json : Builder, span : SpanData) : Nil
+  json.object do
+    json.field "traceId", span.trace_id
+    json.field "spanId", span.span_id
+    if parent = span.parent_span_id
+      json.field "parentSpanId", parent
+    end
+    if state = span.tracestate
+      json.field "traceState", state
+    end
+    json.field "name", span.name
+    json.field "kind", 2
+    json.field "startTimeUnixNano", span.start_unix_nano.to_s
+    json.field "endTimeUnixNano", span.end_unix_nano.to_s
+    json.field "attributes" do
+      json.array { span.attributes.each { |pair| otlp_attribute(json, pair[0], pair[1]) } }
+    end
+    json.field "events" do
+      json.array do
+        span.events.each do |event|
+          json.object do
+            json.field "timeUnixNano", event.time_unix_nano.to_s
+            json.field "name", event.name
+            json.field "attributes" do
+              json.array { event.attributes.each { |pair| otlp_attribute(json, pair[0], pair[1]) } }
+            end
+          end
+        end
+      end
+    end
+    json.field "status" do
+      json.object do
+        if message = span.error
+          json.field "code", 2
+          json.field "message", message
+        else
+          json.field "code", 0
+        end
+      end
+    end
+  end
+end
+
+private def otlp_attribute(json : Builder, key : String, value : AttributeValue) : Nil
+  json.object do
+    json.field "key", key
+    json.field "value" do
+      json.object do
+        case value
+        when String  then json.field "stringValue", value
+        when Int64   then json.field "intValue", value.to_s
+        when Float64 then json.field "doubleValue", value
+        when Bool    then json.field "boolValue", value
+        end
+      end
+    end
+  end
+end
+
+# The spans waiting to be exported, and whether a task is on its way to
+# send them, behind the processor's lock.
+class SpanQueue
+  @spans : Array(SpanData)
+  @scheduled : Bool
+
+  def initialize
+    @spans = [] of SpanData
+    @scheduled = false
+  end
+
+  # Adds *span* unless the queue is full: whether it was kept, and whether
+  # the caller is to start the task that sends.
+  def push(span : SpanData, max : Int32, schedule : Bool) : {Bool, Bool}
+    return {false, false} if @spans.size >= max
+    @spans << span
+    start = schedule && !@scheduled
+    @scheduled = true if start
+    {true, start}
+  end
+
+  def size : Int32
+    @spans.size
+  end
+
+  # Up to *count* spans, oldest first, as a `List` that leaves the lock;
+  # nil once there are none, which ends the sending task, so the next
+  # span starts another.
+  def take(count : Int32, ending : Bool) : List(SpanData)?
+    if @spans.empty?
+      @scheduled = false if ending
+      return nil
+    end
+    taken = @spans.size < count ? @spans.size : count
+    batch = List.new(@spans[0, taken])
+    @spans = @spans[taken, @spans.size - taken]
+    batch
+  end
+end
+
+# Finished spans to an exporter in batches, from a background task: see
+# the module comment. *runner* is the background runner the sending task
+# goes to; outside a running server it runs nothing on its own, and a
+# batch is sent when `batch_size` spans have queued or `flush` is called.
+pub class BatchSpanProcessor
+  @exporter : SpanExporter
+  @queue : Mutex(SpanQueue)
+  @runner : Background
+  @max_queue : Int32
+  @batch_size : Int32
+  @delay_ms : Int32
+  @dropped : Atomic(Int32)
+  @exported : Atomic(Int32)
+
+  def initialize(@exporter : SpanExporter, @max_queue : Int32 = 2048, @batch_size : Int32 = 512, delay : Span = Span.seconds(2), @runner : Background = BACKGROUND)
+    raise "BatchSpanProcessor: batch_size must be at least 1" if @batch_size < 1
+    raise "BatchSpanProcessor: max_queue must be at least batch_size" if @max_queue < @batch_size
+    @delay_ms = delay.total_milliseconds.to_i32
+    @queue = Mutex.new { SpanQueue.new }
+    @dropped = Atomic(Int32).new(0)
+    @exported = Atomic(Int32).new(0)
+  end
+
+  # Queues *span*; never waits for the exporter. A full queue drops it.
+  pub def on_end(span : SpanData) : Nil
+    running = @runner.running?
+    batch = @batch_size
+    max = @max_queue
+    answer = @queue.get { |q|
+      kept = q.push(span, max, running)
+      {kept[0], kept[1], q.size >= batch}
+    }
+    return unless answer.is_a?({Bool, Bool, Bool})
+    unless answer[0]
+      @dropped.add(1)
+      return
+    end
+    me = self
+    if answer[1]
+      @runner.submit(SharedProc(Nil, Nil).of { |_| me.drain_after_delay })
+    elsif !running && answer[2]
+      # No runner to wait for: a full batch goes now, on this task.
+      send_batches(false)
+    end
+  end
+
+  # Sends every queued span now, in batches, on the caller's task.
+  pub def flush : Nil
+    send_batches(false)
+  end
+
+  # Spans dropped because the queue was full, and spans handed to the
+  # exporter.
+  pub def dropped : Int32
+    @dropped.get
+  end
+
+  pub def exported : Int32
+    @exported.get
+  end
+
+  pub def queued : Int32
+    found = @queue.get { |q| q.size }
+    found.is_a?(Int32) ? found : 0
+  end
+
+  # The sending task: waits up to `delay` for a batch to fill - less when
+  # the server is stopping - then sends until the queue is empty.
+  protected def drain_after_delay : Nil
+    waited = 0
+    batch = @batch_size
+    while waited < @delay_ms && !@runner.closing?
+      size = @queue.get { |q| q.size }
+      break if size.is_a?(Int32) && size >= batch
+      break if sleep(20).is_a?(Cancelled)
+      waited += 20
+    end
+    send_batches(true)
+  end
+
+  private def send_batches(ending : Bool) : Nil
+    count = @batch_size
+    while true
+      batch = @queue.get { |q| q.take(count, ending) }
+      return unless batch.is_a?(List(SpanData))
+      @exporter.export(batch.to_a)
+      @exported.add(batch.size)
+    end
+  end
+end
+
+# The span of every request it sees (see the module comment), handed to a
+# `BatchSpanProcessor` when the response is ready. Honours `only` and
+# `exclude`: `tracer.exclude ["/health", "/metrics"]` keeps probes out of
+# the traces. *sample* decides for a request that starts a trace; one
+# that arrives with a `traceparent` follows its caller's flag.
+pub class TraceHandler < Handler
+  @processor : BatchSpanProcessor
+  @sample : Bool
+
+  def initialize(exporter : SpanExporter, max_queue : Int32 = 2048, batch_size : Int32 = 512, delay : Span = Span.seconds(2), @sample : Bool = true)
+    super()
+    @processor = BatchSpanProcessor.new(exporter, max_queue, batch_size, delay)
+  end
+
+  def initialize(@processor : BatchSpanProcessor, @sample : Bool = true)
+    super()
+  end
+
+  pub def processor : BatchSpanProcessor
+    @processor
+  end
+
+  # Sends what is queued now; see `BatchSpanProcessor#flush`.
+  pub def flush : Nil
+    @processor.flush
+  end
+
+  pub def call(ctx : Context) : Nil
+    return call_next(ctx) unless applies?(ctx)
+    headers = ctx.request.headers
+    parent = (sent = headers["traceparent"]?) ? parse_traceparent(sent) : nil
+    state = parent && (raw = headers["tracestate"]?) ? parse_tracestate(raw) : nil
+    span = RequestSpan.server(parent, state, ctx.request.method, @sample)
+    ctx.set(SPAN_KEY, span)
+    ctx.set("trace_id", span.trace_id)
+    answered = false
+    # Ended on every way out: a panic that leaves the chain is a 500.
+    defer finish(ctx, span, answered)
+    call_next(ctx)
+    answered = true
+  end
+
+  private def finish(ctx : Context, span : RequestSpan, answered : Bool) : Nil
+    method = ctx.request.method
+    status = answered ? ctx.response.status_code : 500
+    span.set_attribute("http.request.method", method)
+    span.set_attribute("url.path", ctx.request.path)
+    if route = ctx.route_pattern
+      span.name = method + " " + route
+      span.set_attribute("http.route", route)
+    end
+    span.set_attribute("http.response.status_code", status)
+    if host = ctx.request.headers["Host"]?
+      span.set_attribute("server.address", host_name(host))
+    end
+    if status >= 500
+      span.set_attribute("error.type", answered ? status.to_s : "panic")
+      span.error("HTTP " + status.to_s) unless span.error?
+    end
+    @processor.on_end(span.finish) if span.sampled?
+  end
+end
+
+# `example.com` of `example.com:8080`, `::1` of `[::1]:3000`.
+private def host_name(host : String) : String
+  if host.starts_with?("[")
+    close = host.index("]")
+    return close ? host[1, close - 1] : host
+  end
+  colon = host.rindex(":")
+  colon ? host[0, colon] : host
+end
+
+# The request's span, set by `TraceHandler`; nil when none ran.
+pub def current_span(env : Context) : RequestSpan?
+  env.get?(SPAN_KEY, RequestSpan)
+end
