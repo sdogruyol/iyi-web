@@ -101,9 +101,14 @@ end
 # `WWW-Authenticate: Bearer error="invalid_token"` and the reason.
 # *security* is how the document describes it: a bearer JWT, or the
 # `oauth2_password` scheme of the route that issues the tokens.
-pub def jwt_auth(secret : String, type : T.class = Claims, security : SecurityScheme = SecurityScheme.bearer(format: "JWT"), leeway : Int32 = 0, issuer : String? = nil, audience : String? = nil) : Dep(T, T | AuthError) forall T
+pub def jwt_auth(secret : String, type : T.class, security : SecurityScheme = SecurityScheme.bearer(format: "JWT"), leeway : Int32 = 0, issuer : String? = nil, audience : String? = nil) : Dep(T, T | AuthError) forall T
   raise "an HS256 secret must be at least 32 bytes (RFC 7518 §3.2); this one is #{secret.bytesize}" if secret.bytesize < 32
   Dep.new(security: security) { |env| verified(env, secret, T, leeway, issuer, audience) }
+end
+
+# `jwt_auth` reading the payload as `Claims`.
+pub def jwt_auth(secret : String, security : SecurityScheme = SecurityScheme.bearer(format: "JWT"), leeway : Int32 = 0, issuer : String? = nil, audience : String? = nil) : Dep(Claims, Claims | AuthError)
+  jwt_auth(secret, Claims, security, leeway, issuer, audience)
 end
 
 private def verified(env : Context, secret : String, type : T.class, leeway : Int32, issuer : String?, audience : String?) : T | AuthError forall T

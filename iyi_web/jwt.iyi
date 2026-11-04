@@ -52,19 +52,29 @@ end
 # payload is read into this unless `verify` is given another type; a type
 # of the application's own may carry these and more.
 pub struct Claims
+  @[JSON::Field(emit_null: false)]
   getter sub : String?
+  @[JSON::Field(emit_null: false)]
   getter iss : String?
-  getter aud : String?
+  # A string or an array of them (RFC 7519 §4.1.3); `audiences` reads it.
+  @[JSON::Field(emit_null: false)]
+  getter aud : Any?
+  @[JSON::Field(emit_null: false)]
   getter exp : Int64?
+  @[JSON::Field(emit_null: false)]
   getter nbf : Int64?
+  @[JSON::Field(emit_null: false)]
   getter iat : Int64?
+  @[JSON::Field(emit_null: false)]
   getter jti : String?
+  @[JSON::Field(emit_null: false)]
   getter scope : String?
   derive serializable
 
   # Claims issued *now*: `iat` is now, and `exp` *expires_in* later when
   # given.
-  def initialize(@sub : String? = nil, expires_in : Span? = nil, @iss : String? = nil, @aud : String? = nil, @scope : String? = nil, @jti : String? = nil, now : Time = Time.utc)
+  def initialize(@sub : String? = nil, expires_in : Span? = nil, @iss : String? = nil, aud : String? = nil, @scope : String? = nil, @jti : String? = nil, now : Time = Time.utc)
+    @aud = aud ? Any.new(aud) : nil
     issued = now.to_unix
     @iat = issued
     @nbf = nil
@@ -76,6 +86,22 @@ pub struct Claims
   pub def scopes : Array(String)
     granted = scope
     granted ? granted.split(' ').reject(&.empty?) : [] of String
+  end
+
+  # The audiences the token names, one or several.
+  pub def audiences : Array(String)
+    named = aud
+    return [] of String unless named
+    if one = named.as_s?
+      return [one]
+    end
+    names = [] of String
+    (named.as_a? || [] of Any).each do |item|
+      if text = item.as_s?
+        names << text
+      end
+    end
+    names
   end
 end
 
@@ -90,10 +116,15 @@ pub struct JWT
     signing + "." + encode_base64url(mac(secret, signing))
   end
 
+  # *token*'s payload read as `Claims`, or why it was refused.
+  def self.verify(token : String, secret : String, leeway : Int32 = 0, issuer : String? = nil, audience : String? = nil, now : Time = Time.utc) : Claims | JWTError
+    verify(token, secret, Claims, leeway, issuer, audience, now)
+  end
+
   # *token*'s payload read into *type*, or why it was refused. *issuer*
   # and *audience*, when given, must be the token's `iss` and among its
   # `aud`.
-  def self.verify(token : String, secret : String, type : T.class = Claims, leeway : Int32 = 0, issuer : String? = nil, audience : String? = nil, now : Time = Time.utc) : T | JWTError forall T
+  def self.verify(token : String, secret : String, type : T.class, leeway : Int32 = 0, issuer : String? = nil, audience : String? = nil, now : Time = Time.utc) : T | JWTError forall T
     check_secret(secret)
     parts = token.split('.')
     return JWTError.new("malformed token") unless parts.size == 3 && parts.none?(&.empty?)
@@ -156,17 +187,17 @@ pub struct JWT
 
   # `exp`, `nbf` and `iat` are NumericDate: seconds, maybe with a fraction.
   private def self.time_refusal(payload : Hash(String, Any), now : Int64, leeway : Int64) : String?
-    if found = payload["exp"]?
+    if (found = payload["exp"]?) && !found.raw.nil?
       expires = seconds_of(found)
       return "token exp is not a number" unless expires
       return "token has expired" if now >= expires + leeway
     end
-    if found = payload["nbf"]?
+    if (found = payload["nbf"]?) && !found.raw.nil?
       starts = seconds_of(found)
       return "token nbf is not a number" unless starts
       return "token is not valid yet" if now + leeway < starts
     end
-    if found = payload["iat"]?
+    if (found = payload["iat"]?) && !found.raw.nil?
       issued = seconds_of(found)
       return "token iat is not a number" unless issued
       return "token was issued in the future" if issued > now + leeway

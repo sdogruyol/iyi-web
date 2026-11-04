@@ -1,0 +1,142 @@
+# Credentials as providers: a bearer token, an API key where it travels,
+# a JWT, and OAuth2's password flow, each refused with a 401 that says how
+# to authenticate.
+module iyi_web/auth_test
+
+import std/json::{JSON}
+import std/time::{Span}
+import iyi_web/router::{Router, RouteHandler}
+import iyi_web/harness::*
+import iyi_web/context::{Context}
+import iyi_web/request::{Request}
+import iyi_web/openapi::{KeyLocation, SecurityScheme}
+import iyi_web/deps::{Dep}
+import iyi_web/jwt::{JWT, Claims}
+import iyi_web/auth::*
+import iyi_web/spec::*
+
+SECRET   = "another-secret-that-is-32-bytes-long"
+TOKEN    = bearer_auth
+HEADER   = api_key_auth("X-API-Key")
+QUERY    = api_key_auth("api_key", KeyLocation::Query, name: "queryKey")
+COOKIE   = api_key_auth("session", KeyLocation::Cookie, name: "cookieKey")
+USER_JWT = jwt_auth(SECRET, security: SecurityScheme.oauth2_password("/token", {"notes:read" => "Read notes"}))
+
+def app : RouteHandler
+  routes do |r|
+    r.get "/token-echo", deps: TOKEN do |env, token|
+      token
+    end
+    r.get "/header", deps: HEADER do |env, key|
+      key
+    end
+    r.get "/query", deps: QUERY do |env, key|
+      key
+    end
+    r.get "/cookie", deps: COOKIE do |env, key|
+      key
+    end
+    r.get "/me", deps: USER_JWT do |env, claims|
+      claims.sub || "-"
+    end
+    r.post "/token" do |env|
+      grant = password_grant(env)
+      next grant if grant.is_a?(OAuthError)
+      if grant.username == "ada" && grant.password == "lovelace"
+        token_response(env, JWT.sign(Claims.new(sub: grant.username, expires_in: Span.new(minutes: 30), scope: grant.scopes.join(" ")), SECRET), Span.new(minutes: 30))
+        nil
+      else
+        OAuthError.new("invalid_grant")
+      end
+    end
+  end
+end
+
+def with_header(path : String, name : String, value : String) : Request
+  request = http_request("GET", path)
+  request.headers[name] = value
+  request
+end
+
+def token_post(body : String) : Request
+  request = form_request("POST", "/token", body)
+  request.headers["Accept"] = "application/json"
+  request
+end
+
+describe "bearer_token" do
+  handler = app
+
+  it "reads the token whatever the scheme's case" do
+    assert dispatch(handler, with_header("/token-echo", "Authorization", "Bearer abc.DEF-_~+/==")).response.body == "abc.DEF-_~+/=="
+    assert dispatch(handler, with_header("/token-echo", "Authorization", "bearer xyz")).response.body == "xyz"
+  end
+
+  it "answers 401 with a Bearer challenge for a missing or malformed one" do
+    ["", "Basic abc", "Bearer", "Bearer a b", "Bearer =abc", "Bearerabc"].each do |value|
+      request = value.empty? ? http_request("GET", "/token-echo") : with_header("/token-echo", "Authorization", value)
+      response = dispatch(handler, request).response
+      assert response.status_code == 401
+      assert response.headers["WWW-Authenticate"]? == %(Bearer realm="api")
+    end
+  end
+end
+
+describe "api_key" do
+  handler = app
+
+  it "reads a key from a header, the query and a cookie" do
+    assert dispatch(handler, with_header("/header", "x-api-key", "k1")).response.body == "k1"
+    assert dispatch(handler, http_request("GET", "/query", "api_key=k2")).response.body == "k2"
+    assert dispatch(handler, with_header("/cookie", "Cookie", "theme=dark; session=k3")).response.body == "k3"
+  end
+
+  it "refuses a missing or empty key, wherever it was looked for" do
+    assert dispatch(handler, http_request("GET", "/header")).response.status_code == 401
+    assert dispatch(handler, with_header("/header", "X-API-Key", "")).response.status_code == 401
+    assert dispatch(handler, http_request("GET", "/query", "api_key=")).response.status_code == 401
+    assert dispatch(handler, with_header("/query", "X-API-Key", "k1")).response.status_code == 401
+    assert dispatch(handler, http_request("GET", "/cookie")).response.body == "missing API key session\n"
+  end
+end
+
+describe "jwt_auth and the password flow" do
+  handler = app
+
+  it "issues a token for the right password and accepts it" do
+    issued = dispatch(handler, token_post("grant_type=password&username=ada&password=lovelace&scope=notes:read")).response
+    assert issued.status_code == 200
+    assert issued.headers["Cache-Control"]? == "no-store"
+    body = JSON.parse(issued.body)
+    assert body["token_type"].as_s == "bearer"
+    assert body["expires_in"].as_i == 1800
+    token = body["access_token"].as_s
+    assert JWT.verify(token, SECRET).or_panic.scopes == ["notes:read"]
+    assert dispatch(handler, with_header("/me", "Authorization", "Bearer " + token)).response.body == "ada"
+  end
+
+  it "refuses token requests as RFC 6749 says" do
+    wrong = dispatch(handler, token_post("grant_type=password&username=ada&password=nope")).response
+    assert wrong.status_code == 400
+    assert wrong.body == %({"error":"invalid_grant"})
+    other = dispatch(handler, token_post("grant_type=client_credentials")).response
+    assert other.body == %({"error":"unsupported_grant_type"})
+    assert dispatch(handler, token_post("grant_type=password&username=ada")).response.body == %({"error":"invalid_request"})
+    json = http_request("POST", "/token", "", %({"grant_type":"password"}), "application/json")
+    assert dispatch(handler, json).response.status_code == 400
+  end
+
+  it "answers a refused token 401 with invalid_token and the reason" do
+    expired = JWT.sign(Claims.new(sub: "ada", expires_in: Span.new(seconds: -1)), SECRET)
+    response = dispatch(handler, with_header("/me", "Authorization", "Bearer " + expired)).response
+    assert response.status_code == 401
+    assert response.headers["WWW-Authenticate"]? == %(Bearer realm="api", error="invalid_token", error_description="token has expired")
+    forged = JWT.sign(Claims.new(sub: "ada"), SECRET.reverse)
+    assert dispatch(handler, with_header("/me", "Authorization", "Bearer " + forged)).response.body == "invalid token signature\n"
+    assert dispatch(handler, http_request("GET", "/me")).response.headers["WWW-Authenticate"]? == %(Bearer realm="api")
+  end
+
+  it "refuses a short secret where the provider is made" do
+    assert panics? { jwt_auth("short"); nil }
+  end
+end
