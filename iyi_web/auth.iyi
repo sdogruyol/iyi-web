@@ -19,7 +19,7 @@
 # What a credential means - which user a token or a key belongs to - is
 # the application's: a provider of its own that uses one of these,
 #
-#     def current_user(env : Context) : User | HttpError
+#     def current_user(env : Context) : User | AuthError
 #       claims = USER.resolve(env)!
 #       find_user(claims.sub) || AuthError.new(401, "unknown user")
 #     end

@@ -2,7 +2,7 @@
 # a database handle, a checked API key - written once and named on each
 # route that needs it, FastAPI's `Depends`.
 #
-#     def current_user(env : Context) : User | HttpError
+#     def current_user(env : Context) : User | AuthError
 #       token = bearer_token(env)!
 #       find_user(token) || AuthError.new(401, "unknown token")
 #     end
@@ -16,7 +16,7 @@
 # A provider answers its value or an error. An error ends the request
 # before the route runs, with the error's status: a provider is where a
 # 401 or a 403 is decided, once. The block gets the value with the errors
-# taken out: a `User` above, not a `User | HttpError`.
+# taken out: a `User` above, not a `User | AuthError`.
 #
 # Several providers are one with `Dep.all`, whose value is a named tuple
 # of theirs, each typed as its provider answers it:

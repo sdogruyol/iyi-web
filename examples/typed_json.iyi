@@ -1,24 +1,29 @@
-# Typed JSON: a request body read into a type of the application's own and
-# checked by that type's rules, and responses written from such types. Run
-# from the repository root with `iyi run examples/typed_json.iyi`.
+# Typed routes: a request body, a query string and a path segment read into
+# types of the application's own, and responses written from such types.
+# Nothing in a route parses or checks by hand: what cannot be read is
+# answered before the block runs. Run from the repository root with
+# `iyi run examples/typed_json.iyi`.
 #
 #   curl -X POST localhost:3000/notes -H 'Content-Type: application/json' -d '{"title":"Groceries","body":"eggs, milk","tags":["home"]}'
 #   curl localhost:3000/notes
+#   curl 'localhost:3000/notes?tag=home&limit=5'
 #   curl localhost:3000/notes/1
 #
-# And the refusals, each answered as JSON:
+# And the refusals, each answered as JSON (the 4xx ones say which field):
 #
 #   curl -X POST localhost:3000/notes -H 'Content-Type: application/json' -d '{"title":"Groceries",}'           # 400, line and column
 #   curl -X POST localhost:3000/notes -H 'Content-Type: application/json' -d '{"title":7,"tags":"home"}'         # 422, title and tags
 #   curl -X POST localhost:3000/notes -H 'Content-Type: application/json' -d '{"title":" ","priority":9}'        # 422, validation
 #   curl -X POST localhost:3000/notes -H 'Accept: application/json' -d 'title=Groceries'                        # 415
+#   curl -H 'Accept: application/json' 'localhost:3000/notes?limit=many'                                       # 422, limit
+#   curl -H 'Accept: application/json' localhost:3000/notes/abc                                                # 422, id
 #   curl localhost:3000/notes/9                                                                                # 404
 module examples/typed_json
 
 import std/json::{serializable}
 import iyi_web/dsl::*
 import iyi_web/failure::{StatusError}
-import iyi_web/validation::{BodyError, Validate, Validator}
+import iyi_web/validation::{Validate, Validator}
 
 # What a client sends. A field with a default may be left out; `title`
 # may not.
@@ -30,8 +35,8 @@ struct NoteInput
   derive serializable
 end
 
-# Run by `json_as` once the body has been read: every failing field is
-# reported, in one 422.
+# Run once the body has been read: every failing field is reported, in
+# one 422, and the route does not run.
 impl Validate for NoteInput
   def validate(v : Validator) : Nil
     v.required("title", title)
@@ -41,8 +46,23 @@ impl Validate for NoteInput
   end
 end
 
-# What the API answers with. `derive serializable` is also what lets
-# `env.json` write it.
+# The query string of `GET /notes`, read the way a body is: `?limit=5`
+# is an `Int32`, `?limit=many` a 422 naming `limit`, and a field left out
+# keeps its default.
+struct NoteFilter
+  getter tag : String?
+  getter limit : Int32 = 20
+  derive serializable
+end
+
+impl Validate for NoteFilter
+  def validate(v : Validator) : Nil
+    v.range("limit", limit, min: 1, max: 100)
+  end
+end
+
+# What the API answers with. `derive serializable` is also what lets a
+# route declare it as its `response:`.
 struct Note
   getter id : Int32
   getter title : String
@@ -79,33 +99,25 @@ end
 # store behind a `Mutex` instead and serves on every core.
 NOTES = [] of Note
 
-post "/notes", workers: 1 do |env|
-  # `NoteInput | BodyError`: the error goes back as the route's value and
-  # is answered with its status, 400, 415 or 422.
-  case input = env.params.json_as(NoteInput)
-  in BodyError
-    input
-  in NoteInput
-    note = Note.new(NOTES.size + 1, input)
-    NOTES << note
-    env.status(201).json(note)
-  end
+# The block gets a `NoteInput` that passed `validate`, and answers the
+# `Note` it made: `response:` writes it as JSON, with `status:`.
+post "/notes", body: NoteInput, response: Note, status: 201, workers: 1 do |env, input|
+  note = Note.new(NOTES.size + 1, input)
+  NOTES << note
+  note
 end
 
-get "/notes", workers: 1 do |env|
-  env.json(NoteList.new(NOTES))
+get "/notes", query: NoteFilter, response: NoteList, workers: 1 do |env, filter|
+  wanted = filter.tag
+  found = wanted ? NOTES.select { |note| note.tags.includes?(wanted) } : NOTES
+  NoteList.new(found.first(filter.limit))
 end
 
-# A `StatusError` returned is answered with its status: here the 404 page
-# below.
-get "/notes/:id", workers: 1 do |env|
-  id = env.params.url["id"].to_i? || 0
+# `path: Int32` reads the one capture, `:id`. A `StatusError` answered
+# beside the `Note` is sent with its status: here the 404 page below.
+get "/notes/:id", path: Int32, response: Note, workers: 1 do |env, id|
   note = id > 0 ? NOTES[id - 1]? : nil
-  if note
-    env.json(note)
-  else
-    StatusError.new(404)
-  end
+  note || StatusError.new(404)
 end
 
 error 404 do |env|
