@@ -136,7 +136,7 @@ pub class Router
     @[Share(serial: workers)]
     pub def {{ method.id }}(path : String, *, workers : Int32? = nil, &block : Context -> B) : Nil forall B
       what = {{ method.upcase }} + " " + path
-      add_route({{ method.upcase }}, path, kept_serial?(workers, what) ? KeptRoute.new(->(ctx : Context) : String | Error { route_answer(block.call(ctx)) }, what) : KeptRoute.new(SharedProc(Context, String | Error).of { |ctx| answer_route(block, ctx) }))
+      add_route({{ method.upcase }}, path, kept_serial?(workers, what) ? KeptRoute.new(->(ctx : Context) : String | Error { route_answer(block.call(ctx)) }, what) : KeptRoute.new(SharedProc(Context, String | Error).of { |ctx| route_answer(block.call(ctx)) }))
     end
   {% end %}
 
@@ -362,14 +362,6 @@ end
 # rather than a method, so a kept block calling it reaches no router.
 private def route_answer(result : R) : String | Error forall R
   result.is_a?(::Error) ? result.as(Error) : body_of(result)
-end
-
-# A route's block called and its answer kept, for the block a registration
-# keeps on every worker. iyi 0.20.0 crashes compiling `route_answer(
-# block.call(ctx))` written in that block when the route's block only
-# raises (its `B` is `NoReturn`); called from here, it compiles.
-private def answer_route(block : Proc(Context, B), ctx : Context) : String | Error forall B
-  route_answer(block.call(ctx))
 end
 
 private def body_of(value : IntoBody) : String
