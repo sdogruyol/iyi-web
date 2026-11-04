@@ -1,0 +1,137 @@
+# Dependencies: what a route needs before it can run - the signed-in user,
+# a database handle, a checked API key - written once and named on each
+# route that needs it, FastAPI's `Depends`.
+#
+#     def current_user(env : Context) : User | HttpError
+#       token = bearer_token(env)!
+#       find_user(token) || AuthError.new(401, "unknown token")
+#     end
+#
+#     CURRENT_USER = Dep.new { |env| current_user(env) }
+#
+#     get "/me", deps: CURRENT_USER do |env, user|
+#       user.name
+#     end
+#
+# A provider answers its value or an error. An error ends the request
+# before the route runs, with the error's status: a provider is where a
+# 401 or a 403 is decided, once. The block gets the value with the errors
+# taken out: a `User` above, not a `User | HttpError`.
+#
+# Several providers are one with `Dep.all`, whose value is a named tuple
+# of theirs, each typed as its provider answers it:
+#
+#     get "/notes", deps: Dep.all(user: CURRENT_USER, db: DB) do |env, deps|
+#       deps[:db].notes_of(deps[:user])
+#     end
+#
+# A provider may use another - `CURRENT_USER.resolve(env)!` inside a
+# provider's def - and each runs at most once per request, however many
+# providers ask for it: its answer is kept on the context for the rest of
+# the request.
+#
+# A provider runs on whichever worker serves the request, several at once,
+# so its block is checked where it is written, as a route's is: shared
+# state goes behind a `Mutex` or in an `Atomic`. A `Dep` is `Share`, and is
+# usually a constant.
+#
+# Why `Dep.all(user: A, db: B)` and not `deps: {user: A, db: B}`: a route's
+# block is typed where it is registered, from the types of the arguments
+# beside it. A provider carries the type of its value (`V` below); a named
+# tuple of providers carries only theirs, and the named tuple of values
+# the block would get is a type no signature can spell. `Dep.all` makes
+# that type once, as a provider of its own.
+module iyi_web/deps
+
+import std/atomic
+import std/list::{List}
+import std/shared_proc::{SharedProc}
+import iyi_web/context::{Context}
+import iyi_web/openapi::{SecurityScheme}
+
+DEP_IDS = Atomic(Int32).new(0)
+
+# A provider: `V` is what a route's block gets, `R` what the provider
+# answers, `V` and its errors.
+pub struct Dep(V, R)
+  @block : SharedProc(Context, R)
+  @key : String
+  @security : List(SecurityScheme)
+
+  private def initialize(@block : SharedProc(Context, R), @key : String, @security : List(SecurityScheme))
+  end
+
+  # Not for an application: `new` and `all` check the block first.
+  protected def self.make(block : SharedProc(Context, R), security : List(SecurityScheme)) : Dep(V, R)
+    new(block, "iyi_web.dep." + (DEP_IDS.add(1) + 1).to_s, security)
+  end
+
+  # A provider from *block*. *security* is the OpenAPI scheme the provider
+  # checks, or the schemes of a provider it uses (`USER.security`), listed
+  # on every route that depends on it. The return type is left to the
+  # compiler: it is `Dep(V, R)` with `V` the block's answer without its
+  # errors, a type no signature can write.
+  @[Share]
+  def self.new(*, security : SecurityScheme | List(SecurityScheme) | Nil = nil, &block : Context -> R) forall R
+    schemes = case security
+              in SecurityScheme       then List.new([security])
+              in List(SecurityScheme) then security
+              in Nil                  then List.new([] of SecurityScheme)
+              end
+    Dep(typeof(Dep.success(block.call(Context.allocate))), R).make(SharedProc(Context, R).of(&block), schemes)
+  end
+
+  # Several providers as one, whose value is the named tuple of theirs:
+  # `Dep.all(user: CURRENT_USER, db: DB)` gives the block
+  # `{user: User, db: Db}`. They run in the order written, and the first
+  # error ends the request. Their security schemes all apply.
+  def self.all(**deps : **T) forall T
+    schemes = [] of SecurityScheme
+    {% for key in T.keys %}
+      deps[{{ key.symbolize }}].security.each do |scheme|
+        schemes << scheme unless schemes.any? { |known| known.name == scheme.name }
+      end
+    {% end %}
+    gathered = SharedProc(Context, typeof(Dep.gather(Context.allocate, deps))).of { |ctx| Dep.gather(ctx, deps) }
+    Dep(typeof(Dep.success(Dep.gather(Context.allocate, deps))), typeof(Dep.gather(Context.allocate, deps))).make(gathered, List.new(schemes))
+  end
+
+  # The named tuple of *deps*' values for *ctx*, or the first error.
+  def self.gather(ctx : Context, deps : D) forall D
+    {% for key in D.keys %}
+      value_{{ key }} = deps[{{ key.symbolize }}].resolve(ctx)
+      return value_{{ key }} if value_{{ key }}.is_a?(::Error)
+    {% end %}
+    {% begin %}{ {% for key in D.keys %}{{ key }}: value_{{ key }}, {% end %} }{% end %}
+  end
+
+  # *value* without its error members, for `typeof` alone: never called.
+  def self.success(value : A) forall A
+    value.is_a?(::Error) ? raise("Dep.success is a type, not a call") : value
+  end
+
+  # The OpenAPI schemes this provider checks.
+  pub def security : List(SecurityScheme)
+    @security
+  end
+
+  # The provider's answer for this request: run once, then kept on the
+  # context, so a provider several others ask for runs once.
+  pub def resolve(ctx : Context) : R
+    if kept = ctx.get?(@key, Resolved(R))
+      return kept.value
+    end
+    value = @block.call(ctx)
+    ctx.set(@key, Resolved(R).new(value))
+    value
+  end
+end
+
+# A provider's answer as the context keeps it: in a box, so an answer that
+# is nil is told from one not yet made.
+class Resolved(R)
+  getter value : R
+
+  def initialize(@value : R)
+  end
+end

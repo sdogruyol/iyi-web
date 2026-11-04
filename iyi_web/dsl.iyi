@@ -26,6 +26,7 @@ import std/signal::{Signal}
 import iyi_web/body::{IntoBody}
 import iyi_web/context::{Context}
 import iyi_web/router::{Router, RouteHandler}
+import iyi_web/deps::{Dep}
 import iyi_web/handler::{Handler, ChainHandler, serial_step}
 import iyi_web/config::*
 import iyi_web/kept::{Kept, kept_serial?}
@@ -63,16 +64,37 @@ end
 
 HTTP_METHODS   = %w(get post put patch delete options head query)
 FILTER_METHODS = %w(get post put patch delete options query)
+TYPED_KINDS    = [{"path", "P", "path_type"}, {"query", "Q", "query_type"}, {"headers", "H", "headers_type"}, {"body", "J", "body_type"}, {"deps", "V", "deps"}]
 
 APP = Router.new
 
-# A route may answer an error as well as a body; see `Router#get`.
+# A route may answer an error as well as a body; see `Router#get`. With
+# `path:`, `query:`, `headers:`, `body:` or `deps:` it is a typed route,
+# its block given each value after `env` (`iyi_web/typed`); `response:`,
+# `status:`, `summary:`, `description:` and `tags:` describe it in the
+# OpenAPI document (`openapi`).
 {% for method in HTTP_METHODS %}
-  @[Share(serial: workers)]
-  pub def {{ method.id }}(path : String, *, workers : Int32? = nil, &block : Context -> B) : Nil forall B
-    APP.{{ method.id }}(path, workers: workers, &block)
-  end
+  {% for mask in (0..31).to_a %}
+    {% chosen = [] of TupleLiteral %}
+    {% for kind, index in TYPED_KINDS %}
+      {% if mask & [1, 2, 4, 8, 16][index] != 0 %}
+        {% chosen << kind %}
+      {% end %}
+    {% end %}
+    {% names = chosen.map { |kind| kind[0] } %}
+    {% route = (mask == 0 ? "path" : "route").id %}
+    @[Share(serial: workers)]
+    pub def {{ method.id }}({{ route }} : String, *, {% for kind in chosen %}{% if kind[0] == "deps" %}deps : Dep(V, E), {% else %}{{ kind[0].id }} {{ kind[2].id }} : {{ kind[1].id }}.class, {% end %}{% end %}workers : Int32? = nil, response : M.class = Nil, status : Int32 = 200, summary : String? = nil, description : String? = nil, tags : Array(String) = [] of String, &block : Context{% for kind in chosen %}, {{ kind[1].id }}{% end %} -> B) : Nil forall B, M{% for kind in chosen %}, {{ kind[1].id }}{% end %}{% if names.includes?("deps") %}, E{% end %}
+      APP.{{ method.id }}({{ route }}, {% for kind in chosen %}{{ kind[0].id }}: {{ kind[2].id }}, {% end %}workers: workers, response: response, status: status, summary: summary, description: description, tags: tags, &block)
+    end
+  {% end %}
 {% end %}
+
+# Serves the application's OpenAPI document and its Swagger UI page; see
+# `Router#openapi`.
+pub def openapi(title : String, version : String, description : String? = nil, path : String = "/openapi.json", docs : String? = "/docs") : Nil
+  APP.openapi(title, version, description, path, docs)
+end
 
 # One path or several, as `Router#before` takes them.
 {% for name in ["before_all", "after_all"] + FILTER_METHODS.map { |m| "before_" + m } + FILTER_METHODS.map { |m| "after_" + m } %}

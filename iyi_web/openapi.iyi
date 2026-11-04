@@ -1,0 +1,626 @@
+# The OpenAPI 3.1 document of an application, made from the routes it
+# registered and the types they declare, and the page that shows it.
+#
+# FastAPI builds its document when the program runs, by asking Pydantic
+# for each model's schema. Here a schema is written by a macro that walks
+# the type's instance variables when the program is compiled - the same
+# walk `iyi_web/validation` makes to check a body - so the document says
+# what the route reads, field for field: a field with neither a default
+# nor a nilable type is `required`, a `JSON::Field` key is the property's
+# name, an ignored field is left out, an enum lists its members as JSON
+# writes them, and a struct inside a struct is a schema of its own under
+# `components`, referred to by `$ref`.
+#
+# What a route contributes is kept as a `RouteDoc` when it is registered:
+# its parameters, body, response and security. The document is assembled
+# from every router, mounts included, once the server is built, and is
+# served as a string the routes' workers share (`Router#openapi`).
+module iyi_web/openapi
+
+import std/html::{HTML}
+import std/json::{JSON, Builder, Any}
+import iyi_web/status::{phrase}
+import iyi_web/coerce::{header_name}
+import iyi_web/validation::{enum_name}
+
+# Where an API key travels, in OpenAPI's words.
+pub enum KeyLocation
+  Header
+  Query
+  Cookie
+end
+
+# One entry of `components.securitySchemes`: its *name*, the key a route's
+# `security` names it by, and the scheme object as JSON. Made by the
+# constructors below, and carried by a `Dep` (`iyi_web/deps`), so a route
+# that depends on it lists it.
+pub struct SecurityScheme
+  getter name : String
+  getter json : String
+
+  def initialize(@name : String, @json : String)
+  end
+
+  # `Authorization: Bearer <token>`. *format* is a hint for the reader,
+  # `"JWT"` for a JSON web token.
+  def self.bearer(name : String = "bearerAuth", format : String? = nil, description : String? = nil) : SecurityScheme
+    SecurityScheme.new(name, JSON.build do |json|
+      json.object do
+        json.field("type", "http")
+        json.field("scheme", "bearer")
+        if shown = format
+          json.field("bearerFormat", shown)
+        end
+        if text = description
+          json.field("description", text)
+        end
+      end
+    end)
+  end
+
+  # `Authorization: Basic ...`, as `BasicAuthHandler` reads it.
+  def self.basic(name : String = "basicAuth") : SecurityScheme
+    SecurityScheme.new(name, %({"type":"http","scheme":"basic"}))
+  end
+
+  # A key sent as the header, query parameter or cookie *param*.
+  def self.api_key(param : String, location : KeyLocation = KeyLocation::Header, name : String = "apiKeyAuth") : SecurityScheme
+    SecurityScheme.new(name, JSON.build do |json|
+      json.object do
+        json.field("type", "apiKey")
+        json.field("name", param)
+        json.field("in", location.to_s.downcase)
+      end
+    end)
+  end
+
+  # OAuth2's password flow: a client posts a username and password as a
+  # form to *token_url* and sends the token it gets as a bearer token.
+  # *scopes* maps each scope to what it allows.
+  def self.oauth2_password(token_url : String, scopes : Hash(String, String) = {} of String => String, name : String = "OAuth2PasswordBearer") : SecurityScheme
+    SecurityScheme.new(name, JSON.build do |json|
+      json.object do
+        json.field("type", "oauth2")
+        json.field("flows") do
+          json.object do
+            json.field("password") do
+              json.object do
+                json.field("tokenUrl", token_url)
+                json.field("scopes") do
+                  json.object do
+                    scopes.each { |scope, meaning| json.field(scope, meaning) }
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end)
+  end
+end
+
+# A parameter a route reads: its name as sent, where (`path`, `query`,
+# `header`), whether it must be sent, and its schema.
+pub struct ParamDoc
+  getter name : String
+  getter location : String
+  getter required : Bool
+  getter schema : String
+
+  def initialize(@name : String, @location : String, @required : Bool, @schema : String)
+  end
+end
+
+# What one route says about itself, gathered when it is registered.
+pub class RouteDoc
+  getter method : String
+  getter path : String
+  getter summary : String?
+  getter description : String?
+  getter tags : Array(String)
+  getter status : Int32
+  getter params : Array(ParamDoc)
+  getter body : String?
+  getter response : String?
+  getter schemas : Hash(String, String)
+  getter security : Array(SecurityScheme)
+  # Fields a typed `path:` must find among the path's captures, checked
+  # once the route's full path is known (`check_captures`).
+  getter path_fields : Array(String)
+  getter hidden : Bool
+
+  def initialize(@method : String, @path : String, @summary : String? = nil, @description : String? = nil, @tags : Array(String) = [] of String, @status : Int32 = 200, @hidden : Bool = false)
+    @params = [] of ParamDoc
+    @body = nil
+    @response = nil
+    @schemas = {} of String => String
+    @security = [] of SecurityScheme
+    @path_fields = [] of String
+  end
+
+  # The fields of *type* as parameters at *location*: `"path"`, `"query"`
+  # or `"header"`, a header's name dashed as `decode_params` reads it.
+  pub def add_params(type : T.class, location : String) : Nil forall T
+    {% for ivar in T.instance_vars %}
+      {% ann = ivar.annotation(::Std::Json::JSON::Field) %}
+      {% unless ann && (ann[:ignore] || ann[:ignore_deserialize]) %}
+        {% key = ann && ann[:key] ? ann[:key] : ivar.name.stringify %}
+        name = location == "header" ? header_name({{ key }}) : {{ key }}
+        required = {{ !ivar.type.nilable? && !ivar.has_default_value? }}
+        # A parameter that may be left out is its type when sent: the
+        # schema says the type, `required` says it may be absent.
+        schema = with_default(schema_json(typeof(T.allocate.@{{ ivar.name }} || raise("")), @schemas), {% if ivar.has_default_value? && (ivar.default_value.is_a?(NumberLiteral) || ivar.default_value.is_a?(StringLiteral) || ivar.default_value.is_a?(BoolLiteral)) %}JSON.to_json({{ ivar.default_value }}){% else %}nil{% end %})
+        @params << ParamDoc.new(name, location, location == "path" || required, schema)
+        @path_fields << name if location == "path"
+      {% end %}
+    {% end %}
+  end
+
+  # A `path:` that is one scalar: the route's one capture, *name*.
+  pub def add_path_scalar(type : T.class, name : String) : Nil forall T
+    @params << ParamDoc.new(name, "path", true, schema_json(T, @schemas))
+    @path_fields << name
+  end
+
+  pub def body=(type : T.class) : Nil forall T
+    @body = schema_json(T, @schemas)
+  end
+
+  # Nil, the default of `response:`, says nothing about the body.
+  pub def response=(type : T.class) : Nil forall T
+    {% unless T == Nil %}
+      @response = schema_json(T, @schemas)
+    {% end %}
+  end
+
+  pub def secure(scheme : SecurityScheme) : Nil
+    @security << scheme unless @security.any? { |known| known.name == scheme.name }
+  end
+
+  # Raises, naming the route, when a field of its typed `path:` is no
+  # capture of *full_path*: a route that could only ever answer 422.
+  pub def check_captures(full_path : String) : Nil
+    captured = path_captures(full_path)
+    @path_fields.each do |field|
+      raise "#{@method} #{full_path}: path: has a field #{field.inspect}, which the path does not capture (#{captured.empty? ? "it captures nothing" : "it captures " + captured.join(", ")})" unless captured.includes?(field)
+    end
+  end
+end
+
+# The names a route path captures, in order: `:id` and `*rest`.
+pub def path_captures(path : String) : Array(String)
+  names = [] of String
+  path.split('/').each do |segment|
+    if segment.starts_with?(":") || segment.starts_with?("*")
+      name = segment[1, segment.bytesize - 1]
+      names << name unless name.empty?
+    end
+  end
+  names
+end
+
+# `/notes/:id` and `/files/*path` as OpenAPI writes them: `/notes/{id}`,
+# `/files/{path}`.
+pub def openapi_path(path : String) : String
+  path.split('/').map { |segment|
+    (segment.starts_with?(":") || segment.starts_with?("*")) && segment.bytesize > 1 ? "{" + segment[1, segment.bytesize - 1] + "}" : segment
+  }.join("/")
+end
+
+private def with_default(schema : String, default : String?) : String
+  return schema unless value = default
+  return schema unless schema.ends_with?("}") && schema.bytesize > 2
+  schema[0, schema.bytesize - 1] + %(,"default":) + value + "}"
+end
+
+# The JSON Schema of *type*, a struct's own written into *schemas* under
+# its name and referred to: one overload per type `JSON` reads, as in
+# `iyi_web/validation`.
+
+pub def schema_json(type : Nil.class, schemas : Hash(String, String)) : String
+  %({"type":"null"})
+end
+
+pub def schema_json(type : Bool.class, schemas : Hash(String, String)) : String
+  %({"type":"boolean"})
+end
+
+pub def schema_json(type : Int32.class, schemas : Hash(String, String)) : String
+  %({"type":"integer","format":"int32"})
+end
+
+pub def schema_json(type : Int64.class, schemas : Hash(String, String)) : String
+  %({"type":"integer","format":"int64"})
+end
+
+pub def schema_json(type : UInt8.class, schemas : Hash(String, String)) : String
+  %({"type":"integer","minimum":0,"maximum":255})
+end
+
+pub def schema_json(type : UInt64.class, schemas : Hash(String, String)) : String
+  %({"type":"integer","minimum":0})
+end
+
+pub def schema_json(type : Float64.class, schemas : Hash(String, String)) : String
+  %({"type":"number","format":"double"})
+end
+
+pub def schema_json(type : String.class, schemas : Hash(String, String)) : String
+  %({"type":"string"})
+end
+
+pub def schema_json(type : Any.class, schemas : Hash(String, String)) : String
+  "{}"
+end
+
+pub def schema_json(type : Array(E).class, schemas : Hash(String, String)) : String forall E
+  %({"type":"array","items":) + schema_json(E, schemas) + "}"
+end
+
+pub def schema_json(type : Hash(String, V).class, schemas : Hash(String, String)) : String forall V
+  %({"type":"object","additionalProperties":) + schema_json(V, schemas) + "}"
+end
+
+# A nilable type is its other members or null; an enum is the names JSON
+# writes its members as; a struct or class is an object schema under its
+# own name in *schemas*, referred to with `$ref`. A union of several
+# types other than nil is any value: its members are not this module's to
+# name.
+pub def schema_json(type : T.class, schemas : Hash(String, String)) : String forall T
+  {% if T.nilable? %}
+    {% if T.union_types.size == 2 %}
+      %({"anyOf":[) + schema_json(typeof(nil.as(T) || raise("")), schemas) + %(,{"type":"null"}]})
+    {% else %}
+      "{}"
+    {% end %}
+  {% elsif T.union? %}
+    "{}"
+  {% elsif T < ::Enum %}
+    names = JSON.to_json(T.names.map { |member| enum_name(member) })
+    {% if T.annotation(Flags) %}
+      %({"type":"array","items":{"type":"string","enum":) + names + "}}"
+    {% else %}
+      %({"type":"string","enum":) + names + "}"
+    {% end %}
+  {% else %}
+    name = component_name(T.to_s)
+    reference = %({"$ref":"#/components/schemas/) + name + %("})
+    if schemas.has_key?(name)
+      return reference
+    end
+    # Taken before the fields are walked, so a type that holds itself is
+    # a reference the second time.
+    schemas[name] = "{}"
+    required = [] of String
+    properties = [] of Tuple(String, String)
+    {% for ivar in T.instance_vars %}
+      {% ann = ivar.annotation(::Std::Json::JSON::Field) %}
+      {% unless ann && ann[:ignore] %}
+        {% key = ann && ann[:key] ? ann[:key] : ivar.name.stringify %}
+        {% if ann && ann[:converter] %}
+          field = "{}"
+        {% else %}
+          field = schema_json(typeof(T.allocate.@{{ ivar.name }}), schemas)
+        {% end %}
+        {% if ivar.has_default_value? && (ivar.default_value.is_a?(NumberLiteral) || ivar.default_value.is_a?(StringLiteral) || ivar.default_value.is_a?(BoolLiteral)) %}
+          field = with_default(field, JSON.to_json({{ ivar.default_value }}))
+        {% end %}
+        {% if ann && ann[:ignore_deserialize] %}
+          field = mark(field, "readOnly")
+        {% elsif ann && ann[:ignore_serialize] %}
+          field = mark(field, "writeOnly")
+        {% else %}
+          {% unless ivar.type.nilable? || ivar.has_default_value? %}
+            required << {{ key }}
+          {% end %}
+        {% end %}
+        properties << { {{ key }}, field }
+      {% end %}
+    {% end %}
+    schemas[name] = JSON.build do |json|
+      json.object do
+        json.field("type", "object")
+        json.field("properties") do
+          json.object do
+            properties.each do |property|
+              json.field(property[0])
+              json.raw(property[1])
+            end
+          end
+        end
+        unless required.empty?
+          json.field("required") do
+            json.array { required.each { |key| json.string(key) } }
+          end
+        end
+      end
+    end
+    reference
+  {% end %}
+end
+
+# `{"$ref":...}` cannot take a sibling keyword under 3.0; 3.1 allows it,
+# but wrapping keeps the reference plain for every reader.
+private def mark(schema : String, keyword : String) : String
+  return %({"allOf":[) + schema + %(],") + keyword + %(":true}) if schema.starts_with?(%({"$ref"))
+  return schema unless schema.ends_with?("}") && schema.bytesize > 2
+  schema[0, schema.bytesize - 1] + %(,") + keyword + %(":true})
+end
+
+# A type's name without its module, and generic arguments joined with
+# `_`: `App::Models::Page(App::Models::Note)` is `Page_Note`, as
+# `components` keys must be `[A-Za-z0-9._-]`.
+pub def component_name(full : String) : String
+  String.build do |text|
+    word = String::Builder.new
+    full.each_char do |char|
+      if char.ascii_alphanumeric? || char == '_'
+        word << char
+      elsif char == ':'
+        word = String::Builder.new
+      else
+        piece = word.to_s
+        text << piece << '_' unless piece.empty?
+        word = String::Builder.new
+      end
+    end
+    text << word.to_s
+  end.rstrip('_')
+end
+
+# Settings for `Router#openapi`.
+pub class OpenAPIInfo
+  getter title : String
+  getter version : String
+  getter description : String?
+  getter path : String
+  getter docs_path : String?
+
+  def initialize(@title : String, @version : String, @description : String? = nil, @path : String = "/openapi.json", @docs_path : String? = "/docs")
+  end
+end
+
+OPERATIONS = ["get", "put", "post", "delete", "options", "head", "patch", "trace"]
+
+ERROR_SCHEMA = %({"type":"object","properties":{"error":{"type":"string"},"fields":{"type":"object","additionalProperties":{"type":"string"}}},"required":["error"]})
+
+# The document for *routes*, each its full path and what it said about
+# itself. Routes with a method OpenAPI 3.1 has no operation for (`QUERY`)
+# are left out. Raises when two different types would be one schema.
+pub def openapi_document(info : OpenAPIInfo, routes : Array(Tuple(String, RouteDoc))) : String
+  schemas = {} of String => String
+  schemes = {} of String => String
+  by_path = {} of String => Array(Tuple(String, RouteDoc))
+  routes.each do |route|
+    doc = route[1]
+    next if doc.hidden
+    next unless OPERATIONS.includes?(doc.method.downcase)
+    doc.schemas.each do |name, schema|
+      if known = schemas[name]?
+        raise "OpenAPI: two different types are both named #{name}; rename one" unless known == schema
+      end
+      schemas[name] = schema
+    end
+    doc.security.each { |scheme| schemes[scheme.name] = scheme.json }
+    key = openapi_path(route[0])
+    list = by_path[key]? || [] of Tuple(String, RouteDoc)
+    list << route
+    by_path[key] = list
+  end
+  uses_errors = by_path.values.any? { |list| list.any? { |route| error_statuses(route[1]).size > 0 } }
+  schemas["Error"] = ERROR_SCHEMA if uses_errors && !schemas.has_key?("Error")
+
+  JSON.build do |json|
+    json.object do
+      json.field("openapi", "3.1.0")
+      json.field("info") do
+        json.object do
+          json.field("title", info.title)
+          json.field("version", info.version)
+          if text = info.description
+            json.field("description", text)
+          end
+        end
+      end
+      json.field("paths") do
+        json.object do
+          by_path.each do |path, list|
+            json.field(path) do
+              json.object do
+                list.each { |route| write_operation(json, route[0], route[1]) }
+              end
+            end
+          end
+        end
+      end
+      json.field("components") do
+        json.object do
+          json.field("schemas") do
+            json.object do
+              schemas.each do |name, schema|
+                json.field(name)
+                json.raw(schema)
+              end
+            end
+          end
+          unless schemes.empty?
+            json.field("securitySchemes") do
+              json.object do
+                schemes.each do |name, scheme|
+                  json.field(name)
+                  json.raw(scheme)
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+# The statuses the framework itself answers for a route before its block
+# runs: 422 for parameters, 400, 415 and 422 for a body, 401 for a
+# credential its security asks for.
+private def error_statuses(doc : RouteDoc) : Array(Int32)
+  statuses = [] of Int32
+  if doc.body
+    statuses << 400
+    statuses << 415
+  end
+  statuses << 422 if doc.body || !doc.params.empty?
+  statuses << 401 unless doc.security.empty?
+  statuses
+end
+
+private def write_operation(json : Builder, full_path : String, doc : RouteDoc) : Nil
+  method = doc.method.downcase
+  json.field(method) do
+    json.object do
+      json.field("operationId", method + "_" + operation_name(full_path))
+      if text = doc.summary
+        json.field("summary", text)
+      end
+      if text = doc.description
+        json.field("description", text)
+      end
+      unless doc.tags.empty?
+        json.field("tags") do
+          json.array { doc.tags.each { |tag| json.string(tag) } }
+        end
+      end
+      parameters = [] of ParamDoc
+      path_captures(full_path).each do |name|
+        found = doc.params.find { |param| param.location == "path" && param.name == name }
+        parameters << (found || ParamDoc.new(name, "path", true, %({"type":"string"})))
+      end
+      doc.params.each { |param| parameters << param unless param.location == "path" }
+      unless parameters.empty?
+        json.field("parameters") do
+          json.array do
+            parameters.each do |param|
+              json.object do
+                json.field("name", param.name)
+                json.field("in", param.location)
+                json.field("required", param.required)
+                json.field("schema")
+                json.raw(param.schema)
+              end
+            end
+          end
+        end
+      end
+      if body = doc.body
+        json.field("requestBody") do
+          json.object do
+            json.field("required", true)
+            json.field("content") do
+              json.object do
+                json.field("application/json") do
+                  json.object do
+                    json.field("schema")
+                    json.raw(body)
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+      json.field("responses") do
+        json.object do
+          json.field(doc.status.to_s) do
+            json.object do
+              json.field("description", phrase(doc.status))
+              if schema = doc.response
+                unless doc.status == 204
+                  json.field("content") do
+                    json.object do
+                      json.field("application/json") do
+                        json.object do
+                          json.field("schema")
+                          json.raw(schema)
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+          error_statuses(doc).each do |status|
+            next if status == doc.status
+            json.field(status.to_s) do
+              json.object do
+                json.field("description", phrase(status))
+                json.field("content") do
+                  json.object do
+                    json.field("application/json") do
+                      json.object do
+                        json.field("schema")
+                        json.raw(%({"$ref":"#/components/schemas/Error"}))
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+      unless doc.security.empty?
+        json.field("security") do
+          json.array do
+            json.object do
+              doc.security.each do |scheme|
+                json.field(scheme.name) do
+                  json.array { }
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+# `/notes/:id/tags` is `notes_id_tags`; the root is `root`.
+private def operation_name(path : String) : String
+  words = [] of String
+  path.split('/').each do |segment|
+    word = String.build do |text|
+      segment.each_char { |char| text << char if char.ascii_alphanumeric? || char == '_' }
+    end
+    words << word unless word.empty?
+  end
+  words.empty? ? "root" : words.join("_")
+end
+
+# One static page that renders the document at *spec_url* with Swagger UI
+# 5, loaded from the jsDelivr CDN: nothing is bundled into the binary, and
+# a browser that cannot reach the CDN shows an empty page while
+# `/openapi.json` keeps working. A `Content-Security-Policy` that allows
+# only `'self'` must also allow `cdn.jsdelivr.net` and the inline script.
+pub def docs_page(title : String, spec_url : String) : String
+  url = JSON.to_json(spec_url).gsub("</", "<\\/")
+  <<-HTML
+  <!DOCTYPE html>
+  <html lang="en">
+  <head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>#{HTML.escape(title)}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+  </head>
+  <body>
+  <div id="swagger-ui"></div>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js" crossorigin="anonymous"></script>
+  <script>
+  window.ui = SwaggerUIBundle({url: #{url}, dom_id: "#swagger-ui", persistAuthorization: true});
+  </script>
+  </body>
+  </html>
+  HTML
+end

@@ -1,0 +1,194 @@
+# JSON Web Tokens signed with HMAC-SHA256 (RFC 7519, RFC 7515, `HS256` of
+# RFC 7518), the one algorithm a server that both issues and checks its
+# own tokens needs.
+#
+#     token = JWT.sign(Claims.new(sub: "alice", expires_in: Span.new(hours: 1)), SECRET)
+#     claims = JWT.verify(token, SECRET)!          # Claims | JWTError
+#
+# `verify` accepts a token only when every check passes, and says which
+# failed: three base64url parts; a header whose `alg` is exactly `HS256`
+# (`none`, `HS512`, `RS256` and the rest are refused before the signature
+# is looked at, so a token cannot choose how it is checked); a signature
+# compared in constant time; and an `exp` that is still ahead, an `nbf`
+# that has passed and an `iat` not in the future, each give or take
+# *leeway* seconds. The payload is then read into a type of the
+# application's own with `read_json`, so a token whose claims are of the
+# wrong shape is refused, not half-read.
+#
+# The secret must be at least 32 bytes, as RFC 7518 §3.2 requires of an
+# HS256 key; a shorter one panics where it is used.
+module iyi_web/jwt
+
+import std/float
+import std/json::{JSON, Any, Parser, serializable}
+import std/time::{Time, Span}
+import std/digest::{SHA256}
+import std/crypto::{HMAC, Subtle}
+import iyi_web/status::{HttpError}
+import iyi_web/token::{encode_base64url, decode_base64url?}
+import iyi_web/validation::{BodyError, read_json}
+
+# A token that was refused: 401, with why.
+pub class JWTError
+  @message : String
+
+  def initialize(@message : String)
+  end
+end
+
+impl Error for JWTError
+  def message : String
+    @message
+  end
+end
+
+impl HttpError for JWTError
+  def status : Int32
+    401
+  end
+end
+
+# The registered claims of RFC 7519 §4.1, and OAuth's `scope`. A token's
+# payload is read into this unless `verify` is given another type; a type
+# of the application's own may carry these and more.
+pub struct Claims
+  getter sub : String?
+  getter iss : String?
+  getter aud : String?
+  getter exp : Int64?
+  getter nbf : Int64?
+  getter iat : Int64?
+  getter jti : String?
+  getter scope : String?
+  derive serializable
+
+  # Claims issued *now*: `iat` is now, and `exp` *expires_in* later when
+  # given.
+  def initialize(@sub : String? = nil, expires_in : Span? = nil, @iss : String? = nil, @aud : String? = nil, @scope : String? = nil, @jti : String? = nil, now : Time = Time.utc)
+    issued = now.to_unix
+    @iat = issued
+    @nbf = nil
+    lasting = expires_in
+    @exp = lasting ? issued + lasting.total_seconds_i64 : nil
+  end
+
+  # `scope` split on spaces: the OAuth2 scopes the token grants.
+  pub def scopes : Array(String)
+    granted = scope
+    granted ? granted.split(' ').reject(&.empty?) : [] of String
+  end
+end
+
+pub struct JWT
+  HEADER = %({"alg":"HS256","typ":"JWT"})
+
+  # *payload* - anything `JSON.to_json` writes, `Claims` or a type of the
+  # application's own - as a signed token.
+  def self.sign(payload : T, secret : String) : String forall T
+    check_secret(secret)
+    signing = encode_base64url(HEADER) + "." + encode_base64url(JSON.to_json(payload))
+    signing + "." + encode_base64url(mac(secret, signing))
+  end
+
+  # *token*'s payload read into *type*, or why it was refused. *issuer*
+  # and *audience*, when given, must be the token's `iss` and among its
+  # `aud`.
+  def self.verify(token : String, secret : String, type : T.class = Claims, leeway : Int32 = 0, issuer : String? = nil, audience : String? = nil, now : Time = Time.utc) : T | JWTError forall T
+    check_secret(secret)
+    parts = token.split('.')
+    return JWTError.new("malformed token") unless parts.size == 3 && parts.none?(&.empty?)
+
+    header = object_of(parts[0])
+    return JWTError.new("malformed token header") unless header
+    algorithm = header["alg"]?
+    unless algorithm && algorithm.as_s? == "HS256"
+      return JWTError.new("unsupported token algorithm: only HS256 is accepted")
+    end
+    return JWTError.new("unsupported token header: crit") if header.has_key?("crit")
+
+    sent = decode_base64url?(parts[2])
+    expected = mac(secret, parts[0] + "." + parts[1])
+    return JWTError.new("invalid token signature") unless sent && Subtle.constant_time_compare(sent, expected)
+
+    text = decode_base64url?(parts[1])
+    return JWTError.new("malformed token payload") unless text
+    payload = object_of_text(text)
+    return JWTError.new("malformed token payload") unless payload
+
+    clock = now.to_unix
+    slack = leeway.to_i64
+    if refusal = time_refusal(payload, clock, slack)
+      return JWTError.new(refusal)
+    end
+    if wanted = issuer
+      sent_issuer = payload["iss"]?
+      return JWTError.new("token issuer is not accepted") unless sent_issuer && sent_issuer.as_s? == wanted
+    end
+    if wanted = audience
+      return JWTError.new("token audience is not accepted") unless audience_includes?(payload["aud"]?, wanted)
+    end
+
+    claims = read_json(text, T)
+    return JWTError.new("invalid token claims: " + claims.message) if claims.is_a?(BodyError)
+    claims
+  end
+
+  private def self.check_secret(secret : String) : Nil
+    raise "an HS256 secret must be at least 32 bytes (RFC 7518 §3.2); this one is #{secret.bytesize}" if secret.bytesize < 32
+  end
+
+  private def self.mac(secret : String, data : String) : String
+    bytes = HMAC.digest(SHA256, secret, data)
+    String.new(bytes.size) { |target| target.copy_from(bytes.to_unsafe, bytes.size) }
+  end
+
+  private def self.object_of(part : String) : Hash(String, Any)?
+    text = decode_base64url?(part)
+    text ? object_of_text(text) : nil
+  end
+
+  private def self.object_of_text(text : String) : Hash(String, Any)?
+    parser = Parser.new(text)
+    root = parser.parse
+    return nil if parser.error
+    root.as_h?
+  end
+
+  # `exp`, `nbf` and `iat` are NumericDate: seconds, maybe with a fraction.
+  private def self.time_refusal(payload : Hash(String, Any), now : Int64, leeway : Int64) : String?
+    if found = payload["exp"]?
+      expires = seconds_of(found)
+      return "token exp is not a number" unless expires
+      return "token has expired" if now >= expires + leeway
+    end
+    if found = payload["nbf"]?
+      starts = seconds_of(found)
+      return "token nbf is not a number" unless starts
+      return "token is not valid yet" if now + leeway < starts
+    end
+    if found = payload["iat"]?
+      issued = seconds_of(found)
+      return "token iat is not a number" unless issued
+      return "token was issued in the future" if issued > now + leeway
+    end
+    nil
+  end
+
+  private def self.seconds_of(value : Any) : Int64?
+    raw = value.raw
+    return raw if raw.is_a?(Int64)
+    return raw.floor.to_i64 if raw.is_a?(Float64) && raw.finite? && raw.abs < 9.0e18
+    nil
+  end
+
+  private def self.audience_includes?(value : Any?, wanted : String) : Bool
+    return false unless value
+    if single = value.as_s?
+      return single == wanted
+    end
+    if many = value.as_a?
+      return many.any? { |item| item.as_s? == wanted }
+    end
+    false
+  end
+end

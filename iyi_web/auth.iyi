@@ -1,0 +1,233 @@
+# Credentials, read the way the HTTP and OAuth2 specifications say, as
+# dependencies a route names (`iyi_web/deps`) and as plain functions.
+#
+#     API_KEY = api_key_auth("X-API-Key")                   # Dep(String, String | AuthError)
+#     TOKEN   = bearer_auth                                 # Dep(String, String | AuthError)
+#     USER    = jwt_auth(SECRET)                            # Dep(Claims, Claims | AuthError)
+#
+#     get "/me", deps: USER do |env, claims|
+#       claims.sub
+#     end
+#
+# A request without the credential, or with one that is refused, ends with
+# 401 before the route runs: `WWW-Authenticate: Bearer` for a bearer token
+# (`error="invalid_token"` when one was sent and refused, RFC 6750 §3.1).
+# Each scheme is listed under the OpenAPI document's `securitySchemes` and
+# on every route that depends on it, so the docs page offers an
+# "Authorize" button for it.
+#
+# What a credential means - which user a token or a key belongs to - is
+# the application's: a provider of its own that uses one of these,
+#
+#     def current_user(env : Context) : User | HttpError
+#       claims = USER.resolve(env)!
+#       find_user(claims.sub) || AuthError.new(401, "unknown user")
+#     end
+#
+#     CURRENT_USER = Dep.new(security: USER.security) { |env| current_user(env) }
+#
+# and, for OAuth2's password flow, a token route that checks the password
+# `password_grant` read and answers `token_response`.
+module iyi_web/auth
+
+import std/time::{Span}
+import iyi_web/context::{Context}
+import iyi_web/status::{HttpError}
+import iyi_web/openapi::{SecurityScheme, KeyLocation}
+import iyi_web/deps::{Dep}
+import iyi_web/jwt::{JWT, JWTError, Claims}
+
+# A credential that is missing or refused: 401 unless another status is
+# given (403 for one that is valid but not enough).
+pub class AuthError
+  getter status : Int32
+  @message : String
+
+  def initialize(@status : Int32, @message : String)
+  end
+end
+
+impl Error for AuthError
+  def message : String
+    @message
+  end
+end
+
+impl HttpError for AuthError
+  def status : Int32
+    @status
+  end
+end
+
+# The token of `Authorization: Bearer <token>`, the scheme in any case
+# (RFC 6750 §2.1). Without one, a 401 with `WWW-Authenticate: Bearer`.
+pub def bearer_token(env : Context) : String | AuthError
+  header = env.request.headers["Authorization"]?
+  space = header ? header.index(' ') : nil
+  if header && space && header[0, space].downcase == "bearer"
+    token = header[space + 1, header.bytesize - space - 1].strip
+    return token if !token.empty? && token68?(token)
+  end
+  env.response.headers["WWW-Authenticate"] = %(Bearer realm="api")
+  AuthError.new(401, "missing bearer token")
+end
+
+# An API key sent as the header, query parameter or cookie *param*; a 401
+# when it is missing or empty.
+pub def api_key(env : Context, param : String, location : KeyLocation = KeyLocation::Header) : String | AuthError
+  found = case location
+          in KeyLocation::Header then env.request.headers[param]?
+          in KeyLocation::Query  then env.params.query[param]?
+          in KeyLocation::Cookie then env.cookies[param]?
+          end
+  return found if found && !found.empty?
+  AuthError.new(401, "missing API key " + param)
+end
+
+# A bearer token, unchecked: the route, or a provider using this one,
+# decides what it is worth. *format* is OpenAPI's `bearerFormat` hint.
+pub def bearer_auth(name : String = "bearerAuth", format : String? = nil) : Dep(String, String | AuthError)
+  Dep.new(security: SecurityScheme.bearer(name, format)) { |env| bearer_token(env) }
+end
+
+# An API key, unchecked; see `api_key`. Compare it with
+# `Subtle.constant_time_compare` (std/crypto), never `==`.
+pub def api_key_auth(param : String, location : KeyLocation = KeyLocation::Header, name : String = "apiKeyAuth") : Dep(String, String | AuthError)
+  Dep.new(security: SecurityScheme.api_key(param, location, name)) { |env| api_key(env, param, location) }
+end
+
+# A bearer token that must be a JWT signed with *secret* (`JWT.verify`),
+# its payload read into *type*. A refused token is a 401 with
+# `WWW-Authenticate: Bearer error="invalid_token"` and the reason.
+# *security* is how the document describes it: a bearer JWT, or the
+# `oauth2_password` scheme of the route that issues the tokens.
+pub def jwt_auth(secret : String, type : T.class = Claims, security : SecurityScheme = SecurityScheme.bearer(format: "JWT"), leeway : Int32 = 0, issuer : String? = nil, audience : String? = nil) : Dep(T, T | AuthError) forall T
+  raise "an HS256 secret must be at least 32 bytes (RFC 7518 §3.2); this one is #{secret.bytesize}" if secret.bytesize < 32
+  Dep.new(security: security) { |env| verified(env, secret, T, leeway, issuer, audience) }
+end
+
+private def verified(env : Context, secret : String, type : T.class, leeway : Int32, issuer : String?, audience : String?) : T | AuthError forall T
+  token = bearer_token(env)
+  return token if token.is_a?(AuthError)
+  claims = JWT.verify(token, secret, T, leeway: leeway, issuer: issuer, audience: audience)
+  if claims.is_a?(JWTError)
+    env.response.headers["WWW-Authenticate"] = %(Bearer realm="api", error="invalid_token", error_description=) + quoted(claims.message)
+    return AuthError.new(401, claims.message)
+  end
+  claims
+end
+
+# OAuth2's password flow (RFC 6749 §4.3) as a bearer token: what a route
+# behind a login form depends on. *token_url* is the route that answers
+# `password_grant` with `token_response`; *scopes* names what each scope
+# allows, for the docs page.
+pub def oauth2_password_bearer(token_url : String, scopes : Hash(String, String) = {} of String => String, name : String = "OAuth2PasswordBearer") : Dep(String, String | AuthError)
+  Dep.new(security: SecurityScheme.oauth2_password(token_url, scopes, name)) { |env| bearer_token(env) }
+end
+
+# A token request refused as RFC 6749 §5.2 says: 400 (401 for
+# `invalid_client`), and the error code as the message, so a client that
+# asks for JSON gets `{"error": "invalid_grant"}`.
+pub class OAuthError
+  getter code : String
+
+  def initialize(@code : String)
+  end
+end
+
+impl Error for OAuthError
+  def message : String
+    @code
+  end
+end
+
+impl HttpError for OAuthError
+  def status : Int32
+    @code == "invalid_client" ? 401 : 400
+  end
+end
+
+# What a client sent to the token endpoint of the password flow.
+pub struct PasswordGrant
+  getter username : String
+  getter password : String
+  getter scopes : Array(String)
+  getter client_id : String?
+  getter client_secret : String?
+
+  def initialize(@username : String, @password : String, @scopes : Array(String), @client_id : String?, @client_secret : String?)
+  end
+end
+
+# The form a token endpoint is posted (RFC 6749 §4.3.2):
+# `application/x-www-form-urlencoded` with `grant_type=password`, a
+# `username` and a `password`, and maybe `scope`, `client_id` and
+# `client_secret`. Anything else is an `OAuthError`: `invalid_request`
+# for a missing field, `unsupported_grant_type` for another grant. A
+# wrong password is the route's to refuse, with
+# `OAuthError.new("invalid_grant")`.
+pub def password_grant(env : Context) : PasswordGrant | OAuthError
+  return OAuthError.new("invalid_request") unless env.request.content_type.downcase == "application/x-www-form-urlencoded"
+  form = env.params.body
+  grant = form["grant_type"]?
+  return OAuthError.new("invalid_request") unless grant
+  return OAuthError.new("unsupported_grant_type") unless grant == "password"
+  username = form["username"]?
+  password = form["password"]?
+  return OAuthError.new("invalid_request") unless username && password && !username.empty?
+  scope = form["scope"]? || ""
+  PasswordGrant.new(username, password, scope.split(' ').reject(&.empty?), form["client_id"]?, form["client_secret"]?)
+end
+
+# The token endpoint's answer (RFC 6749 §5.1): `access_token`,
+# `token_type` bearer, `expires_in` seconds when given, and `scope` when
+# it differs from what was asked; never cached.
+pub def token_response(env : Context, access_token : String, expires_in : Span? = nil, scope : String? = nil) : Nil
+  env.response.headers["Cache-Control"] = "no-store"
+  env.response.headers["Pragma"] = "no-cache"
+  body = String.build do |text|
+    text << %({"access_token":) << quoted(access_token) << %(,"token_type":"bearer")
+    if lasting = expires_in
+      text << %(,"expires_in":) << lasting.total_seconds_i64.to_s
+    end
+    if granted = scope
+      text << %(,"scope":) << quoted(granted)
+    end
+    text << "}"
+  end
+  env.json(body)
+end
+
+# RFC 6750's token is `b64token`: letters, digits and `-._~+/`, then `=`.
+private def token68?(token : String) : Bool
+  bytes = token.to_unsafe
+  index = 0
+  padding = false
+  while index < token.bytesize
+    byte = bytes[index]
+    if byte == 61_u8
+      padding = true
+    else
+      return false if padding
+      return false unless (byte >= 65_u8 && byte <= 90_u8) || (byte >= 97_u8 && byte <= 122_u8) || (byte >= 48_u8 && byte <= 57_u8) || byte == 45_u8 || byte == 46_u8 || byte == 95_u8 || byte == 126_u8 || byte == 43_u8 || byte == 47_u8
+    end
+    index = index + 1
+  end
+  true
+end
+
+# A JSON string, which is also a valid quoted-string for a header
+# parameter once it holds no control character.
+private def quoted(value : String) : String
+  String.build do |text|
+    text << '"'
+    value.each_char do |char|
+      if char == '"' || char == '\\'
+        text << '\\' << char
+      elsif char.ord >= 32 && char.ord != 127
+        text << char
+      end
+    end
+    text << '"'
+  end
+end
