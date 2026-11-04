@@ -4,9 +4,10 @@
 # A response is buffered and sent whole once the chain has run, unless the
 # handler calls `flush`. The first `flush` sends the status line and the
 # headers, then everything printed so far; each later one sends what was
-# printed since. On HTTP/1.1 a flushed body is sent chunked, unless the
-# handler set `Content-Length`; on HTTP/1.0 it runs until the connection
-# closes. Headers changed after the first `flush` are not sent.
+# printed since. How the pieces are framed is the server's (std/http's):
+# chunked on HTTP/1.1 unless the handler set `Content-Length`, to the
+# close on HTTP/1.0, DATA frames on HTTP/2. Headers changed after the
+# first `flush` are not sent.
 module iyi_web/response
 
 import std/socket::{IyiSocket}
@@ -21,11 +22,8 @@ pub class Response
   @closed : Bool
   @content_type : String
   @sink : Proc(String, Nil)?
-  @version : String
-  @keepalive : Bool
   @head : Bool
   @headers_sent : Bool
-  @chunked : Bool
   @upgrade : Proc(IyiSocket | TlsStream, String, Nil)?
 
   def initialize
@@ -35,11 +33,8 @@ pub class Response
     @closed = false
     @content_type = "text/html; charset=utf-8"
     @sink = nil
-    @version = "HTTP/1.1"
-    @keepalive = true
     @head = false
     @headers_sent = false
-    @chunked = false
     @upgrade = nil
   end
 
@@ -105,13 +100,15 @@ pub class Response
     @headers_sent
   end
 
-  # Where `flush` writes, how the connection was asked for, and whether the
-  # request was a HEAD. The server attaches this before the chain runs;
-  # without it `flush` keeps buffering.
-  pub def attach(sink : Proc(String, Nil), version : String, keepalive : Bool, head : Bool) : Nil
+  # Where `flush` sends the body, and whether the request was a HEAD,
+  # whose flushes send the headers alone. The server attaches this before
+  # the chain runs; without it `flush` keeps buffering. *sink* is called
+  # once per flush with what was printed since the last one - "" on a
+  # first flush with nothing printed, which is the headers going out on
+  # their own - and the first call is the moment the status and headers
+  # are final.
+  pub def attach(sink : Proc(String, Nil), head : Bool) : Nil
     @sink = sink
-    @version = version
-    @keepalive = keepalive
     @head = head
   end
 
@@ -119,36 +116,33 @@ pub class Response
   pub def flush : Nil
     sink = @sink
     return unless sink
-    unless @headers_sent
-      sink.call(stream_head)
-      @headers_sent = true
+    first = !@headers_sent
+    @headers_sent = true
+    if @head || no_entity?
+      @body = ""
+      sink.call("") if first
+      return
     end
-    return if @body.empty?
-    unless @head || no_entity?
-      sink.call(@chunked ? chunk(@body) : @body)
-    end
+    return if @body.empty? && !first
+    piece = @body
     @body = ""
+    sink.call(piece)
   end
 
-  # Ends a flushed response: the rest of the body, then the last chunk.
+  # Ends a flushed response: what was printed after the last `flush`
+  # goes out; the server ends the body once the chain has returned.
   pub def finish : Nil
     flush
-    sink = @sink
-    sink.call("0\r\n\r\n") if sink && @chunked && !@head && !no_entity?
   end
 
-  # Whether the connection can carry another request after this flushed
-  # response: its end must be marked by the last chunk or by the length.
-  pub def reusable? : Bool
-    @chunked || @headers.has_key?("Content-Length") || @head || no_entity?
-  end
-
-  # Serialise to the bytes a TCP connection is owed. `Content-Length` is
-  # written for every status that can carry a body, so a keep-alive
-  # connection has a frame; a handler that already set one is left alone.
-  # HEAD omits the body (RFC 9110 §9.3.2) but keeps the length a GET of the
-  # same resource would have advertised. 1xx, 204 and 304 carry neither a
-  # body nor a Content-Type.
+  # The response whole, as HTTP/1.1 carries a buffered one: what a test
+  # reads to see the bytes a client would. `Content-Length` is written
+  # for every status that can carry a body; a handler that already set
+  # one is left alone. HEAD omits the body (RFC 9110 §9.3.2) but keeps
+  # the length a GET of the same resource would have advertised. 1xx, 204
+  # and 304 carry neither a body nor a Content-Type. The server writes
+  # through std/http instead, which frames the same answer for HTTP/1.1
+  # and HTTP/2 alike.
   pub def to_http(version : String, include_body : Bool = true) : String
     no_entity = no_entity?
     unless @headers.has_key?("Content-Type") || no_entity
@@ -179,23 +173,8 @@ pub class Response
     @upgrade
   end
 
-  private def no_entity? : Bool
+  # 1xx, 204 and 304 carry no body (RFC 9110 §6.4.1).
+  pub def no_entity? : Bool
     @status_code == 204 || @status_code == 304 || (@status_code >= 100 && @status_code < 200)
-  end
-
-  private def stream_head : String
-    unless @headers.has_key?("Content-Type") || no_entity?
-      @headers["Content-Type"] = @content_type
-    end
-    @chunked = @version == "HTTP/1.1" && !@headers.has_key?("Content-Length") && !no_entity?
-    @headers["Transfer-Encoding"] = "chunked" if @chunked
-    unless @headers.has_key?("Connection")
-      @headers["Connection"] = @keepalive && reusable? ? "keep-alive" : "close"
-    end
-    @version + " " + @status_code.to_s + " " + phrase(@status_code) + "\r\n" + @headers.to_s + "\r\n"
-  end
-
-  private def chunk(text : String) : String
-    text.bytesize.to_s(16) + "\r\n" + text + "\r\n"
   end
 end

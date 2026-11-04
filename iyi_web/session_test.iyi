@@ -274,14 +274,15 @@ describe "SessionHandler" do
   it "drops a change made after the headers went out, without a panic" do
     writes = [] of String
     ctx = streamed(SessionHandler.new(SECRET), writes, false)
-    assert writes[0].starts_with?("HTTP/1.1 200")
+    assert ctx.response.status_code == 200
     assert !writes[0].includes?("Set-Cookie")
     assert session_cookies(ctx).empty?
   end
 end
 
 # A route that sets a value and flushes, saving the session first when
-# *save* says so, on a response whose writes land in *writes*.
+# *save* says so. *writes* gets the header block as it stood when the
+# headers went out - the first flush - then each flushed piece.
 def streamed(handler : SessionHandler, writes : Array(String), save : Bool) : Context
   app = chain([handler, routes { |r|
     r.get "/stream" do |env|
@@ -294,7 +295,7 @@ def streamed(handler : SessionHandler, writes : Array(String), save : Bool) : Co
   }])
   request = http_request("GET", "/stream")
   response = Response.new
-  response.attach(->(bytes : String) { writes << bytes; nil }, "HTTP/1.1", true, false)
+  response.attach(->(bytes : String) { writes << response.headers.to_s if writes.empty?; writes << bytes; nil }, false)
   ctx = Context.new(request, response, Params.from(request, {} of String => String))
   app.call(ctx)
   ctx
