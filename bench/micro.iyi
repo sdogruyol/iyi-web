@@ -23,8 +23,7 @@ import std/kernel::{abort}
 import std/text
 import iyi_web/radix::{Tree, Match}
 import iyi_web/router::{Router, RouteHandler}
-import iyi_web/intake::{Intake}
-import iyi_web/request::{Request}
+import iyi_web/request::{Request, parse_incoming}
 import iyi_web/params::{Params}
 import iyi_web/headers::{Headers}
 import iyi_web/context::{Context}
@@ -120,13 +119,14 @@ route_handler = routes { |r| fill(r) }
 check(matched(route_handler.lookup("GET", "/api/v1/webhooks/7"), "router lookup")["id"] == "7", "router lookup")
 check(!route_handler.lookup("HEAD", "/api/v1/webhooks/7").nil?, "router lookup HEAD")
 
-intake = Intake.new("", 1 << 20)
-intake.append(GET_WIRE)
-check(intake.take.is_a?(Tuple(Request, String, Bool)), "intake GET")
-intake.reset("", 1 << 20)
-intake.append(POST_WIRE)
-posted = intake.take
-check(posted.is_a?(Tuple(Request, String, Bool)) && posted[0].body == FORM_BODY, "intake POST")
+# A request off the wire as the server reads it now: std/http's parser,
+# then the request a handler gets (`parse_incoming` is the two together;
+# the server does the same with the head std/http read off its socket).
+# These cases were `intake.get` and `intake.post_form` while iyi-web read
+# the framing itself.
+check(!parse_incoming(GET_WIRE).request.nil?, "wire GET")
+posted = parse_incoming(POST_WIRE).request
+check(!posted.nil? && posted.body == FORM_BODY, "wire POST")
 
 query_request = http_request("GET", "/search", QUERY)
 form = form_request("POST", "/api/v1/users", FORM_BODY)
@@ -188,15 +188,11 @@ register job, cases, options.filter, "router.lookup_head" do
   found = route_handler.lookup("HEAD", "/api/v1/webhooks/7")
   sink += found ? found.params.size : 0
 end
-register job, cases, options.filter, "intake.get" do
-  intake.reset("", 1 << 20)
-  intake.append(GET_WIRE)
-  sink += intake.take ? 1 : 0
+register job, cases, options.filter, "wire.get" do
+  sink += parse_incoming(GET_WIRE).request ? 1 : 0
 end
-register job, cases, options.filter, "intake.post_form" do
-  intake.reset("", 1 << 20)
-  intake.append(POST_WIRE)
-  sink += intake.take ? 1 : 0
+register job, cases, options.filter, "wire.post_form" do
+  sink += parse_incoming(POST_WIRE).request ? 1 : 0
 end
 register job, cases, options.filter, "params.query" do
   sink += Params.from(query_request, no_url).query.size

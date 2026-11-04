@@ -378,7 +378,8 @@ private def start(port : Int32 | Nil) : Nil
 
   server = build_server(app, cfg)
   address = ""
-  tls = cfg.ssl
+  tls = cfg.tls_config
+  server.autocert = cfg.autocert if cfg.ssl.nil?
   if path = cfg.unix_socket
     server.bind_unix(path, tls)
     address = "unix://" + path

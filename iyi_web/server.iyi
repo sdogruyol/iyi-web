@@ -1,14 +1,27 @@
-# An HTTP/1.1 server on `std/http`'s parser and iyi's parking sockets.
+# The server: iyi-web's accept loop, drain and connection bounds, with
+# every connection spoken by `std/http`'s server (`Server.handle`, the
+# connection half of `Server.serve`).
 #
-# `IyiSocket#accept` / `#read` / `#write` park the calling fiber, so a
-# slow client costs one task, not the thread. Closing the listener
-# answers `Cancelled` on a parked `accept`, which is how `close` ends
-# `listen`. A connection's own failure - a reset, a peer that has gone -
-# answers `SocketError`: a read that gets one ends the connection, and a
-# write that gets one panics its task, so a handler streaming to a client
-# that left stops rather than writing on. The response is still this
-# library's: handlers mutate a class, and `Set-Cookie` may appear more
-# than once, which a Hash cannot hold.
+# **What std/http speaks.** HTTP/1.1 and HTTP/1.0, keep-alive, chunked
+# bodies both ways, `Expect: 100-continue`, and HTTP/2 - a connection that
+# opens with HTTP/2's preface in the clear (h2c with prior knowledge), or
+# one whose TLS ALPN chose `h2` - beside HTTP/1.1 on the same listener;
+# TLS 1.3 and 1.2 (std/tls), a client certificate when the config asks for
+# one (`client_roots`), and `zstd` or `gzip` for an answer worth compressing
+# when `compress` is on. A request's head is read and parsed once, there;
+# the body stays on the connection until something reads it.
+#
+# **What this module keeps.** std/http's `serve` owns its accept loop and
+# answers to a close of its listener; iyi-web's guarantees need the
+# connection in hand, so the loop here accepts and hands each connection
+# to `Server.handle` on its worker, under a `Wire` - the socket, with the
+# bounds std/http does not have: `read_timeout` for a whole request from
+# its first byte, `idle_timeout` between requests, `write_timeout` per
+# write, the `408` a request too slow to arrive gets, and what a drain or a
+# cut-off does to a connection. The handler each connection is given turns
+# std/http's request into a `Context`, holds the request line to 8 KiB
+# (414) and the fields to 16 KiB (431), the body to
+# `max_request_body_size` (413), runs the chain and answers what it left.
 #
 # **On every core.** With more than one worker every connection is a
 # parallel task (SPEC.md III.4.13): the thread that called `listen`
@@ -20,22 +33,24 @@
 # signals a stop needs, which are `Atomic`s and `Channel`s. The compiler
 # checks all of it where the connection's task is spawned, so a site that
 # held a `Proc` or an `Array` would not compile. With one worker the same
-# `Site` code runs every connection as a task on the accepting thread, as
-# every connection ran before there were workers; its blocks are `Proc`s,
-# and its settings the live `Config`.
+# `Site` code runs every connection as a task on the accepting thread; its
+# blocks are `Proc`s, and its settings the live `Config`.
 #
-# Every connection runs as its own task inside its own group. `listen`'s
-# group cancels every live child on the first failure (III.4.3), so a
-# handler's panic, or a write to a client that has gone, would otherwise
-# close every other connection too. Reading a task's value is what
-# catches its panic; the request being handled then gets a 500.
+# **A request is a task.** The chain runs in a task of its own beside the
+# connection's, in a group of its own: a handler's panic ends there, and
+# the request gets the 500 page while the connection and every other one
+# go on. The answer goes back to std/http as its `Response`: whole, or -
+# once the handler calls `flush` - as a stream the chain's task feeds a
+# piece at a time while std/http frames it (chunked, a length, or DATA
+# frames), or, for a 101, as the upgrade that hands the connection to a
+# WebSocket.
 #
 # A stop is a drain. `close` and `shutdown` close the listener, close the
 # connections parked waiting for a request, and let each request in flight
 # finish, its connection closing after the response; `listen` returns when
 # the last connection has ended. What is still running at the deadline is
 # cut off: its task group is cancelled, so a sleep or a socket wait answers
-# `Cancelled`, and its socket is closed, so a write to it panics and a
+# `Cancelled`, and its socket is closed, so a write to it fails and a
 # handler still streaming stops. The drain is watched the way Kemal
 # watches it, every 10 ms, and only once the listener is closed.
 #
@@ -44,42 +59,37 @@
 # each connection, in its own task on its own worker, a watcher waits for
 # the stop: when the server begins to drain it closes its connection if
 # that is waiting for a request, and when the deadline passes it cuts it
-# off - what the accepting thread did itself, walking a list of every
-# connection, before connections ran on other cores (std/http's
-# `serve_parallel` does the same). A `close` from a request, on a worker,
-# is sent to the accepting thread, which drains.
-#
-# A slow client holds one task, and the timeouts bound for how long: a
-# request has `read_timeout` to arrive whole, a keep-alive connection
-# `idle_timeout` to start its next one, and a write `write_timeout` for
-# the client to take bytes. The socket's own bound is per wait, so the
-# read bound is set before every read from what is left of the request's
-# deadline; a client trickling a byte at a time still runs out.
-#
-# Under TLS (`bind_tls`) a connection is std/http's `TlsStream` over the
-# socket rather than the socket, and the handshake runs first, in the
-# connection's own task and inside its first request's `read_timeout`, as
-# `std/http`'s server runs it: a client that fails it - plain HTTP sent to
-# the TLS port, a certificate it refuses - is told by an alert and loses
-# only its own connection. On every worker the config is
-# `TlsServerConfig#frozen`, one copy every worker reads with one set of
-# ticket keys.
+# off. A `close` from a request, on a worker, is sent to the accepting
+# thread, which drains.
 module iyi_web/server
 
+import std/http
+import std/http::{HTTP}
 import std/list::{List}
 import std/shared_proc::{SharedProc}
 import std/socket::{IyiSocket, SocketError}
-import std/http::{HTTP, TlsStream}
-import std/tls::{TlsServer, TlsServerConfig, TlsFrozenServerConfig, TlsError}
+import std/tls::{TlsServerConfig, TlsFrozenServerConfig}
+import std/autocert::{AutocertManager}
 import std/time::{Time, Span}
 import iyi_web/handler::{Handler, Chain}
 import iyi_web/context::{Context}
-import iyi_web/request::{Request, ParseError}
-import iyi_web/intake::{Intake, TooLarge, HeadTooLarge}
+import iyi_web/request::{Request, RequestBody, ParseError}
 import iyi_web/response::{Response}
 import iyi_web/config::{Config, Settings}
+import iyi_web/status::*
 import iyi_web/http_date::*
 import iyi_web/failure::{render_error_type_page, render_failure_page}
+
+# The request line, and the fields after it: Crystal's
+# `HTTP::MAX_REQUEST_LINE_SIZE` and `HTTP::MAX_HEADERS_SIZE`, which Kemal
+# serves under. std/http reads a head of up to a megabyte; past these the
+# request is answered 414 or 431.
+pub MAX_REQUEST_LINE =  8192
+pub MAX_HEADERS      = 16384
+
+# What a TLS config offers by ALPN when the application set nothing:
+# HTTP/2 first, then HTTP/1.1.
+pub DEFAULT_ALPN = ["h2", "http/1.1"]
 
 pub class Server
   @config : Config
@@ -88,6 +98,7 @@ pub class Server
   @workers : Int32
   @socket : IyiSocket? = nil
   @tls : TlsServerConfig? = nil
+  @autocert : AutocertManager? = nil
   @host : String = "127.0.0.1"
   @port : Int32 = 0
   @draining : Bool = false
@@ -137,7 +148,9 @@ pub class Server
     listen_at(host, port, nil)
   end
 
-  # Like `bind`, every connection TLS under *tls*.
+  # Like `bind`, every connection TLS under *tls*. A config that offers no
+  # protocol by ALPN is given `DEFAULT_ALPN`, so a client that speaks
+  # HTTP/2 gets it.
   pub def bind_tls(host : String, port : Int32, tls : TlsServerConfig) : Int32
     listen_at(host, port, tls)
   end
@@ -147,20 +160,36 @@ pub class Server
   # it is given.
   pub def bind_unix(path : String, tls : TlsServerConfig? = nil) : Nil
     @socket = IyiSocket.listen_unix(path)
-    @tls = tls
+    @tls = offering_h2(tls)
     @unix = true
     @host = path
     @port = 0
   end
 
+  # Certificates from an ACME CA (std/autocert, Let's Encrypt's protocol)
+  # for the TLS this server is bound with, which must be *manager*'s
+  # `tls_config`: its renewals run beside the accept loop, on the
+  # accepting thread, until the server stops, and on more than one worker
+  # the handshakes read its `frozen_tls_config`.
+  pub def autocert=(manager : AutocertManager?) : AutocertManager?
+    @autocert = manager
+  end
+
   private def listen_at(host : String, port : Int32, tls : TlsServerConfig?) : Int32
     listener = IyiSocket.listen(host, port)
     @socket = listener
-    @tls = tls
+    @tls = offering_h2(tls)
     @unix = false
     @host = host
     @port = listener.local_port
     @port
+  end
+
+  private def offering_h2(tls : TlsServerConfig?) : TlsServerConfig?
+    if config = tls
+      config.alpn = DEFAULT_ALPN.dup if config.alpn.empty?
+    end
+    tls
   end
 
   # How many threads serve: 1, or the pool's size.
@@ -181,19 +210,24 @@ pub class Server
       # asked for before then (`IyiWorkers.count=`).
       IyiWorkers.count = @workers unless IyiWorkers.count == @workers
       tls = @tls
-      frozen = tls ? tls.frozen : nil
+      frozen = nil.as(TlsFrozenServerConfig?)
+      if config = tls
+        manager = @autocert
+        frozen = manager ? manager.frozen_tls_config(config) : config.frozen
+      end
       unix = @unix
       accept(listener) { |g, client| Server.spawn_parallel(g, site, client.fd, client.family, frozen, unix) }
     elsif site = @serial
       tls = @tls
       unix = @unix
-      accept(listener) { |g, client| Server.spawn_serial(g, site, client, tls, unix) }
+      accept(listener) { |g, client| Server.spawn_serial(g, site, client.fd, client.family, tls, unix) }
     end
   end
 
   # Accepts until the listener closes, handing each connection to *start*,
   # and then drains. A stop asked for from another thread is received here
-  # beside the loop, on this thread, where the listener is.
+  # beside the loop, on this thread, where the listener is; so are the
+  # certificate renewals of `autocert`.
   private def accept(listener : IyiSocket, & : IyiGroup, IyiSocket -> Nil) : Nil
     group do |outer|
       outer.spawn do
@@ -203,6 +237,9 @@ pub class Server
           begin_drain(asked)
         end
         0
+      end
+      if manager = @autocert
+        Server.renew(outer, manager)
       end
       group do |g|
         pause = 5
@@ -228,7 +265,18 @@ pub class Server
         wait_for_connections
         0
       end
+      if manager = @autocert
+        manager.stop
+      end
       outer.cancel_children
+      0
+    end
+  end
+
+  # The manager's renewals, a task of *g*'s until `stop`.
+  def self.renew(g : IyiGroup, manager : AutocertManager) : Nil
+    g.spawn do
+      manager.run
       0
     end
   end
@@ -239,7 +287,7 @@ pub class Server
   # touches its own object again), and the frozen TLS config, all `Share`.
   def self.spawn_parallel(g : IyiGroup, site : ParallelSite, fd : Int32, family : Int32, tls : TlsFrozenServerConfig?, unix : Bool) : Nil
     g.spawn_parallel do
-      site.serve(IyiSocket.new(fd, family), tls, unix)
+      site.serve(fd, family, tls, unix)
       0
     end
   end
@@ -248,9 +296,9 @@ pub class Server
   # spawned in the accept loop captures the loop's one `client`, which the
   # next accept overwrites before the task runs. A parameter is bound per
   # call.
-  def self.spawn_serial(g : IyiGroup, site : SerialSite, client : IyiSocket, tls : TlsServerConfig?, unix : Bool) : Nil
+  def self.spawn_serial(g : IyiGroup, site : SerialSite, fd : Int32, family : Int32, tls : TlsServerConfig?, unix : Bool) : Nil
     g.spawn do
-      site.serve(client, tls, unix)
+      site.serve(fd, family, tls, unix)
       0
     end
   end
@@ -406,20 +454,21 @@ pub class Site(P, E, S)
     @draining.get != 0
   end
 
-  # One connection, to its end, with its watcher beside it in a group of
-  # its own: on a worker both are that worker's, and on one thread both
-  # are that thread's, so the watcher reads the connection's state without
-  # a lock.
-  def serve(socket : IyiSocket, tls : T?, unix : Bool) : Nil forall T
+  # One connection, the socket made from *fd* on this thread, to its end,
+  # with its watcher beside it in a group of its own: on a worker both are
+  # that worker's, and on one thread both are that thread's, so the
+  # watcher reads the connection's state without a lock.
+  def serve(fd : Int32, family : Int32, tls : T?, unix : Bool) : Nil forall T
     @live.add(1)
-    conn = Connection.new(socket)
+    wire = Wire.new(fd, family, @settings.read_timeout, @settings.idle_timeout, @settings.write_timeout, tls.nil?)
+    wire.on_answered(->{ leave })
     group do |own|
       own.spawn do
-        watch(conn)
+        watch(wire)
         0
       end
       served = own.spawn do
-        serve_isolated(conn, tls, unix)
+        serve_isolated(wire, tls, unix)
         0
       end
       served.value
@@ -430,61 +479,174 @@ pub class Site(P, E, S)
     @live.sub(1)
   end
 
-  # At the stop, a connection parked waiting for a request wakes to
-  # `Cancelled`, which ends it; one that has any of a request goes on to
-  # answer it. Cancel before the close. The close alone drops the
-  # descriptor while the read is still registered: on Windows that
-  # registration outlives the handle, the next socket reuses it, and the
-  # new read panics "two fibers reading one fd". At the deadline, what is
-  # left is cut off.
-  private def watch(conn : Connection) : Nil
+  # At the stop, a connection parked waiting for a request - or for the
+  # rest of a head, or in its TLS handshake - wakes to `Cancelled`, which
+  # ends it, and one that reads again finds the connection over; one whose
+  # request is being answered goes on to answer it. Cancel before the
+  # close: the close alone drops the descriptor while the read is still
+  # registered, and on Windows that registration outlives the handle, the
+  # next socket reuses it, and the new read panics "two fibers reading one
+  # fd". At the deadline, what is left is cut off.
+  private def watch(wire : Wire) : Nil
     return unless @stopping.receive.is_a?(ChannelClosed)
-    if conn.idle
-      if running = conn.task_group
+    wire.drain
+    if wire.idle?
+      if running = wire.task_group
         running.cancel_children
       end
-      conn.socket.close
+      wire.close
     end
     return unless @cutting.receive.is_a?(ChannelClosed)
-    conn.cut
+    wire.cut
   end
 
-  private def serve_isolated(conn : Connection, tls : T?, unix : Bool) : Nil forall T
-    # The connection's write bound, set once, on the socket TLS writes
-    # through too. Its read bound is set before every read, in
-    # `read_request`.
-    conn.socket.write_timeout_ms = milliseconds(@settings.write_timeout)
-    exchange = Exchange.new
-    failure = isolated(conn) { serve_connection(conn, exchange, tls, unix) }
-    client = conn.stream
-    # A connection cut off at shutdown has nobody left to answer.
-    if failure && !exchange.writing && !client.closed?
-      if ctx = exchange.context
-        # A response that has started streaming cannot become a 500: its
-        # status line is already on the wire. The connection just ends.
-        unless ctx.response.headers_sent?
-          isolated { answer_panic(client, conn, ctx, exchange.started, failure) }
-        end
+  # std/http's connection, in a group of its own: what panics there - a
+  # header std/http refuses to write, a WebSocket's own task - ends this
+  # connection alone. The requests' tasks run in the same group, so a
+  # cut-off cancels them with it.
+  private def serve_isolated(wire : Wire, tls : T?, unix : Bool) : Nil forall T
+    group do |g|
+      wire.task_group = g
+      task = g.spawn do
+        # Asked once: the peer does not change for the life of the
+        # connection. A unix socket's peer is a path at most, not an
+        # address, and is left nil (`Request#remote_address`).
+        peer = unix ? nil : wire.remote_address
+        conn = Connection.new(wire, g, peer, !tls.nil?)
+        Std::Http::Server.handle(wire, ->(request : Std::Http::Request) { answer(request, conn) }, nil, nil, true, @settings.compress, 0, tls, 0)
+        0
+      end
+      task.value
+      0
+    end
+    wire.close
+  end
+
+  # One request, as std/http hands it over, answered: the handler the
+  # connection's `Server.handle` calls. The wire knows the request is
+  # being handled until this returns, and that it has been answered once
+  # std/http reads again.
+  private def answer(request : Std::Http::Request, conn : Connection) : Std::Http::Response
+    wire = conn.wire
+    wire.handling
+    response = respond(request, conn)
+    wire.answered(!response.takeover.nil?)
+    response
+  end
+
+  private def respond(wire_request : Std::Http::Request, conn : Connection) : Std::Http::Response
+    if refused = oversized_head(wire_request)
+      return refusal(refused, conn)
+    end
+    limit = @settings.max_request_body_size.to_i64
+    # A body over the limit is refused as soon as its length is read,
+    # before a byte of it is: a client that asked for `100 Continue` is
+    # never told to send it.
+    if declared = wire_request.header("Content-Length")
+      length = HTTP.content_length(declared)
+      return refusal(413, conn) if length && length > limit
+    end
+    made = Request.from_wire(wire_request, RequestBody.new(wire_request.body_io, limit))
+    return refusal(400, conn) if made.is_a?(ParseError)
+    request = made
+    request.remote_address = conn.peer
+    request.tls = conn.secured
+    # Without `stream_bodies` the body is read whole before the chain runs,
+    # and one that cannot be read is answered here. A multipart upload is
+    # left to stream to its files when its fields are first asked for.
+    unless @settings.stream_bodies || request.content_type.downcase == "multipart/form-data"
+      request.body
+      if failed = request.body_failure
+        return refusal(failed.status, conn)
       end
     end
-    # TLS's close sends close_notify, then closes the socket.
-    client.close
-    conn.socket.close
+    dispatch(request, conn)
   end
 
-  # A timeout setting in seconds as the socket takes it; nil and 0 are none.
-  private def milliseconds(seconds : Int32?) : Int32?
-    return nil unless seconds
-    return nil if seconds <= 0
-    seconds >= 2147483 ? 2147483647 : seconds * 1000
+  # 414 for a request line past `MAX_REQUEST_LINE`, 431 for fields past
+  # `MAX_HEADERS`, as the client sent them (std/http joins the lines of
+  # one name with ", ", so repeated fields count as one line). Nil
+  # within both.
+  private def oversized_head(request : Std::Http::Request) : Int32?
+    target = request.path.bytesize
+    if query = request.query
+      target = target + 1 + query.bytesize
+    end
+    version = request.version == "HTTP/2" ? 8 : request.version.bytesize
+    return 414 if request.method.bytesize + 1 + target + 1 + version > MAX_REQUEST_LINE
+    fields = 0
+    request.headers.each { |name, value| fields = fields + name.bytesize + 2 + value.bytesize + 2 }
+    return 431 if fields > MAX_HEADERS
+    nil
+  end
+
+  private def wants_keepalive?(conn : Connection) : Bool
+    return false unless @settings.keepalive
+    return false if draining?
+    conn.requests < @settings.max_keepalive_requests
+  end
+
+  # Runs the chain for *request* in a task of its own and answers what it
+  # left: a whole response, the stream its first `flush` started, or the
+  # upgrade a 101 asked for.
+  private def dispatch(request : Request, conn : Connection) : Std::Http::Response
+    @in_flight.add(1)
+    conn.wire.owe
+    conn.requests = conn.requests + 1
+    keepalive = wants_keepalive?(conn)
+    ctx = Context.for(request)
+    @settings.prepare(ctx)
+    head = HTTP.same_name?(request.method, "HEAD")
+    flow = Outflow.new(conn.wire)
+    ctx.response.attach(->(piece : String) { flow.sink(piece) }, head)
+    stamp(ctx, conn)
+    started = Time.monotonic
+    conn.tasks.spawn do
+      run_chain(ctx, conn, flow, started)
+      0
+    end
+    flushed = flow.wait
+    response = ctx.response
+    # A drain that began while the chain ran closes the connection after
+    # this answer.
+    keepalive = keepalive && !draining?
+    if flushed
+      return streamed(response, flow, keepalive)
+    end
+    if upgrade = response.upgrade_handler
+      if response.status_code == 101
+        headers = {} of String => String
+        upgraded = Std::Http::Response.upgrade(headers) { |socket, leftover| upgrade.call(socket, leftover) }
+        response.headers.each { |name, value| upgraded.add_header(name, value) }
+        return upgraded
+      end
+    end
+    whole(response, keepalive && !flow.failed?, head)
+  end
+
+  # The chain, its panic turned into the 500 page while nothing has gone
+  # out yet, and the end of what was flushed. The uploads a request kept
+  # go once its chain is over.
+  private def run_chain(ctx : Context, conn : Connection, flow : Outflow, started : Span) : Nil
+    failure = isolated { ctx.run(@chain) }
+    if failure.nil? && ctx.response.headers_sent?
+      # The rest of a flushed body; a client that went meanwhile is a
+      # failure of the stream like any other.
+      failure = isolated { ctx.response.finish }
+    end
+    if failed = failure
+      # A response that has started streaming cannot become a 500: its
+      # status line is already on the wire. The connection just ends.
+      isolated { answer_panic(ctx, conn, started, failed) } unless ctx.response.headers_sent?
+    end
+    ctx.params.cleanup
+    flow.finish(!failure.nil?)
   end
 
   # Runs *block* as its own task and answers its panic, if it had one. The
-  # group is this call's alone, so the failure goes no further; *conn*
-  # keeps it, for a cut-off to cancel.
-  private def isolated(conn : Connection? = nil, &block : -> Nil) : Panicked?
+  # group is this call's alone, so the failure goes no further.
+  private def isolated(&block : -> Nil) : Panicked?
     outcome = group do |g|
-      conn.task_group = g if conn
       task = g.spawn do
         block.call
         0
@@ -492,126 +654,6 @@ pub class Site(P, E, S)
       task.value
     end
     outcome.is_a?(Panicked) ? outcome : nil
-  end
-
-  private def serve_connection(conn : Connection, exchange : Exchange, tls : T?, unix : Bool) : Nil forall T
-    if config = tls
-      return unless secure(conn, config)
-    end
-    client = conn.stream
-    # Asked once: the peer does not change for the life of the connection.
-    # A unix socket's peer is a path at most, not an address, and is left
-    # nil (`Request#remote_address`).
-    peer = unix ? nil : conn.socket.remote_address
-    secured = !tls.nil?
-    leftover = ""
-    requests = 0
-    loop do
-      parsed = read_request(conn, leftover, requests == 0)
-      case parsed
-      in Closed
-        return
-      in ParseError
-        write_error(client, 400, "Bad Request")
-        return
-      in TooLarge
-        write_error(client, 413, "Content Too Large")
-        return
-      in HeadTooLarge
-        write_error(client, it.status, it.reason)
-        return
-      in TimedOut
-        write_error(client, 408, "Request Timeout")
-        return
-      in Tuple(Request, String, Bool)
-        it[0].remote_address = peer
-        it[0].tls = secured
-        leftover = it[1]
-        keepalive = wants_keepalive?(it[2], requests)
-        return unless dispatch(client, conn, it[0], leftover, keepalive, exchange)
-        requests = requests + 1
-      end
-    end
-  end
-
-  # The TLS handshake, held to `read_timeout` - TLS's own 30 s when that is
-  # off - and counted against the first request's, which runs from the
-  # accept. Until it is done the connection has sent no request, so a drain
-  # closes it as it closes one waiting for its first byte. False when it
-  # failed: `TlsServer.over` has sent the alert and closed the socket.
-  private def secure(conn : Connection, tls : TlsServerConfig | TlsFrozenServerConfig) : Bool
-    socket = conn.socket
-    limit = milliseconds(@settings.read_timeout) || TlsServer::HANDSHAKE_TIMEOUT_MS
-    socket.read_timeout_ms = limit
-    conn.idle = true
-    secured = TlsServer.over(socket, tls, limit)
-    conn.idle = false
-    return false if secured.is_a?(TlsError)
-    conn.stream = ServerTls.new(secured, socket)
-    true
-  end
-
-  private def wants_keepalive?(wire_close : Bool, already : Int32) : Bool
-    return false unless @settings.keepalive
-    return false if draining?
-    return false if wire_close
-    already + 1 < @settings.max_keepalive_requests
-  end
-
-  # Runs the chain for one request and writes its response. True when the
-  # connection may carry another request. *leftover* is what the client
-  # sent after this request, which a connection taken over (a WebSocket)
-  # reads first.
-  private def dispatch(client : IyiSocket | TlsStream, conn : Connection, request : Request, leftover : String, keepalive : Bool, exchange : Exchange) : Bool
-    @in_flight.add(1)
-    defer leave
-    ctx = Context.for(request)
-    @settings.prepare(ctx)
-    defer ctx.params.cleanup
-    exchange.context = ctx
-    exchange.started = Time.monotonic
-    head = HTTP.same_name?(request.method, "HEAD")
-    ctx.response.attach(->(bytes : String) { write_raw(client, bytes) }, wire_version(request), keepalive, head)
-    stamp(ctx, conn)
-    ctx.run(@chain)
-    if upgrade = ctx.response.upgrade_handler
-      return take_over(client, ctx, leftover, exchange, upgrade) if ctx.response.status_code == 101
-    end
-    if connection = ctx.response.headers["connection"]?
-      keepalive = false if connection.downcase == "close"
-    end
-    # Cut off at shutdown while the handler ran: nobody is left to answer.
-    return false if client.closed?
-    keepalive = false if draining?
-    exchange.writing = true
-    if ctx.response.headers_sent?
-      ctx.response.finish
-      keepalive = keepalive && ctx.response.reusable?
-    else
-      ctx.response.headers["Connection"] = keepalive ? "keep-alive" : "close"
-      write_raw(client, ctx.response.to_http(wire_version(request), !head))
-    end
-    exchange.writing = false
-    exchange.context = nil
-    keepalive
-  end
-
-  private def leave : Nil
-    @in_flight.sub(1)
-  end
-
-  # A 101 hands the connection to whoever asked for it once the status line
-  # and headers are out, and the connection carries no more HTTP. The read
-  # timeout was for a request arriving; an upgraded connection waits on
-  # its own terms. A panic from here on has no response to become.
-  private def take_over(client : IyiSocket | TlsStream, ctx : Context, leftover : String, exchange : Exchange, upgrade : Proc(IyiSocket | TlsStream, String, Nil)) : Bool
-    exchange.writing = true
-    write_raw(client, ctx.response.to_http(wire_version(ctx.request), false))
-    exchange.writing = false
-    exchange.context = nil
-    client.read_timeout_ms = nil
-    upgrade.call(client, leftover)
-    false
   end
 
   private def stamp(ctx : Context, conn : Connection) : Nil
@@ -629,8 +671,7 @@ pub class Site(P, E, S)
   # `Panicked` is used, as a 500 unless it sets another status; then the
   # application's `error 500` page. Either is application code, so it may
   # panic too, and then the next one is tried, down to the built-in page.
-  private def answer_panic(client : IyiSocket | TlsStream, conn : Connection, ctx : Context, started : Span, failure : Panicked) : Nil
-    request = ctx.request
+  private def answer_panic(ctx : Context, conn : Connection, started : Span, failure : Panicked) : Nil
     rendered = false
     unless @type_pages.empty?
       prepare_500(ctx, conn)
@@ -651,11 +692,9 @@ pub class Site(P, E, S)
       prepare_500(ctx, conn)
       render_failure_page(ctx, failure.text, @settings.show_exceptions?)
     end
-    ctx.response.headers["Connection"] = "close"
     if @settings.logging
       @settings.log_request(ctx, Time.monotonic - started)
     end
-    write_raw(client, ctx.response.to_http(wire_version(request), !HTTP.same_name?(request.method, "HEAD")))
   end
 
   private def prepare_500(ctx : Context, conn : Connection) : Nil
@@ -664,92 +703,63 @@ pub class Site(P, E, S)
     stamp(ctx, conn)
   end
 
-  private def wire_version(request : Request) : String
-    request.version.empty? ? "HTTP/1.1" : request.version
+  # What the server answers on its own - a head too large, a body too
+  # large, too slow or broken - with the connection closed after it.
+  private def refusal(status : Int32, conn : Connection) : Std::Http::Response
+    reason = case status
+             when 408 then "Request Timeout"
+             when 413 then "Content Too Large"
+             when 414 then "URI Too Long"
+             when 431 then "Request Header Fields Too Large"
+             else          "Bad Request"
+             end
+    refused = Std::Http::Response.new(status, phrase(status), {} of String => String, reason)
+    refused.add_header("Content-Type", "text/plain; charset=utf-8")
+    refused.add_header("Date", conn.date)
+    refused.add_header("Connection", "close")
+    refused
   end
 
-  # A body over `max_request_body_size` is refused as soon as its
-  # `Content-Length` is read, before the body itself is buffered, and a
-  # chunked one as soon as its chunks pass it (`Intake`).
-  #
-  # A request has `read_timeout` to arrive whole, counted from its first
-  # byte - from the accept, for a connection's *first* request - and one
-  # cut short is `TimedOut`. A keep-alive connection waits `idle_timeout`
-  # for that first byte; a connection that sent nothing is just `Closed`.
-  # While the server drains, a keep-alive connection takes no further
-  # request, and a new one only the request it has already sent.
-  private def read_request(conn : Connection, leftover : String, first : Bool) : Tuple(Request, String, Bool) | ParseError | TooLarge | HeadTooLarge | TimedOut | Closed
-    client = conn.stream
-    intake = conn.reader(leftover, @settings.max_request_body_size)
-    limit = milliseconds(@settings.read_timeout)
-    since = first ? conn.accepted : Time.monotonic
-    loop do
-      if taken = intake.take
-        return taken
-      end
+  # A response the chain left whole, as std/http writes it. Its length is
+  # the body's, which std/http writes - except on a HEAD and a 304, whose
+  # length is the one a GET would have had - and a `Transfer-Encoding` is
+  # the server's to choose. `Connection: close` when the connection ends
+  # after it.
+  private def whole(response : Response, keepalive : Bool, head : Bool) : Std::Http::Response
+    no_entity = response.no_entity?
+    answer = Std::Http::Response.new(response.status_code, phrase(response.status_code), {} of String => String, no_entity ? "" : response.body)
+    keep_length = head || response.status_code == 304
+    carry_headers(response, answer, keep_length)
+    answer.add_header("Connection", "close") unless keepalive
+    answer
+  end
 
-      return Closed.new if client.closed?
-      if intake.continue_due?
-        # The client holds the body back until it is asked for it.
-        return Closed.new unless client.write("HTTP/1.1 100 Continue\r\n\r\n").is_a?(Int32)
-      end
-      waiting = intake.empty?
-      wait = limit
-      if waiting && !first
-        return Closed.new if draining?
-        wait = milliseconds(@settings.idle_timeout)
-      elsif limit
-        left = limit.to_i64 - elapsed_ms(since)
-        if left <= 0
-          return Closed.new if waiting
-          return TimedOut.new
-        end
-        wait = left.to_i32
-      end
-      wait = 0 if waiting && draining?
-      client.read_timeout_ms = wait
-      conn.idle = waiting
-      chunk = client.read(65536)
-      conn.idle = false
-      case chunk
-      in Cancelled
-        return Closed.new
-      in SocketError
-        return TimedOut.new if chunk.timed_out? && !waiting
-        return Closed.new
-      in String
-        return Closed.new if chunk.empty? && waiting
-        return ParseError.new("connection closed mid-headers") if chunk.empty?
-        since = Time.monotonic if waiting && !first
-        intake.append(chunk)
-      end
+  # A response whose head went out at its first `flush`: its body is what
+  # the chain's task flushes after, copied by std/http as it comes - with
+  # the handler's `Content-Length` when it set one, chunked otherwise.
+  private def streamed(response : Response, flow : Outflow, keepalive : Bool) : Std::Http::Response
+    answer = Std::Http::Response.new(response.status_code, flow)
+    carry_headers(response, answer, true)
+    answer.add_header("Connection", "close") unless keepalive
+    answer
+  end
+
+  private def carry_headers(response : Response, answer : Std::Http::Response, keep_length : Bool) : Nil
+    no_entity = response.no_entity?
+    unless response.headers.has_key?("Content-Type") || no_entity
+      answer.add_header("Content-Type", response.content_type)
+    end
+    response.headers.each do |name, value|
+      next if HTTP.same_name?(name, "Transfer-Encoding")
+      next if HTTP.same_name?(name, "Content-Length") && !keep_length
+      answer.add_header(name, value)
     end
   end
 
-  private def elapsed_ms(since : Span) : Int64
-    gone = Time.monotonic - since
-    gone.total_seconds_i64 * 1000_i64 + (gone.nanoseconds // 1000000).to_i64
-  end
-
-  private def write_error(client : IyiSocket | TlsStream, status : Int32, body : String) : Nil
-    res = Response.new
-    res.status_code = status
-    res.content_type = "text/plain; charset=utf-8"
-    res.set_body(body)
-    res.headers["Connection"] = "close"
-    write_raw(client, res.to_http("HTTP/1.1"))
-  end
-
-  private def write_raw(client : IyiSocket | TlsStream, bytes : String) : Nil
-    # Closed under the task by a cut-off at shutdown: the panic is what
-    # stops a handler that is still streaming.
-    raise "the connection was cut off at shutdown" if client.closed?
-    case wrote = client.write(bytes)
-    in Cancelled
-    in SocketError
-      raise wrote.message
-    in Int32
-    end
+  # One request fewer in flight: called by the wire once the answer to it
+  # has been written.
+  private def leave : Nil
+    @in_flight.sub(1)
   end
 end
 
@@ -760,62 +770,22 @@ pub alias SerialSite = Site(Proc(Context, Nil), Proc({Context, Error}, String?),
 # copy, so the whole of it is `Share`.
 pub alias ParallelSite = Site(SharedProc(Context, Nil), SharedProc({Context, Error}, String?), Settings)
 
-pub struct Closed
-end
-
-pub struct TimedOut
-end
-
-# What a connection's task was doing when it stopped: the request being
-# handled, until its response starts going out.
-class Exchange
-  property context : Context?
-  property started : Span
-  property writing : Bool
-
-  def initialize
-    @context = nil
-    @started = Time.monotonic
-    @writing = false
-  end
-end
-
-# A connection the server took, as its watcher sees it: its socket, what
-# is read and written - the socket, or TLS over it - when it was taken,
-# whether its task is parked waiting for a request's first byte, and the
-# group running that task. Its task and its watcher are the only ones that
-# reach it, and they never run at once.
+# A connection as the requests on it see it: its wire, the group its
+# requests' tasks run in, the client's address, whether it is TLS, how
+# many requests it has carried, and the `Date` it last wrote.
 class Connection
-  getter socket : IyiSocket
-  property stream : IyiSocket | TlsStream
-  getter accepted : Span
-  property idle : Bool
-  property task_group : IyiGroup?
-  @reader : Intake?
+  getter wire : Wire
+  getter tasks : IyiGroup
+  getter peer : String?
+  getter secured : Bool
+  property requests : Int32
   @date_at : Int64
   @date_value : String
 
-  def initialize(@socket : IyiSocket)
-    @stream = @socket
-    @accepted = Time.monotonic
-    @idle = false
-    @task_group = nil
-    @reader = nil
+  def initialize(@wire : Wire, @tasks : IyiGroup, @peer : String?, @secured : Bool)
+    @requests = 0
     @date_at = -1_i64
     @date_value = ""
-  end
-
-  # One intake for the life of the connection: its buffers stay, and the
-  # next request refills them instead of allocating another.
-  def reader(leftover : String, max_body : Int32) : Intake
-    if current = @reader
-      current.reset(leftover, max_body)
-      current
-    else
-      created = Intake.new(leftover, max_body)
-      @reader = created
-      created
-    end
   end
 
   # HTTP-date is whole seconds. Formatting one per request showed up under
@@ -830,52 +800,385 @@ class Connection
     end
     @date_value
   end
+end
 
-  # Cancels the task and closes the socket, which wakes a read or a write
-  # parked on it.
+# A flushed body on its way from the chain's task to std/http, which
+# copies it out as an `IyiIO`: each `flush` hands its piece over and waits
+# until std/http has taken it, so a handler streaming to a slow client
+# waits for it rather than piling its stream up in memory. The first flush
+# - or the chain's end, whichever comes first - wakes the request's
+# handler, which then answers std/http with the stream or the whole
+# response.
+class Outflow < IyiIO
+  HEADS = 1
+  DONE  = 2
+
+  @pieces : Channel(String)
+  @ready : Channel(Int32)
+  @wire : Wire
+  @flushed : Bool
+  @failed : Bool
+  @rest : String
+
+  def initialize(@wire : Wire)
+    super(-1_i64, 1)
+    @pieces = Channel(String).new
+    @ready = Channel(Int32).new(1)
+    @flushed = false
+    @failed = false
+    @rest = ""
+  end
+
+  # Whether the chain flushed: true at its first flush, false when it
+  # ended without one.
+  def wait : Bool
+    @ready.receive == HEADS
+  end
+
+  def failed? : Bool
+    @failed
+  end
+
+  # The chain's side: a flush. A piece std/http will no longer take - its
+  # client went, or the server cut the connection off - stops the handler
+  # that is still writing, as a write to a closed socket did.
+  def sink(piece : String) : Nil
+    unless @flushed
+      @flushed = true
+      @ready.send(HEADS)
+    end
+    return if piece.empty?
+    raise "the connection is closed: the client went away or the server stopped" unless @pieces.send(piece).nil?
+  end
+
+  # The chain's end: the body ends, or - when the chain failed after its
+  # head went out - the connection is cut short, so the client cannot take
+  # what it got for the whole body.
+  def finish(failed : Bool) : Nil
+    @failed = failed
+    if @flushed
+      @wire.close if failed
+      @pieces.close
+    else
+      @ready.send(DONE)
+    end
+  end
+
+  # std/http's side: the next piece, at most *count* bytes of it; "" at
+  # the body's end.
+  def read_bytes(count : Int32) : String
+    if @rest.empty?
+      got = @pieces.receive
+      return "" unless got.is_a?(String)
+      @rest = got
+    end
+    return "" if @rest.empty?
+    if @rest.bytesize <= count
+      piece = @rest
+      @rest = ""
+      return piece
+    end
+    piece = @rest[0, count]
+    @rest = @rest[count, @rest.bytesize - count]
+    piece
+  end
+
+  # std/http is done with the body - all of it, or it stopped: a flush
+  # after this stops the handler.
+  def close : Nil
+    @pieces.close
+  end
+
+  def closed? : Bool
+    @pieces.closed?
+  end
+end
+
+# A connection's socket, with the bounds iyi-web keeps that std/http's
+# server does not: every read and write of the connection - TLS's records
+# too - passes through here.
+#
+# **Timeouts.** A request has `read_timeout` to arrive whole, counted from
+# its first byte - from the accept, for a connection's first request -
+# body included, however it trickles: each read waits only what is left of
+# that. A kept-alive connection waits `idle_timeout` for the first byte of
+# its next request, and a write waits `write_timeout` for the client to
+# take bytes. A bound std/http or std/tls sets for a read of its own (a
+# handshake's, a lingering close's) holds too, the sooner of the two. A
+# connection taken over by an upgrade waits as its protocol likes. A
+# request that does not arrive in time is answered `408` when the
+# connection is HTTP/1 in the clear; under TLS or HTTP/2 it is closed
+# (std/http closes it, close_notify or GOAWAY first), since the bytes on
+# the wire are std/tls's or std/http's frames, not this layer's to write.
+#
+# **The drain.** The watcher closes a connection parked in a read that is
+# not a request being handled, and a read that starts afterwards finds the
+# connection over, so std/http ends it.
+#
+# **Writes.** A closed socket answers a write with an error rather than
+# std/socket's panic, so a cut-off ends what was writing; and a second
+# write while another task's is parked - TLS's close_notify while a
+# WebSocket broadcast waits on a slow client - is refused the same way
+# rather than panicking the runtime.
+class Wire < IyiSocket
+  AWAITING = 0
+  ARRIVING = 1
+  HANDLING = 2
+  UPGRADED = 3
+
+  property task_group : IyiGroup?
+  @phase : Int32
+  @answers : Int32
+  @accepted : Span
+  @started : Span
+  @read_limit : Int32?
+  @idle_limit : Int32?
+  @write_limit : Int32?
+  @asked_read : Int32?
+  @asked_write : Int32?
+  @plain : Bool
+  @sniffed : Bool
+  @http2 : Bool
+  @draining : Bool
+  @reading : Bool
+  @writes : Int32
+  @owing : Bool
+  @answered_hook : Proc(Nil)?
+
+  # *read_timeout*, *idle_timeout* and *write_timeout* in seconds, nil or
+  # 0 for none; *plain* when the connection is not TLS.
+  def initialize(fd : Int32, family : Int32, read_timeout : Int32?, idle_timeout : Int32?, write_timeout : Int32?, @plain : Bool)
+    super(fd, family)
+    @task_group = nil
+    @phase = AWAITING
+    @answers = 0
+    @accepted = Time.monotonic
+    @started = @accepted
+    @read_limit = Wire.milliseconds(read_timeout)
+    @idle_limit = Wire.milliseconds(idle_timeout)
+    @write_limit = Wire.milliseconds(write_timeout)
+    @asked_read = nil
+    @asked_write = nil
+    @sniffed = false
+    @http2 = false
+    @draining = false
+    @reading = false
+    @writes = 0
+    @owing = false
+    @answered_hook = nil
+  end
+
+  # A timeout setting in seconds as the socket takes it; nil and 0 are none.
+  def self.milliseconds(seconds : Int32?) : Int32?
+    return nil unless seconds
+    return nil if seconds <= 0
+    seconds >= 2147483 ? 2147483647 : seconds * 1000
+  end
+
+  def on_answered(hook : Proc(Nil)) : Nil
+    @answered_hook = hook
+  end
+
+  # The handler is running for a request: its body's reads are the
+  # request's, under what is left of its `read_timeout`.
+  def handling : Nil
+    @phase = HANDLING
+  end
+
+  # The handler returned: the next request is waited for, unless the
+  # connection was taken over.
+  def answered(upgraded : Bool) : Nil
+    @answers = @answers + 1
+    @phase = upgraded ? UPGRADED : AWAITING
+  end
+
+  # A request is in flight until its answer has been written: std/http
+  # reads again once it has, or the connection closes.
+  def owe : Nil
+    @owing = true
+  end
+
+  def drain : Nil
+    @draining = true
+  end
+
+  # Parked in a read, with no request being handled: what a drain closes.
+  def idle? : Bool
+    @reading && waiting?
+  end
+
+  # Cancels the connection's tasks and closes the socket, which wakes a
+  # read or a write parked on it.
   def cut : Nil
     if running = @task_group
       running.cancel_children
     end
-    @socket.close
-  end
-end
-
-# A TLS connection the server took. A drain or a cut-off closes the socket
-# under it, not TLS, and a socket read or written once closed panics; so
-# this one is closed when its socket is, as the plain socket would be.
-#
-# Closing TLS writes too - its close_notify - and the runtime refuses a
-# second write to a socket another task's write is parked on: a WebSocket
-# closed while a broadcast from another connection's task waits on a slow
-# client would panic. A close then closes the socket alone, which wakes
-# that write as it wakes one on a plain socket, and sends no close_notify,
-# which cannot follow half a record anyway.
-class ServerTls < TlsStream
-  @socket : IyiSocket
-  @writing : Int32
-
-  def initialize(tls : TlsServer, @socket : IyiSocket)
-    super(tls, "the client")
-    @writing = 0
+    close
   end
 
-  def write(text : String) : Int32 | Cancelled | SocketError
-    @writing = @writing + 1
-    sent = super(text)
-    @writing = @writing - 1
+  def read_timeout_ms : Int32?
+    @asked_read
+  end
+
+  def read_timeout_ms=(ms : Int32?) : Int32?
+    @asked_read = ms
+  end
+
+  def write_timeout_ms : Int32?
+    @asked_write
+  end
+
+  def write_timeout_ms=(ms : Int32?) : Int32?
+    @asked_write = ms
+  end
+
+  def read(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled | SocketError
+    if refused = before_read
+      return refused
+    end
+    @reading = true
+    got = super(buffer, count)
+    @reading = false
+    case got
+    in Int32
+      arrived(buffer, got) if got > 0
+      got
+    in SocketError
+      got.timed_out? && limit_ran_out? ? expired : got
+    in Cancelled
+      got
+    end
+  end
+
+  def read(max_bytes : Int32 = 4096) : String | Cancelled | SocketError
+    case refused = before_read
+    in Int32
+      return ""
+    in Cancelled
+      return refused
+    in SocketError
+      return refused
+    in Nil
+    end
+    @reading = true
+    got = super(max_bytes)
+    @reading = false
+    case got
+    in String
+      arrived(got.to_unsafe, got.bytesize) if got.bytesize > 0
+      got
+    in SocketError
+      got.timed_out? && limit_ran_out? ? expired : got
+    in Cancelled
+      got
+    end
+  end
+
+  def write(contents : String) : Int32 | Cancelled | SocketError
+    write(contents.to_unsafe, contents.bytesize)
+  end
+
+  def write(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled | SocketError
+    return SocketError.layered("write to socket", "the connection is closed") if closed?
+    return SocketError.layered("write to socket", "another write is in progress") if @writes > 0
+    @write_timeout_ms = @asked_write || @write_limit
+    @writes = @writes + 1
+    sent = super(buffer, count)
+    @writes = @writes - 1
     sent
   end
 
-  def closed? : Bool
-    @socket.closed? || super
+  def close_write : SocketError?
+    return nil if closed?
+    super
   end
 
   def close : Nil
-    if @writing > 0 || @socket.closed?
-      @socket.close
-    else
-      super
+    settle
+    super
+  end
+
+  # Whether no request is being handled and none has taken the
+  # connection over: between requests, or while one's head arrives.
+  private def waiting? : Bool
+    @phase == AWAITING || @phase == ARRIVING
+  end
+
+  # What a read answers before it waits, or nil to let it wait: a closed
+  # socket is cancelled, a drained connection between requests has ended
+  # (0), and a request whose time is up has timed out.
+  private def before_read : Int32 | Cancelled | SocketError | Nil
+    return Cancelled.new if closed?
+    settle
+    return 0 if @draining && waiting?
+    limit = limit_ms
+    if bound = limit
+      return expired if bound <= 0
     end
+    asked = @asked_read
+    @read_timeout_ms = asked && (limit.nil? || asked < limit) ? asked : limit
+    nil
+  end
+
+  # The answer std/http was writing is out: the request it answered is
+  # no longer in flight.
+  private def settle : Nil
+    return unless @owing
+    @owing = false
+    if hook = @answered_hook
+      hook.call
+    end
+  end
+
+  private def arrived(buffer : Pointer(UInt8), count : Int32) : Nil
+    unless @sniffed
+      @sniffed = true
+      # HTTP/2's preface, "PRI * HTTP/2.0": no 408 can be written into it.
+      @http2 = count >= 3 && buffer[0] == 80_u8 && buffer[1] == 82_u8 && buffer[2] == 73_u8
+    end
+    if @phase == AWAITING
+      @phase = ARRIVING
+      @started = Time.monotonic unless @answers == 0
+    end
+  end
+
+  # How long the next read may wait by this connection's bounds, in
+  # milliseconds (0 or less: no time is left), nil for as long as it takes.
+  private def limit_ms : Int32?
+    case @phase
+    when UPGRADED
+      nil
+    when AWAITING
+      @answers == 0 ? left(@read_limit, @accepted) : @idle_limit
+    else
+      left(@read_limit, @started)
+    end
+  end
+
+  # Whether a read that timed out ran out of this connection's time rather
+  # than the time its caller asked for.
+  private def limit_ran_out? : Bool
+    limit = limit_ms
+    return false unless limit
+    asked = @asked_read
+    asked.nil? || limit <= asked
+  end
+
+  private def left(limit : Int32?, since : Span) : Int32?
+    return nil unless limit
+    gone = Time.monotonic - since
+    elapsed = gone.total_seconds_i64 * 1000_i64 + (gone.nanoseconds // 1000000).to_i64
+    rest = limit.to_i64 - elapsed
+    rest < 0_i64 ? 0 : rest.to_i32
+  end
+
+  # A request that did not arrive in time: a 408 where this layer can
+  # write one - HTTP/1 in the clear, part of a request having come - and
+  # the read's timeout either way, on which std/http closes.
+  private def expired : SocketError
+    if @phase == ARRIVING && @plain && !@http2 && !closed?
+      write("HTTP/1.1 408 Request Timeout\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 15\r\nConnection: close\r\n\r\nRequest Timeout")
+    end
+    SocketError.timed_out("read a request")
   end
 end

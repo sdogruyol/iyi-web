@@ -6,7 +6,9 @@ module iyi_web/multipart_test
 import std/file::{File}
 import std/dir::{Dir}
 import std/text
+import std/http::{BodyReader}
 import iyi_web/multipart::*
+import iyi_web/request::{RequestBody}
 import iyi_web/spec::*
 
 BOUNDARY = "----iyiBoundary7MA4YWxk"
@@ -170,6 +172,31 @@ describe "parse_multipart" do
     assert refused(bad_header).status == 400
     bad_padding = "--" + BOUNDARY + "junk\r\n" + field_part("a", "1") + closing
     assert refused(bad_padding).status == 400
+  end
+
+  it "reads the same body however its reads split it, a delimiter straddling two" do
+    body = "preamble\r\n" + field_part("title", "Hello") + file_part("upload", "data.bin", "application/octet-stream", BINARY + ("x" * 300)) + field_part("note", "\r\n--") + closing + "epilogue"
+    [1, 2, 3, 7, 64, 4096].each do |piece|
+      result = parse_multipart(RequestBody.text(body), BOUNDARY, 10, 1024, piece)
+      raise "expected a parsed body at #{piece}" unless result.is_a?(Multipart)
+      assert result.fields == [{"title", "Hello"}, {"note", "\r\n--"}], piece.to_s
+      assert result.files.size == 1, piece.to_s
+      assert result.files[0].read == BINARY + ("x" * 300), piece.to_s
+      result.delete
+    end
+  end
+
+  it "stops at the request's own limit with 413 while the body streams, and keeps no file" do
+    before = uploads_on_disk
+    body = file_part("f", "big.bin", "application/octet-stream", "y" * 5000) + closing
+    result = parse_multipart(RequestBody.new(BodyReader.text(body), 1000_i64), BOUNDARY, 10, 1024, 256)
+    raise "expected a refusal" unless result.is_a?(MultipartError)
+    assert result.status == 413
+    assert uploads_on_disk.size == before.size
+    within = parse_multipart(RequestBody.new(BodyReader.text(body), body.bytesize.to_i64), BOUNDARY, 10, 1024, 256)
+    raise "expected a parsed body" unless within.is_a?(Multipart)
+    assert within.files[0].size == 5000
+    within.delete
   end
 end
 

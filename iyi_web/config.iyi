@@ -15,6 +15,7 @@ import std/list::{List}
 import std/shared_proc::{SharedProc}
 import std/time::{Span}
 import std/tls::{TlsServerConfig}
+import std/autocert::{AutocertManager}
 import iyi_web/context::{Context}
 import iyi_web/kept::{Kept}
 import iyi_web/log::{Logger, StdoutLogger}
@@ -32,6 +33,12 @@ pub alias KeptStaticHeaders = Kept({Context, String, File::Info}, Nil)
 # A handler `use` added, as a step of the chain: checked, or kept as it
 # is with `workers: 1`.
 pub alias KeptStep = Kept(Context, Nil)
+
+# Let's Encrypt's ACME directory, and its staging one - whose certificates
+# no browser trusts and whose rate limits are loose enough to try a
+# setup against - for `std/autocert`'s `AutocertManager`.
+pub LETS_ENCRYPT         = "https://acme-v02.api.letsencrypt.org/directory"
+pub LETS_ENCRYPT_STAGING = "https://acme-staging-v02.api.letsencrypt.org/directory"
 
 pub class Config
   @app_name : String
@@ -69,6 +76,9 @@ pub class Config
   @idle_timeout : Int32?
   @unix_socket : String?
   @ssl : TlsServerConfig?
+  @autocert : AutocertManager?
+  @stream_bodies : Bool
+  @compress : Bool
   @websocket_allowed_origins : Array(String)
   @websocket_max_message_size : Int32
 
@@ -112,6 +122,9 @@ pub class Config
     @idle_timeout = 75
     @unix_socket = nil
     @ssl = nil
+    @autocert = nil
+    @stream_bodies = false
+    @compress = false
     @websocket_allowed_origins = [] of String
     @websocket_max_message_size = 8 * 1024 * 1024
   end
@@ -325,12 +338,76 @@ pub class Config
 
   # TLS for every connection, Kemal's `config.ssl`: set it here, or with
   # `-s --ssl-key-file FILE --ssl-cert-file FILE`. nil serves plain HTTP.
+  # It is std/tls's server config, so what it holds is std/tls's to say:
+  # `min_version = TlsVersion::TLS12` takes TLS 1.2 clients beside 1.3,
+  # `client_roots` asks every client for a certificate those roots
+  # issued (mutual TLS; `env.request.peer_certificates` is what it
+  # presented), and `alpn` is what it offers - `["h2", "http/1.1"]` when
+  # left empty, so a browser gets HTTP/2.
   pub def ssl : TlsServerConfig?
     @ssl
   end
 
   pub def ssl=(value : TlsServerConfig?) : TlsServerConfig?
     @ssl = value
+  end
+
+  # Certificates got and renewed from an ACME CA - Let's Encrypt - by
+  # std/autocert, for the names the manager was made with: the server
+  # serves TLS under `manager.tls_config`, answers the CA's tls-alpn-01
+  # challenge on that same port, and renews in the background until it
+  # stops. `ssl`, when it is set too, wins.
+  #
+  #     cache = AutocertDirCache.new("/var/lib/app/certs")
+  #     manager = AutocertManager.new(LETS_ENCRYPT, cache, ["example.com"])
+  #     manager.accept_terms = true
+  #     config.autocert = manager
+  pub def autocert : AutocertManager?
+    @autocert
+  end
+
+  pub def autocert=(value : AutocertManager?) : AutocertManager?
+    @autocert = value
+  end
+
+  # The TLS the server is bound with: `ssl`, else the `autocert`
+  # manager's, which offers HTTP/2 by ALPN; nil for plain HTTP.
+  pub def tls_config : TlsServerConfig?
+    if ssl = @ssl
+      return ssl
+    end
+    (manager = @autocert) ? manager.tls_config(["h2", "http/1.1"]) : nil
+  end
+
+  # Whether a request's body is left on the connection for the chain to
+  # read as it arrives - `env.request.body_io` a piece at a time, or
+  # `env.request.body` whole the first time it is asked for - rather than
+  # read whole before the chain runs. Off by default: a body that cannot
+  # be read (past `max_request_body_size`, too slow, broken) is then
+  # answered 413, 408 or 400 before any handler sees it. On, a route can
+  # take an upload larger than it would hold in memory, and a body nobody
+  # reads is never read; `params.body_error` says why one could not be. A
+  # `multipart/form-data` body streams to its files either way.
+  pub def stream_bodies : Bool
+    @stream_bodies
+  end
+
+  pub def stream_bodies=(value : Bool) : Bool
+    @stream_bodies = value
+  end
+
+  # Whether the server compresses an answer worth compressing (std/mime's
+  # word for its `Content-Type`) for a client that accepts it: `zstd` for
+  # a whole body when the client takes it at least as gladly as gzip,
+  # `gzip` otherwise and for a streamed one (std/http's `coding_for`).
+  # An answer that already has a `Content-Encoding` - `CompressHandler`'s,
+  # a precompressed static file - is left alone. Off by default.
+  pub def compress : Bool
+    @compress
+  end
+
+  pub def compress=(value : Bool) : Bool
+    @compress = value
   end
 
   # The handlers `use` added, in order, each a step of the chain.
@@ -550,6 +627,8 @@ pub class Settings
   @read_timeout : Int32?
   @write_timeout : Int32?
   @idle_timeout : Int32?
+  @stream_bodies : Bool
+  @compress : Bool
   @logging : Bool
   @log_request : SharedProc({Context, Span}, Nil)
 
@@ -570,6 +649,8 @@ pub class Settings
     @read_timeout = config.read_timeout
     @write_timeout = config.write_timeout
     @idle_timeout = config.idle_timeout
+    @stream_bodies = config.stream_bodies
+    @compress = config.compress
     @logging = config.logging
   end
 
@@ -616,6 +697,14 @@ pub class Settings
 
   pub def idle_timeout : Int32?
     @idle_timeout
+  end
+
+  pub def stream_bodies : Bool
+    @stream_bodies
+  end
+
+  pub def compress : Bool
+    @compress
   end
 
   pub def logging : Bool
