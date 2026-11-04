@@ -39,8 +39,9 @@ import iyi_web/cli::{CLIParser, cli_parser}
 pub import iyi_web/templates
 
 # Templates from `iyi_web/templates`, so `import iyi_web/dsl::*` is enough. A
-# template path is relative to the file that calls `render`. The import is
-# `pub` because `render` expands in the caller's file, which names
+# template path is relative to the file that calls `render`, and `<%= %>`
+# escapes what it prints unless it is `raw(...)`. The import is `pub`
+# because `render` expands in the caller's file, which names
 # `IyiWeb::Templates` there: iyi 0.17.0 refuses a module the file reaches
 # only through another file's import.
 pub macro render(filename)
@@ -59,6 +60,13 @@ end
 
 pub macro yield_content(key)
   ::IyiWeb::Templates.yield_content({{ key }})
+end
+
+# Markup `<%= %>` prints without escaping; see `IyiWeb::Templates.raw`. A
+# template calls it by its bare name in the caller's file, so it is here
+# for a program that imports the DSL and not `iyi_web/templates`.
+pub def raw(value : T) : ::IyiWeb::Templates::SafeHTML forall T
+  ::IyiWeb::Templates::Templates.markup(value.to_s)
 end
 
 HTTP_METHODS   = %w(get post put patch delete options head query)

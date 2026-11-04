@@ -1,0 +1,249 @@
+# The program `render` runs at compile time: `templates/process CALLER
+# TEMPLATE IO_NAME` reads the template named beside CALLER (or by an
+# absolute path) and prints the iyi source that renders it to IO_NAME. That
+# output is what the macro splices into the program.
+#
+# Why iyi-web has its own and does not run std/eiy's `eiy/process`: that
+# one prints the template's text and its `<%= %>` values through the same
+# `IO_NAME.print`, so nothing after it can tell the markup the template's
+# author wrote from a value a request brought in. Autoescape needs exactly
+# that difference. Here text is `IO_NAME.print("...")`, printed as written,
+# and a value is `IO_NAME.output((expr))`, which `HTMLBuffer#output`
+# escapes unless it is `SafeHTML`.
+#
+# Everything else is std/eiy's, and on purpose the same: its `Lexer` reads
+# the tags, so `<%- -%>`, `<%# %>`, `<%% %>` and the refusal of a tag that is
+# never closed, with its line and column, mean what they mean in a std/eiy
+# template; the location pragmas put an error in a tag at the template's own
+# line and column; and the file it read is written to `IYI_RUN_INPUTS` before
+# the read, as `eiy/process` does, so the build knows what the output
+# depends on (SPEC.md V.9 (e)) and a second render of one template is one
+# run. The generator below is std/eiy's `generate`, whose helpers are
+# private to it; it differs only in the line that emits an output tag.
+#
+# Not a module: it declares no `iyi_web/` path, so `import` cannot reach it,
+# and `run` finds it by this file's place beside `templates.iyi`.
+
+module iyi_web_templates_process
+
+import std/eiy::{Eiy}
+import std/env::{ENV}
+
+HEX = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C", "D", "E", "F"]
+
+# The iyi source that renders the template *string* to *io_name*, or nil for
+# a tag that is never closed; `lexer.error` then says where.
+def generate(lexer : Eiy::Lexer, filename : String, io_name : String) : String?
+  token = lexer.next_token?
+  return nil unless token
+
+  parts = [] of String
+  while true
+    if token.string?
+      str_val = token.value
+      opens_line = token.column_number == 1
+      token = lexer.next_token?
+      return nil unless token
+
+      str_val = suppress_leading_indentation(token, str_val, opens_line)
+
+      unless str_val.empty?
+        parts << io_name
+        parts << ".print("
+        parts << quote(str_val)
+        parts << ")\n"
+      end
+    elsif token.output?
+      str_val = token.value
+      line_number = token.line_number
+      column_number = token.column_number
+      suppress_trailing = token.suppress_trailing?
+      token = lexer.next_token?
+      return nil unless token
+
+      suppress_trailing_whitespace(token, suppress_trailing)
+
+      # `output`, not `print`: the one difference from std/eiy. The newline
+      # before `))` keeps a comment at the end of the expression from
+      # swallowing the rest of the line.
+      parts << "#<loc:push>"
+      parts << io_name
+      parts << ".output(("
+      append_loc(parts, filename, line_number, column_number)
+      parts << str_val
+      parts << "\n))#<loc:pop>\n"
+    elsif token.control?
+      str_val = token.value
+      line_number = token.line_number
+      column_number = token.column_number
+      suppress_trailing = token.suppress_trailing?
+      token = lexer.next_token?
+      return nil unless token
+
+      suppress_trailing_whitespace(token, suppress_trailing)
+
+      # A comment tag prints and runs nothing, however many lines it has.
+      unless str_val.starts_with?('#')
+        parts << "#<loc:push>"
+        append_loc(parts, filename, line_number, column_number)
+        parts << str_val
+        parts << "\n#<loc:pop>\n"
+      end
+    elsif token.eof?
+      break
+    end
+  end
+
+  parts.join("")
+end
+
+# *text* as an iyi string literal: quotes, backslashes and `#` escaped,
+# control bytes and bytes that are not UTF-8 written out, UTF-8 as itself.
+# A `#` written as `\#` is also why no text of the template can spell a
+# location pragma or an interpolation.
+def quote(text : String) : String
+  parts = [] of String
+  parts << "\""
+  raw = text.to_unsafe
+  len = text.bytesize
+  run_start = 0
+  i = 0
+  while i < len
+    b = raw[i].to_i32
+    if b >= 128
+      size = utf8_size(raw, i, len)
+      if size > 0
+        i += size
+        next
+      end
+    end
+    escape =
+      if b == 34 # '"'
+        "\\\""
+      elsif b == 92 # '\\'
+        "\\\\"
+      elsif b == 35 # '#'
+        "\\#"
+      elsif b == 10
+        "\\n"
+      elsif b == 13
+        "\\r"
+      elsif b == 9
+        "\\t"
+      elsif b < 32 || b >= 127
+        "\\x#{HEX[b // 16]}#{HEX[b % 16]}"
+      else
+        nil
+      end
+    if escape
+      parts << text[run_start, i - run_start] if i > run_start
+      parts << escape
+      run_start = i + 1
+    end
+    i += 1
+  end
+  parts << text[run_start, len - run_start] if len > run_start
+  parts << "\""
+  parts.join("")
+end
+
+# How many bytes the UTF-8 character starting at *i* takes, or 0 when the
+# bytes there are not one: the compiler reads a literal as UTF-8 and stops
+# at a byte that is not, so such a byte has to be written as `\x`.
+def utf8_size(raw : Pointer(UInt8), i : Int32, len : Int32) : Int32
+  b = raw[i].to_i32
+  lo = 0x80
+  hi = 0xBF
+  size = 0
+  if b >= 0xC2 && b <= 0xDF
+    size = 2
+  elsif b >= 0xE0 && b <= 0xEF
+    size = 3
+    lo = 0xA0 if b == 0xE0 # overlong
+    hi = 0x9F if b == 0xED # surrogate
+  elsif b >= 0xF0 && b <= 0xF4
+    size = 4
+    lo = 0x90 if b == 0xF0 # overlong
+    hi = 0x8F if b == 0xF4 # past U+10FFFF
+  else
+    return 0
+  end
+  return 0 if i + size > len
+  c = raw[i + 1].to_i32
+  return 0 if c < lo || c > hi
+  k = 2
+  while k < size
+    c = raw[i + k].to_i32
+    return 0 if c < 0x80 || c > 0xBF
+    k += 1
+  end
+  size
+end
+
+# `<%-`: the blanks that open the line before the tag go, when the tag is the
+# first thing on its line.
+def suppress_leading_indentation(token : Eiy::Lexer::Token, string : String, opens_line : Bool) : String
+  if (token.output? || token.control?) && token.suppress_leading?
+    raw = string.to_unsafe
+    len = string.bytesize
+    start_idx = 0
+    i = len - 1
+    while i >= 0
+      if raw[i] == 10_u8 # '\n'
+        start_idx = i + 1
+        break
+      end
+      i -= 1
+    end
+    # Blanks with no line break before them are indentation only when the
+    # text opens the line; after a tag on the same line they are spacing.
+    return string if start_idx == 0 && !opens_line
+    all_ws = true
+    i = start_idx
+    while i < len
+      b = raw[i]
+      unless b == 32_u8 || b == 9_u8
+        all_ws = false
+        break
+      end
+      i += 1
+    end
+    return string[0, start_idx] if all_ws
+  end
+  string
+end
+
+# `-%>`: the rest of the tag's line goes, newline included.
+def suppress_trailing_whitespace(token : Eiy::Lexer::Token, suppress_trailing : Bool) : Nil
+  if suppress_trailing && token.string?
+    idx = token.value.index('\n')
+    if idx
+      token.value = token.value[idx + 1, token.value.bytesize - idx - 1]
+      token.line_number = token.line_number + 1
+    end
+    # What `-%>` leaves opens a line, so a `<%-` after it takes its blanks.
+    token.column_number = 1
+  end
+end
+
+def append_loc(parts : Array(String), filename : String, line_number : Int32, column_number : Int32) : Nil
+  parts << "#<loc:"
+  parts << quote(filename)
+  parts << ","
+  parts << line_number.to_s
+  parts << ","
+  parts << column_number.to_s
+  parts << ">"
+end
+
+args = Program.args
+raise "usage: templates/process CALLER TEMPLATE IO_NAME, not #{args.size} arguments" unless args.size == 3
+
+template = Eiy.locate(args[1], args[0])
+if declared = ENV["IYI_RUN_INPUTS"]?
+  File.write(declared, "#{template}\n")
+end
+lexer = Eiy::Lexer.new(File.read(template))
+code = generate(lexer, template, args[2])
+raise "#{template}: #{lexer.error || "template refused"}" unless code
+print code
