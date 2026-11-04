@@ -111,16 +111,21 @@ flowchart LR
 
 **ELI5:** Bıçaklar açıkta duruyor, tabelada yanlış saat yazıyor.
 
-- [ ] Template'lerde otomatik escape varsayılan olsun, ham çıktı için `raw`
+- [x] Template'lerde otomatik escape varsayılan olsun, ham çıktı için `raw`
       gibi açık bir kaçış olsun. Breaking change: CHANGELOG'da duyurulmalı.
 - [ ] README'deki TLS ve sürüm bilgisini düzelt, `iyi-web-vs-kemal.md`'yi
       güncelle.
-- [ ] `env.params.url.int("id")` gibi `Int32 | ParamError` döndüren küçük
+- [x] `env.params.url.int("id")` gibi `Int32 | ParamError` döndüren küçük
       yardımcılar.
-- [ ] `on_start` / `on_stop` hook'ları (FastAPI'deki `lifespan`).
+- [x] `on_start` / `on_stop` hook'ları (FastAPI'deki `lifespan`).
 
 **Bitti sayılır:** escape unutulduğunda XSS çıkmıyor; dokümandaki her iddia
 koddaki davranışla uyuşuyor.
+
+**Durum:** autoescape (`raw`, `SafeHTML`), `env.params.int(...)` ve
+benzerleri, `on_start`/`on_stop` tamam. README'deki `@v0.5.0` örnekleri ve
+`iyi-web-vs-kemal.md`'nin durum bölümü güncellendi; TLS/HTTP sürümü
+iddiaları Faz 4'ün transport işiyle düzelecek.
 
 ### Faz 1: Garson siparişi doğru yazsın (FastAPI'yi asıl yenecek kısım)
 
@@ -147,9 +152,9 @@ post "/notes", body: NoteInput do |env, input|   # BodyError'ı framework kendis
 end
 ```
 
-- [ ] `json_as` ve `Validate` zaten var; bu faz onları route imzasına
+- [x] `json_as` ve `Validate` zaten var; bu faz onları route imzasına
       taşımak demek.
-- [ ] Response tipi de bildirilebilmeli (FastAPI'deki `response_model`);
+- [x] Response tipi de bildirilebilmeli (FastAPI'deki `response_model`);
       Faz 2 için gerekiyor.
 - **Sadelik kuralı:** `get "/" do |env|` aynen çalışmaya devam eder. Tipli
   biçim isteğe bağlı bir üst katman olur.
@@ -157,12 +162,16 @@ end
 **Bitti sayılır:** `examples/typed_json.iyi` ve `examples/json_api.iyi`
 içinde elle yazılmış hiçbir `to_i?` veya `case ... in BodyError` kalmıyor.
 
+**Durum:** tamam. `path:`, `query:`, `headers:`, `body:`, `response:` ve
+`status:` her route metodunda; iki örnekte de elle `to_i?` ya da
+`BodyError` eşleşmesi kalmadı (bkz. `docs/typed-routes.md`).
+
 ### Faz 2: Menü (OpenAPI 3.1 + Swagger UI/Scalar)
 
 **ELI5:** Müşteri mutfağa girmeden menüden ne sipariş edebileceğini görsün.
 
-- [ ] Route kayıtları + Faz 1'in tipleri → `/openapi.json`.
-- [ ] `/docs` adresinde gömülü bir UI (tek bir statik HTML yeterli).
+- [x] Route kayıtları + Faz 1'in tipleri → `/openapi.json`.
+- [x] `/docs` adresinde gömülü bir UI (tek bir statik HTML yeterli).
 - Doküman derleme anında üretilir; FastAPI'ye karşı koz, orada şema
   çalışma anında üretiliyor.
 
@@ -170,16 +179,24 @@ içinde elle yazılmış hiçbir `to_i?` veya `case ... in BodyError` kalmıyor.
 oradan üretilen bir client (ör. openapi-generator) gerçek API'yi
 çağırabiliyor.
 
+**Durum:** tamam. `openapi(...)` `/openapi.json` ve Swagger UI'lı `/docs`
+sunuyor; `examples/openapi_auth.iyi`'nin dokümanı openapi-spec-validator'dan
+geçiyor (bkz. `docs/openapi.md`).
+
 ### Faz 3: Yardımcı aşçılar (`Depends` karşılığı)
 
 **ELI5:** Her yemekten önce "elleri yıka, tabağı ısıt" adımı tekrar tekrar
 yazılmasın. Bir kere tanımla, istediğin yemeğe bağla.
 
-- [ ] `def current_user(env) : User | HttpError` gibi bir fonksiyon
+- [x] `def current_user(env) : User | HttpError` gibi bir fonksiyon
       `deps: {user: current_user}` ile route'a bağlanır, block'a tipli gelir.
-- [ ] Hazır parçalar: Bearer/JWT, API key, OAuth2 password flow (iyi std'de
+- [x] Hazır parçalar: Bearer/JWT, API key, OAuth2 password flow (iyi std'de
       `password`, `otp` gibi parçalar mevcut).
-- [ ] Bunlar OpenAPI'ye `securitySchemes` olarak yansır.
+- [x] Bunlar OpenAPI'ye `securitySchemes` olarak yansır.
+
+**Durum:** tamam. `Dep.new { |env| ... }` ve `deps:`; `bearer_auth`,
+`api_key_auth`, `jwt_auth`, OAuth2 password flow (bkz.
+`docs/dependencies-and-auth.md`).
 
 ### Faz 4: Mutfağı yeni binaya taşı (std/http'nin üstüne geç)
 
@@ -201,37 +218,50 @@ elinle yapıyorsun.
 **Bitti sayılır:** 42 test dosyası yeni transport üzerinde geçiyor ve
 `curl --http2` çalışıyor.
 
+**Durum:** ayrı bir dalda sürüyor (HTTP/2, akan gövdeler, TLS 1.2/mTLS,
+autocert, zstd); `reuse_port` hâlâ std/socket'i bekliyor.
+
 ### Faz 5: Ekosistem ve geliştirici deneyimi (Express'i geçmek için)
 
 **ELI5:** En iyi mutfak bile kimse yolu bilmezse boş kalır.
 
-- [ ] **Veritabanı:** yeni sürücü yazılmayacak; mevcut
+- [x] **Veritabanı:** yeni sürücü yazılmayacak; mevcut
       [iyilang/db](https://github.com/iyilang/db),
       [iyilang/pg](https://github.com/iyilang/pg) ve
       [iyilang/mysql](https://github.com/iyilang/mysql) kullanılacak.
       iyi-web tarafındaki iş: bunlarla bir örnek uygulama, README/doküman
       bölümü ve Faz 3'teki `deps:` ile route'a bağlantı vermenin kalıbı.
-- [ ] `iyi-web new myapp` ile proje iskeleti, `iyi-web dev` ile hot reload.
-- [ ] Doküman sitesi: tutorial + referans (FastAPI'nin dokümanı model);
+- [x] `iyi-web new myapp` ile proje iskeleti, `iyi-web dev` ile hot reload.
+- [x] Doküman sitesi: tutorial + referans (FastAPI'nin dokümanı model);
       1.600 satırlık README bölünür.
-- [ ] Paylaşılan state ergonomisi: `Mutex` + `List` dansını saklayan küçük
+- [x] Paylaşılan state ergonomisi: `Mutex` + `List` dansını saklayan küçük
       bir `Store(T)` yardımcısı; örnekler `workers: 1`'e kaçmak zorunda
       kalmaz.
-- [ ] `/metrics` (Prometheus), OpenTelemetry trace middleware'i, background
+- [x] `/metrics` (Prometheus), OpenTelemetry trace middleware'i, background
       task'lar.
-- [ ] Topluluk middleware'lerinin nasıl yazılacağını anlatan plugin rehberi.
+- [x] Topluluk middleware'lerinin nasıl yazılacağını anlatan plugin rehberi.
+
+**Durum:** tamam. `examples/postgres`, `iyi-web new`/`dev`, `mkdocs.yml` ile
+`docs/` sitesi ve `docs/tutorial.md`, `Store(T)`, metrics/tracing/background
+ve `docs/plugins.md` yerinde; README giriş sayfasına indi.
 
 ### Faz 6: Yarışa çık (herkese açık benchmark)
 
 **ELI5:** "En hızlıyız" demek yetmez; aynı pistte koşup kronometreyi
 göstermek lazım.
 
-- [ ] Aynı makinede, aynı 3 endpoint (hello, JSON, DB query) için iyi-web,
+- [x] Aynı makinede, aynı 3 endpoint (hello, JSON, DB query) için iyi-web,
       FastAPI (uvicorn workers), Express, Kemal ve Go net/http; sonuçlar ve
       script'ler repoda.
 - [ ] Hedef sıcak nokta `intake.get` (~5 µs); Faz 4 sonrasında yeniden
       ölçülmeli.
 - [ ] TechEmpower'a başvuru.
+
+**Durum:** `bench/compare/` beş framework'ü aynı makinede ölçüyor (DB query
+yerine path ve query parametreli bir endpoint ile; sonuçlar
+`docs/benchmarks.md`'de, Express o ölçümde makinede `node` olmadığı için
+atlandı). `intake.get` ölçümü Faz 4'ten sonraya, TechEmpower başvurusu
+sonraya kaldı.
 
 ## Sadelik çizgisi (Kemal'den ne kadar uzaklaşmalı)
 
