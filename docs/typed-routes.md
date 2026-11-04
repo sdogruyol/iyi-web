@@ -288,8 +288,10 @@ post "/notes", body: NoteInput, response: Note, status: 201, workers: 1 do |env,
 end
 ```
 
-`examples/typed_json.iyi` does exactly that; `examples/json_api.iyi` keeps
-its store behind a `Mutex` and serves typed routes on every core.
+That serves the whole application on one thread. To serve on every core,
+keep the notes in a [`Store`](state.md) instead, as
+`examples/typed_json.iyi` and `examples/openapi_auth.iyi` do;
+`examples/json_api.iyi` keeps its store behind a `Mutex`.
 
 ## Examples
 

@@ -25,7 +25,6 @@ module examples/openapi_auth
 
 import std/json::{serializable}
 import std/list::{List}
-import std/mutex::{Mutex}
 import std/time::{Span}
 import std/crypto::{Subtle}
 import std/password::{Bcrypt}
@@ -37,6 +36,7 @@ import iyi_web/openapi::{SecurityScheme}
 import iyi_web/deps::{Dep}
 import iyi_web/auth::*
 import iyi_web/jwt::{JWT, Claims}
+import iyi_web/store::{Store}
 
 # Signs and checks every token. Read it from the environment or a vault in
 # a real application: whoever knows it can mint a token for anyone.
@@ -171,7 +171,9 @@ struct Stats
   end
 end
 
-NOTES   = Mutex.new { {} of Int32 => Note }
+# Every worker reads and writes this one table; the `Store` holds the lock.
+# A `Note` is strings and a number, so one leaves the lock as it is.
+NOTES   = Store.new { {} of Int32 => Note }
 LAST_ID = Atomic(Int32).new(0)
 
 # OAuth2's token endpoint: a form with `grant_type=password`, answered
@@ -196,28 +198,28 @@ end
 
 get "/notes", query: NoteQuery, response: NotePage, summary: "List notes", tags: ["notes"] do |env, query|
   wanted = query.author
-  every = NOTES.get { |notes| List.new(notes.values) }.or_panic.to_a
+  every = NOTES.values
   matching = wanted ? every.select { |note| note.author == wanted } : every
   NotePage.new(matching.size, matching.skip(query.offset).first(query.limit))
 end
 
 get "/notes/:id", path: Int32, response: Note, summary: "One note", tags: ["notes"] do |env, id|
-  NOTES.get { |notes| notes[id]? }.or_panic || StatusError.new(404)
+  NOTES[id]? || StatusError.new(404)
 end
 
 post "/notes", body: NoteInput, deps: CURRENT_USER, response: Note, status: 201, summary: "Write a note", tags: ["notes"] do |env, input, user|
   note = Note.new(LAST_ID.add(1) + 1, input, user.name)
-  NOTES.lock { |notes| notes[note.id] = note }
+  NOTES.update { |notes| notes[note.id] = note; nil }
   note
 end
 
 delete "/notes/:id", path: Int32, deps: ADMIN, status: 204, summary: "Remove a note (admins only)", tags: ["notes"] do |env, id, admin|
-  removed = NOTES.get { |notes| notes.delete(id) }.or_panic
+  removed = NOTES.update { |notes| notes.delete(id) }
   removed ? nil : StatusError.new(404)
 end
 
 get "/stats", deps: STATS_CLIENT, response: Stats, summary: "Counts, for monitoring", tags: ["ops"] do |env, client|
-  Stats.new(NOTES.get { |notes| notes.size }.or_panic, ACCOUNTS.size)
+  Stats.new(NOTES.size, ACCOUNTS.size)
 end
 
 error 404 do |env|

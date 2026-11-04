@@ -46,8 +46,9 @@ get "/" do |env|
   render "views/books.eiy", "views/layout.eiy"
 end
 
-get "/books/:id" do |env|
-  id = env.params.url["id"].to_i? || 0
+# `path: Int32` reads `:id` as a number: `/books/abc` is answered 422
+# before the block runs.
+get "/books/:id", path: Int32 do |env, id|
   if book = BOOKS.find { |candidate| candidate.id == id }
     render "views/book.eiy", "views/layout.eiy"
   else
