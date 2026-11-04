@@ -14,10 +14,10 @@
 # opened, and `iyi-web dev` serves `app.iyi`.
 #
 #   Basic  two text routes, one with a path parameter
-#   Api    a JSON CRUD over an in-memory store: a typed, validated body
-#          (`json_as` + `Validate`), `derive serializable` responses and
-#          a JSON 404, with the store behind a `Mutex` so it serves on
-#          every core
+#   Api    a JSON CRUD over an in-memory store, as typed routes: a
+#          `path: Int32` capture, a validated body (`body:` + `Validate`),
+#          `derive serializable` responses and a JSON 404, with the notes
+#          in a `Store` so it serves on every core
 #   Full   HTML pages from views/ inside a layout, and public/ served as
 #          static files
 module cmd/scaffold
@@ -265,18 +265,18 @@ private def basic_test(name : String) : String
 end
 
 API_ROUTES = <<-'IYI'
-  # A JSON API over an in-memory store. The request body is read into
-  # `NoteInput` and checked by its `Validate` rules before the route sees
-  # it; a body that does not parse, has the wrong types or breaks a rule is
-  # answered 400, 415 or 422 with the fields that failed.
+  # A JSON API over an in-memory store, as typed routes: each route says
+  # what it reads and what it answers, and iyi-web reads it before the
+  # block runs. A capture that is not a number, or a body that does not
+  # parse, has the wrong types or breaks a `Validate` rule, is answered
+  # 400, 415 or 422 with the fields that failed.
   module routes/notes
 
   import std/json::{serializable}
-  import std/list::{List}
-  import std/mutex::{Mutex}
   import web/iyi_web/router::{Router}
   import web/iyi_web/failure::{StatusError}
-  import web/iyi_web/validation::{BodyError, Validate, Validator}
+  import web/iyi_web/store::{Store}
+  import web/iyi_web/validation::{Validate, Validator}
 
   # What a client sends. A field with a default may be left out.
   struct NoteInput
@@ -292,8 +292,8 @@ API_ROUTES = <<-'IYI'
     end
   end
 
-  # What the API answers with: `derive serializable` lets `env.json` write
-  # it. A struct of plain values, so it may cross between workers.
+  # What the API answers with: `derive serializable` lets a route answer
+  # it as JSON. A struct of plain values, so it may cross between workers.
   pub struct Note
     getter id : Int32
     getter title : String
@@ -305,45 +305,33 @@ API_ROUTES = <<-'IYI'
   end
 
   # Every call builds a router with its own empty store. The routes run on
-  # every core at once, so the store is behind a lock and the last id is an
-  # `Atomic`.
+  # every core at once, so the notes are in a `Store` (a table behind a
+  # lock) and the last id is an `Atomic`.
   pub def note_routes : Router
-    notes = Mutex.new { {} of Int32 => Note }
+    notes = Store.new { {} of Int32 => Note }
     last_id = Atomic(Int32).new(0)
     router = Router.new
 
-    router.get "/notes" do |env|
-      # A `List` leaves the lock; an `Array` the lock held would not.
-      env.json(notes.get { |all| List.new(all.values) }.or_panic.to_a)
+    router.get "/notes", response: Array(Note) do |env|
+      notes.values
     end
 
-    router.get "/notes/:id" do |env|
-      id = env.params.url["id"].to_i? || 0
-      note = notes.get { |all| all[id]? }.or_panic
-      note ? env.json(note) : StatusError.new(404)
+    # `path: Int32` reads the `:id` capture as a number: `/notes/abc` is
+    # answered 422 before the block runs.
+    router.get "/notes/:id", path: Int32, response: Note do |env, id|
+      notes[id]? || StatusError.new(404)
     end
 
-    router.post "/notes" do |env|
-      # `NoteInput | BodyError`: the error goes back as the route's value
-      # and is answered with its status.
-      case input = env.params.json_as(NoteInput)
-      in BodyError
-        input
-      in NoteInput
-        note = Note.new(last_id.add(1) + 1, input.title.strip, input.done)
-        notes.lock { |all| all[note.id] = note }
-        env.status(201).json(note)
-      end
+    # `body: NoteInput` reads the JSON body and runs its rules; the block
+    # only ever sees a valid one.
+    router.post "/notes", body: NoteInput, response: Note, status: 201 do |env, input|
+      note = Note.new(last_id.add(1) + 1, input.title.strip, input.done)
+      notes.update { |all| all[note.id] = note; nil }
+      note
     end
 
-    router.delete "/notes/:id" do |env|
-      id = env.params.url["id"].to_i? || 0
-      if notes.get { |all| all.delete(id) }.or_panic
-        env.response.status_code = 204
-        nil
-      else
-        StatusError.new(404)
-      end
+    router.delete "/notes/:id", path: Int32, status: 204 do |env, id|
+      notes.update { |all| all.delete(id) } ? nil : StatusError.new(404)
     end
 
     router.error 404 do |env|
@@ -390,7 +378,8 @@ API_TEST = <<-'IYI'
   missing = dispatch(app, "DELETE", "/notes/1").response
   assert missing.status_code == 404
   assert missing.body == %({"error":"not found"})
-  assert dispatch(app, "GET", "/notes/abc").response.status_code == 404
+  # A capture that is not a number is a bad parameter, not a missing note.
+  assert dispatch(app, "GET", "/notes/abc").response.status_code == 422
 
   IYI
 

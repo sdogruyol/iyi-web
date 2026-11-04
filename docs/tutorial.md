@@ -21,7 +21,8 @@ iyi test
 iyi-web dev
 ```
 
-`iyi-web new --api` writes a JSON API over an in-memory store:
+`iyi-web new --api` writes a JSON API over an in-memory store, already as
+typed routes:
 
 ```
 notes/
@@ -58,35 +59,33 @@ run
 
 ## 2. Typed routes
 
-The generated routes read their parameters by hand:
-`env.params.url["id"].to_i? || 0` turns `/notes/abc` into note `0`, and the
-`POST` route matches on `BodyError` itself. A typed route says what it
-reads, and iyi-web reads it before the block runs
-([Typed routes](typed-routes.md)). Replace `note_routes` in
+The generated routes do not parse a parameter or match on an error by
+hand. A typed route says what it reads, and iyi-web reads it before the
+block runs ([Typed routes](typed-routes.md)). This is `note_routes` in
 `routes/notes.iyi`:
 
 ```iyi
 pub def note_routes : Router
-  notes = Mutex.new { {} of Int32 => Note }
+  notes = Store.new { {} of Int32 => Note }
   last_id = Atomic(Int32).new(0)
   router = Router.new
 
   router.get "/notes", response: Array(Note) do |env|
-    notes.get { |all| List.new(all.values) }.or_panic.to_a
+    notes.values
   end
 
   router.get "/notes/:id", path: Int32, response: Note do |env, id|
-    notes.get { |all| all[id]? }.or_panic || StatusError.new(404)
+    notes[id]? || StatusError.new(404)
   end
 
   router.post "/notes", body: NoteInput, response: Note, status: 201 do |env, input|
     note = Note.new(last_id.add(1) + 1, input.title.strip, input.done)
-    notes.lock { |all| all[note.id] = note }
+    notes.update { |all| all[note.id] = note; nil }
     note
   end
 
   router.delete "/notes/:id", path: Int32, status: 204 do |env, id|
-    notes.get { |all| all.delete(id) }.or_panic ? nil : StatusError.new(404)
+    notes.update { |all| all.delete(id) } ? nil : StatusError.new(404)
   end
 
   router.error 404 do |env|
@@ -98,21 +97,12 @@ end
 ```
 
 - `path: Int32` reads the `:id` capture as a number, and the block gets it
-  as `id`. `/notes/abc` is now answered `422` before the block runs.
+  as `id`. `/notes/abc` is answered `422` before the block runs.
 - `body: NoteInput` reads the JSON body into `NoteInput` and runs its
   `Validate` rules; the block only ever sees a valid one.
 - `response: Note` says what the route answers, and writes it as JSON with
   the `status:` given. A `StatusError` returned beside it is answered with
   its own status: here the JSON `404` page.
-
-The import of `BodyError` in `routes/notes.iyi` is no longer needed: make
-the validation import `web/iyi_web/validation::{Validate, Validator}`. One
-line of `app_test.iyi` has to change too, since a word is no longer a
-missing note but a bad parameter:
-
-```iyi
-assert dispatch(app, "GET", "/notes/abc").response.status_code == 422
-```
 
 ```sh
 curl -X POST localhost:3000/notes -H 'Content-Type: application/json' -d '{"title":"Buy milk"}'
@@ -162,7 +152,7 @@ and let the list route read it:
 
 ```iyi
   router.get "/notes", query: NoteFilter, response: Array(Note) do |env, filter|
-    every = notes.get { |all| List.new(all.values) }.or_panic.to_a
+    every = notes.values
     wanted = filter.done
     found = wanted.nil? ? every : every.select { |note| note.done == wanted }
     found.first(filter.limit)
@@ -187,44 +177,19 @@ curl 'localhost:3000/notes?done=true'
 
 The routes run on whichever core is free, so the notes are behind a lock,
 and the compiler refuses a route that touches a bare `Hash` ([Every
-core](every-core.md)). The scaffold's `Mutex` makes each call say
-`.or_panic` and copy the values into a `List` before they may leave the
-lock. A [`Store`](state.md) does both for you. Replace the `std/list` and
-`std/mutex` imports with `import web/iyi_web/store::{Store}`, and:
+core](every-core.md)). The scaffold keeps them in a [`Store`](state.md), a
+table behind a lock that hands out copies:
 
-```iyi
-pub def note_routes : Router
-  notes = Store.new { {} of Int32 => Note }
-  last_id = Atomic(Int32).new(0)
-  router = Router.new
+- `notes.values` is a copy of every note, taken under the lock;
+- `notes[id]?` reads one entry;
+- `update` changes the table with the lock held and answers what its block
+  answers: `nil` after a store, the removed note (or `nil`) after a
+  delete.
 
-  router.get "/notes", query: NoteFilter, response: Array(Note) do |env, filter|
-    every = notes.values
-    wanted = filter.done
-    found = wanted.nil? ? every : every.select { |note| note.done == wanted }
-    found.first(filter.limit)
-  end
-
-  router.get "/notes/:id", path: Int32, response: Note do |env, id|
-    notes[id]? || StatusError.new(404)
-  end
-
-  router.post "/notes", body: NoteInput, response: Note, status: 201 do |env, input|
-    note = Note.new(last_id.add(1) + 1, input.title.strip, input.done)
-    notes.update { |all| all[note.id] = note; nil }
-    note
-  end
-
-  router.delete "/notes/:id", path: Int32, status: 204 do |env, id|
-    notes.update { |all| all.delete(id) } ? nil : StatusError.new(404)
-  end
-  # ...
-```
-
-`notes.values` is a copy taken under the lock; `notes[id]?` reads one
-entry; `update` changes the table with the lock held and answers what its
-block answers. Ids come from an `Atomic`, so no two requests get the same
-one.
+Ids come from an `Atomic`, so no two requests get the same one. A
+`Mutex` from `std/mutex` would work too, but each call would need an
+`.or_panic` and a `List` copy before the values may leave the lock;
+`Store` does both.
 
 ## 5. OpenAPI and the docs page
 
