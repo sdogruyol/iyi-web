@@ -1,21 +1,29 @@
 # A JSON API over an in-memory store: list, show, create, update and delete
-# todos. Run from the repository root with `iyi run examples/json_api.iyi`.
+# todos, with its OpenAPI document. Run from the repository root with
+# `iyi run examples/json_api.iyi`.
 #
 #   curl localhost:3000/todos
 #   curl -X POST localhost:3000/todos -H 'Content-Type: application/json' -d '{"title":"Write docs"}'
 #   curl -X PATCH localhost:3000/todos/1 -H 'Content-Type: application/json' -d '{"done":true}'
 #   curl -X DELETE localhost:3000/todos/1
+#   curl localhost:3000/openapi.json          # and localhost:3000/docs in a browser
+#
+# Every route is typed: `:id` is an `Int32`, a body is a struct, and the
+# answer is a `Todo`. A request that is not those types is answered with
+# a 4xx naming the field before the block runs, so no block parses
+# anything.
 #
 # Every core serves requests at once, so the store is behind a lock and the
 # last id is an `Atomic`: a route that named a bare `Hash` would not
 # compile, the compiler naming the constant and its field.
 module examples/json_api
 
-import std/json::{ToJSON, Builder}
+import std/json::{serializable}
 import std/list::{List}
 import std/mutex::{Mutex}
 import iyi_web/dsl::*
-import iyi_web/context::{Context}
+import iyi_web/failure::{StatusError}
+import iyi_web/validation::{Validate, Validator}
 
 # A todo is a value: an update makes a new one, so one read out of the
 # store is the todo as it was then, whatever another request does next.
@@ -23,6 +31,7 @@ struct Todo
   getter id : Int32
   getter title : String
   getter done : Bool
+  derive serializable
 
   def initialize(@id : Int32, @title : String, @done : Bool = false)
   end
@@ -32,14 +41,30 @@ struct Todo
   end
 end
 
-# Implementing `ToJSON` is what lets `env.json` serialise a `Todo`, alone or
-# inside an `Array`.
-impl ToJSON for Todo
-  def to_json(json : Builder) : Nil
-    json.object do
-      json.field("id", @id)
-      json.field("title", @title)
-      json.field("done", @done)
+# `POST /todos`: a title, which may not be blank.
+struct NewTodo
+  getter title : String
+  derive serializable
+end
+
+impl Validate for NewTodo
+  def validate(v : Validator) : Nil
+    v.required("title", title)
+    v.length("title", title, max: 200)
+  end
+end
+
+# `PATCH /todos/:id`: either field, or both; one left out stays as it is.
+struct TodoChange
+  getter title : String?
+  getter done : Bool?
+  derive serializable
+end
+
+impl Validate for TodoChange
+  def validate(v : Validator) : Nil
+    if text = title
+      v.required("title", text)
     end
   end
 end
@@ -49,81 +74,47 @@ end
 TODOS   = Mutex.new { {} of Int32 => Todo }
 LAST_ID = Atomic(Int32).new(0)
 
-# The todo named by `:id`, or a `404` that ends the request. A segment that
-# is not a number names no todo either.
-def find_todo(env : Context) : Todo?
-  id = env.params.url["id"].to_i?
-  todo = id ? TODOS.get { |todos| todos[id]? }.or_panic : nil
-  env.halt(404, %({"error":"not found"})) unless todo
+# The todo with *id*, or the 404 the route answers instead.
+def find_todo(id : Int32) : Todo | StatusError
+  TODOS.get { |todos| todos[id]? }.or_panic || StatusError.new(404)
+end
+
+error 404 do |env|
+  env.json({"error" => "not found"})
+end
+
+get "/todos", response: Array(Todo), summary: "Every todo" do |env|
+  # A `List` leaves the lock; an `Array` the lock held would not.
+  TODOS.get { |todos| List.new(todos.values) }.or_panic.to_a
+end
+
+get "/todos/:id", path: Int32, response: Todo, summary: "One todo" do |env, id|
+  find_todo(id)
+end
+
+post "/todos", body: NewTodo, response: Todo, status: 201, summary: "Add a todo" do |env, input|
+  todo = Todo.new(LAST_ID.add(1) + 1, input.title.strip)
+  TODOS.lock { |todos| todos[todo.id] = todo }
   todo
 end
 
-# `env.params.json` holds the members of a JSON object body, as `JSON::Any`.
-def json_string(env : Context, key : String) : String?
-  value = env.params.json[key]?
-  value ? value.as_s? : nil
+patch "/todos/:id", path: Int32, body: TodoChange, response: Todo, summary: "Change a todo" do |env, id, change|
+  title = change.title
+  done = change.done
+  # Read and written under one lock, so a second PATCH at the same time
+  # changes this one's result rather than losing it.
+  changed = TODOS.get { |todos|
+    current = todos[id]?
+    current ? (todos[id] = current.with(title ? title.strip : nil, done)) : nil
+  }.or_panic
+  changed || StatusError.new(404)
 end
 
-# `halt` sends its body as is; give error bodies the JSON content type too.
-before_all "/todos/*" do |env|
-  env.response.content_type = "application/json; charset=utf-8"
+delete "/todos/:id", path: Int32, status: 204, summary: "Remove a todo" do |env, id|
+  removed = TODOS.get { |todos| todos.delete(id) }.or_panic
+  removed ? nil : StatusError.new(404)
 end
 
-# A body declared as JSON that does not parse gets `400` before the route
-# runs; this page replaces the default text.
-error 400 do |env|
-  env.json({"error" => "invalid JSON"})
-end
-
-get "/todos" do |env|
-  # A `List` leaves the lock; an `Array` the lock held would not.
-  env.json(TODOS.get { |todos| List.new(todos.values) }.or_panic.to_a)
-end
-
-get "/todos/:id" do |env|
-  if todo = find_todo(env)
-    env.json(todo)
-  end
-end
-
-post "/todos" do |env|
-  title = json_string(env, "title")
-  if title.nil? || title.empty?
-    env.halt(422, %({"error":"title is required"}))
-  else
-    todo = Todo.new(LAST_ID.add(1) + 1, title)
-    TODOS.lock { |todos| todos[todo.id] = todo }
-    env.status(201).json(todo)
-  end
-end
-
-patch "/todos/:id" do |env|
-  if todo = find_todo(env)
-    id = todo.id
-    title = json_string(env, "title")
-    flag = env.params.json["done"]?
-    done = flag ? flag.as_bool? == true : nil
-    # Read and written under one lock, so a second PATCH at the same time
-    # changes this one's result rather than losing it.
-    changed = TODOS.get { |todos|
-      current = todos[id]?
-      current ? (todos[id] = current.with(title, done)) : nil
-    }.or_panic
-    if changed
-      env.json(changed)
-    else
-      env.halt(404, %({"error":"not found"}))
-    end
-  end
-end
-
-delete "/todos/:id" do |env|
-  if todo = find_todo(env)
-    id = todo.id
-    TODOS.lock { |todos| todos.delete(id) }
-    env.response.status_code = 204
-  end
-  nil
-end
+openapi("Todos", "1.0.0")
 
 run

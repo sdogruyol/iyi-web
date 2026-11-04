@@ -1,0 +1,172 @@
+# Parameters read as types: strict scalars, structs read from repeated
+# names with their defaults, enums and `Validate`, and every wrong field
+# named.
+module iyi_web/coerce_test
+
+import std/json::{JSON, serializable}
+import iyi_web/coerce::*
+import iyi_web/validation::{Validate, Validator}
+import iyi_web/spec::*
+
+enum Order
+  Newest
+  MostLiked
+end
+
+struct Page
+  getter page : Int32 = 1
+  getter per_page : Int32 = 20
+  getter q : String?
+  getter order : Order = Order::Newest
+  getter tags : Array(String) = [] of String
+  getter ids : Array(Int64) = [] of Int64
+  getter draft : Bool = false
+  getter min_score : Float64?
+  derive serializable
+end
+
+impl Validate for Page
+  def validate(v : Validator) : Nil
+    v.range("per_page", per_page, min: 1, max: 100)
+  end
+end
+
+struct Needed
+  getter id : Int64
+  @[JSON::Field(key: "user-name")]
+  getter name : String
+  derive serializable
+end
+
+struct Trace
+  getter x_request_id : String
+  getter x_retry : Int32 = 0
+  derive serializable
+end
+
+def page(pairs : Array(Tuple(String, String))) : Page
+  result = decode_params(pairs, Page, "query")
+  result.is_a?(ParamError) ? raise(result.message) : result
+end
+
+def page_error(pairs : Array(Tuple(String, String))) : ParamError
+  result = decode_params(pairs, Page, "query")
+  result.is_a?(ParamError) ? result : raise("read a Page")
+end
+
+describe "strict scalars" do
+  it "reads digits with a sign and nothing else" do
+    assert parse_int32("42") == 42
+    assert parse_int32("-7") == -7
+    assert parse_int32(" 42").nil?
+    assert parse_int32("42 ").nil?
+    assert parse_int32("4x").nil?
+    assert parse_int32("").nil?
+    assert parse_int32("2147483648").nil?
+    assert parse_int64("2147483648") == 2147483648_i64
+  end
+
+  it "refuses floats that are not finite" do
+    assert parse_float64("1.5") == 1.5
+    assert parse_float64("1e3") == 1000.0
+    assert parse_float64("nan").nil?
+    assert parse_float64("inf").nil?
+  end
+
+  it "reads the six words for a flag in any case" do
+    assert parse_bool("TRUE") == true
+    assert parse_bool("on") == true
+    assert parse_bool("0") == false
+    assert parse_bool("No") == false
+    assert parse_bool("maybe").nil?
+  end
+end
+
+describe "decode_params" do
+  it "keeps every default when nothing is sent" do
+    read = page([] of Tuple(String, String))
+    assert read.page == 1
+    assert read.per_page == 20
+    assert read.q.nil?
+    assert read.order == Order::Newest
+    assert read.tags.empty?
+    assert read.draft == false
+  end
+
+  it "reads each field as its type, an array from a repeated name" do
+    read = page([{"page", "3"}, {"q", "milk"}, {"order", "most_liked"}, {"tags", "a"}, {"tags", "b"}, {"ids", "7"}, {"ids", "9000000000"}, {"draft", "yes"}, {"min_score", "0.5"}])
+    assert read.page == 3
+    assert read.q == "milk"
+    assert read.order == Order::MostLiked
+    assert read.tags == ["a", "b"]
+    assert read.ids == [7_i64, 9000000000_i64]
+    assert read.draft == true
+    assert read.min_score == 0.5
+  end
+
+  it "takes the last value of a repeated scalar" do
+    assert page([{"page", "2"}, {"page", "5"}]).page == 5
+  end
+
+  it "names every wrong field in one 422" do
+    failure = page_error([{"page", "two"}, {"per_page", "99999999999"}, {"order", "oldest"}, {"ids", "1"}, {"ids", "x"}, {"draft", "maybe"}])
+    assert failure.status == 422
+    assert failure.fields["page"] == "must be an integer"
+    assert failure.fields["per_page"] == "must be an integer from -2147483648 to 2147483647"
+    assert failure.fields["ids[1]"] == "must be an integer"
+    assert failure.fields["draft"] == "must be true or false"
+    assert failure.fields["order"] == "must be one of: newest, most_liked"
+    assert failure.message.starts_with?("invalid query parameters: page must be an integer")
+  end
+
+  it "runs Validate once the fields are read" do
+    failure = page_error([{"per_page", "0"}])
+    assert failure.fields == {"per_page" => "must be between 1 and 100"}
+  end
+
+  it "names a missing required field by its key" do
+    result = decode_params([{"id", "5"}], Needed, "query")
+    assert result.is_a?(ParamError)
+    if result.is_a?(ParamError)
+      assert result.fields == {"user-name" => "is required"}
+    end
+    read = decode_params([{"id", "5"}, {"user-name", "ada"}], Needed, "query")
+    assert read.is_a?(Needed)
+    if read.is_a?(Needed)
+      assert read.id == 5_i64
+      assert read.name == "ada"
+    end
+  end
+
+  it "matches header names in any case, underscores as dashes" do
+    read = decode_params([{"X-Request-ID", "abc"}, {"X-Retry", "2"}], Trace, "header", headers: true)
+    assert read.is_a?(Trace)
+    if read.is_a?(Trace)
+      assert read.x_request_id == "abc"
+      assert read.x_retry == 2
+    end
+    failure = decode_params([{"X-Retry", "soon"}], Trace, "header", headers: true)
+    assert failure.is_a?(ParamError)
+    if failure.is_a?(ParamError)
+      assert failure.fields == {"x-retry" => "must be an integer", "x-request-id" => "is required"}
+    end
+  end
+end
+
+describe "decode_param" do
+  it "reads one value as a scalar or an enum" do
+    assert decode_param("12", Int32, "id", "path").or_panic == 12
+    wrong = decode_param("12abc", Int32, "id", "path")
+    assert wrong.is_a?(ParamError)
+    if wrong.is_a?(ParamError)
+      assert wrong.fields == {"id" => "must be an integer"}
+      assert wrong.message == "invalid path parameters: id must be an integer"
+    end
+    assert decode_param("most_liked", Order, "order", "query").or_panic == Order::MostLiked
+    member = decode_param("sideways", Order, "order", "query")
+    assert member.is_a?(ParamError)
+    if member.is_a?(ParamError)
+      assert member.fields == {"order" => "must be one of: newest, most_liked"}
+    end
+  end
+end
