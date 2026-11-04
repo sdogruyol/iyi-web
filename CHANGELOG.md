@@ -6,6 +6,18 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-04
+
+Requires iyi 0.20.1 or later.
+
+### Fixed
+
+- A route whose block only raises runs its block again, through the
+  same call as every other route: iyi 0.20.1 fixes the compiler crash
+  that the private `answer_route` helper of 0.5.0 worked around, and
+  the miscompile where such a route panicked "can't execute" without
+  running its body. The helper is gone.
+
 ## [0.5.0] - 2026-11-02
 
 Requires iyi 0.20.0 or later: `spawn_parallel` (SPEC.md III.4.13)
@@ -477,7 +489,8 @@ The first release. Requires iyi 0.14.1 or later.
   `Content-Length` is read, before the body is buffered.
 - Static file paths with a `..` segment or a NUL byte are refused.
 
-[Unreleased]: https://github.com/sdogruyol/iyi-web/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/sdogruyol/iyi-web/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/sdogruyol/iyi-web/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/sdogruyol/iyi-web/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/sdogruyol/iyi-web/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/sdogruyol/iyi-web/compare/v0.2.0...v0.3.0
