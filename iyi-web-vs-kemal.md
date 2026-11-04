@@ -110,8 +110,8 @@ Not in Kemal's core, but seen in its examples:
 
 ## 5. Status
 
-iyi-web `master`, on iyi 0.18.0, the oldest it supports. `iyi test iyi_web`
-passes in all 33 test files and `iyi test examples` in its one. Every example
+iyi-web `master`, on iyi 0.20.1, the oldest it supports. `iyi test iyi_web`
+passes in all 53 test files and `iyi test examples` in its one. Every example
 was built, run and exercised with curl; WebSockets with Node's client, and
 over TLS with Python's.
 
@@ -181,7 +181,7 @@ Found later and fixed:
 | WebSocket | `ws`, `Router#ws`; handshake with 101, 400, 403 (`websocket_allowed_origins`), 405 and 426; `on_message`, `on_binary`, `on_ping`, `on_pong`, `on_close`, `send`, `send_binary`, `ping`, `pong`, `close`; sends from any fiber |
 | Static files | gzip and deflate (`Vary`) at any size, compressed as the file is read; precompressed `.gz` files; 304 via ETag/Last-Modified, Range (206, 416, `multipart/byteranges`), `dir_index`, `dir_listing`, a trailing-`/` redirect for directories, `static_headers`, `nosniff`, `Accept-Ranges`; files streamed from disk, HEAD without reading them; types from `std/mime` |
 | `send_file` | Range, gzip under Kemal's conditions, `disposition:`, filename encoding, streamed from disk, HEAD without reading the file; `send_data` for bytes in memory |
-| Templates | `render` (with a layout), `content_for`, `yield_content`; nested `render` works |
+| Templates | `render` (with a layout), `content_for`, `yield_content`; nested `render` works; `<%= %>` escapes what it prints unless it is marked `raw(...)` (Kemal's ECR does not escape) |
 | Context | `set`/`get`/`get?`, `route_pattern`, `route_found?`. A value of any type is stored and read back by type, `env.get("user", User)`, in place of `add_context_storage_type` and `.as(User)` |
 | Helpers | Everything in the row; `status` takes the code as an `Int32` rather than an `HTTP::Status` |
 | Middleware | `only`/`exclude`, `use(handler, position)`, `use(path, [handlers])`, `CompressHandler` |
@@ -192,8 +192,28 @@ Found later and fixed:
 | Command line | `-b` (IPv4 or IPv6), `-p`, `-s`, `--ssl-key-file`, `--ssl-cert-file`, `-h`, `extra_options` |
 | TLS | `config.ssl` (a `TlsServerConfig`), `bind_tls`, `wss://`; TLS 1.3 over iyi's own std/tls |
 | Listening options | IPv6 and `unix_socket` (with TLS too); `read_timeout`, `write_timeout` and `idle_timeout` (not in Kemal) |
-| Installation | `iyi get github.com/sdogruyol/iyi-web` writes `require github.com/sdogruyol/iyi-web v0.5.0` to `iyi.mod`, and files write `import github.com/sdogruyol/iyi-web/iyi_web/dsl::*`; with `--as web` the line ends `as web` and files write `import web/iyi_web/dsl::*` (iyi 0.18.0 and later) |
-| Examples | Ten, from `hello` to a JSON API, uploads, templates, routers, middleware, SSE, a WebSocket chat room, cookies and in-process testing |
+| Installation | `iyi get github.com/sdogruyol/iyi-web` writes `require github.com/sdogruyol/iyi-web v0.5.1` to `iyi.mod`, and files write `import github.com/sdogruyol/iyi-web/iyi_web/dsl::*`; with `--as web` the line ends `as web` and files write `import web/iyi_web/dsl::*` (iyi 0.18.0 and later); `iyi-web new` writes a project that already requires it |
+| Examples | Fifteen programs and a PostgreSQL project, from `hello` to a JSON API, typed routes with OpenAPI and JWT sign-in, uploads, templates, routers, middleware, SSE, a WebSocket chat room, cookies, metrics and tracing, and in-process testing |
+
+### Beyond Kemal
+
+Since the gaps above closed, iyi-web has grown past what Kemal offers, in
+the direction of FastAPI:
+
+- Every request is served on whichever core is free, and a route that would
+  race on shared state does not compile ([Every core](docs/every-core.md));
+  `Store` keeps shared state behind one lock ([state](docs/state.md)).
+- Typed routes read the path, query string, headers and JSON body into the
+  application's own types and validate them before the block runs
+  ([Typed routes](docs/typed-routes.md)), and the same declarations make an
+  OpenAPI 3.1 document with a Swagger UI page ([OpenAPI](docs/openapi.md)).
+- Dependencies, bearer tokens, HS256 JWTs, API keys and OAuth2's password
+  flow ([Dependencies and auth](docs/dependencies-and-auth.md)).
+- `on_start`/`on_stop` hooks, background tasks, Prometheus metrics and W3C
+  trace context tracing ([Lifecycle](docs/lifecycle-and-background.md),
+  [Observability](docs/observability.md)).
+- The `iyi-web` command: `new` scaffolds a project, `dev` rebuilds it on
+  every save ([cli](docs/cli.md)).
 
 ### Remaining
 
@@ -219,7 +239,7 @@ Needing changes in iyi first:
 
 | Missing in iyi | iyi-web feature waiting on it |
 |---|---|
-| SO_REUSEPORT in std/socket (not in 0.18.0) | `reuse_port` |
+| SO_REUSEPORT in std/socket (not in 0.20.1) | `reuse_port` |
 | A caught panic that the runtime does not print (0.18.0 still prints it) | No `iyi: panic:` line on stderr when a client disconnects mid-response, or a write times out |
 
 Problems found in iyi and worked around in iyi-web. The first four were fixed
