@@ -1,0 +1,123 @@
+# Benchmarks across frameworks
+
+`bench/compare/` runs the same three endpoints in iyi-web, FastAPI, Express,
+Kemal and Go's `net/http` on one machine and loads each with
+[oha](https://github.com/hatoo/oha). (`bench/run.sh` is a different thing:
+it times iyi-web against itself for regressions.)
+
+| Endpoint | Answer |
+|---|---|
+| `GET /plaintext` | `Hello, World!` as `text/plain` |
+| `GET /json` | `{"message":"Hello, World!"}` |
+| `GET /users/42?fields=name,email` | `{"id":42,"name":"user-42","fields":"name,email"}`: a path parameter parsed as an integer and a query parameter |
+
+```sh
+bash bench/compare/run.sh                               # every framework, 10 s per endpoint
+bash bench/compare/run.sh --duration 5 --only iyi-web,go
+bash bench/compare/run.sh --help                        # warm-up, connections, workers, port, output
+```
+
+The runner (`bench/compare/run.iyi`, built and started by `run.sh`) does,
+for each framework in turn:
+
+1. Skips it, with the reason, when its toolchain is missing: `node` for
+   Express, `crystal` for Kemal, `go`, or FastAPI/uvicorn not importable.
+   The skip is recorded in the results, so a missing row says why.
+2. Builds it for release: `iyi build --release`, `crystal build --release`,
+   `go build`, `npm install` for Express. Kemal's shards are installed with
+   `shards install`; where shards cannot run (on Windows it needs symlinks,
+   so Developer Mode or an elevated shell) the runner clones the same
+   versions into `lib/` with git and says so.
+3. Starts it on its own port, serving on every core the way each is
+   deployed: iyi-web, Kemal (Crystal's default execution context resized to
+   the core count) and Go with threads; FastAPI under uvicorn with one
+   worker process per core and `httptools`; Express with one `node:cluster`
+   worker per core. Request logging is off everywhere.
+4. Checks every endpoint's status, `Content-Type` and body, and that
+   `/users/abc` is refused with a 4xx. A framework that answers wrongly is
+   reported failed and not timed: doing less work is not winning.
+5. Warms each endpoint up (3 s), then measures it (10 s) at 64 keep-alive
+   connections: requests per second that got a `200`, p50 and p99 latency,
+   and non-200 answers or connection errors (requests cut off when the
+   timer ends are not errors).
+6. Stops it (on Windows, with every process it started).
+
+Results go to `bench/compare/results.json` and `bench/compare/results.md`
+(both ignored by git).
+
+## Results
+
+Measured 2026-11-04 with `bash bench/compare/run.sh` (defaults):
+
+| Framework | `/plaintext` req/s | `/json` req/s | `/users/42` req/s |
+|---|---:|---:|---:|
+| iyi-web | 59754 | 53627 | 68612 |
+| FastAPI | 26627 | 27704 | 22848 |
+| Express | skipped: node not found on PATH | | |
+| Kemal | 12406 | 12374 | 12927 |
+| Go net/http | 64358 | 51612 | 55107 |
+
+| Framework | Endpoint | req/s | p50 ms | p99 ms | non-200 / errors |
+|---|---|---:|---:|---:|---:|
+| iyi-web | `/plaintext` | 59754 | 0.685 | 8.652 | 0 |
+| iyi-web | `/json` | 53627 | 0.694 | 9.649 | 228 |
+| iyi-web | `/users/42?fields=name,email` | 68612 | 0.617 | 6.719 | 0 |
+| FastAPI | `/plaintext` | 26627 | 1.554 | 21.301 | 0 |
+| FastAPI | `/json` | 27704 | 1.540 | 20.352 | 0 |
+| FastAPI | `/users/42?fields=name,email` | 22848 | 1.757 | 22.111 | 0 |
+| Kemal | `/plaintext` | 12406 | 3.804 | 20.751 | 0 |
+| Kemal | `/json` | 12374 | 3.940 | 19.536 | 0 |
+| Kemal | `/users/42?fields=name,email` | 12927 | 3.817 | 17.927 | 0 |
+| Go | `/plaintext` | 64358 | 0.421 | 8.767 | 0 |
+| Go | `/json` | 51612 | 0.437 | 11.920 | 0 |
+| Go | `/users/42?fields=name,email` | 55107 | 0.423 | 11.067 | 0 |
+
+- Machine: Windows 10.0.26200.9711, QEMU Virtual CPU version 2.5+, 12
+  logical cores, a virtual machine.
+- iyi-web from this checkout (0.5.1 plus the roadmap work) on iyi 0.20.1;
+  FastAPI 0.162.0, uvicorn 0.54.0, httptools 0.9.0, Python 3.12.10; Kemal
+  1.15.0 on Crystal 1.22.0; Go 1.27.3; oha 1.16.0.
+- 64 connections, 3 s warm-up and 10 s measured per endpoint, 12 workers
+  per server.
+
+## Reading these numbers
+
+- **One machine, loopback, Windows.** oha ran on the same 12 cores as the
+  server, so every number includes the client's share of the CPU. Windows
+  loopback and its socket stack are slower than Linux's, and each runtime's
+  Windows I/O path is a different code path from its Linux one. These
+  numbers rank the frameworks on this machine; they are not what any of
+  them does on a Linux server with a separate load generator.
+- **The machine was not quiet.** Other builds and test suites were running
+  on it during the run. A shorter trial run earlier the same day (2 s per
+  endpoint) gave iyi-web about 87,000-90,000 req/s and Go about
+  69,000-77,000 req/s on the same endpoints, with Kemal at about 13,000:
+  the order held, the absolute numbers moved by a third. Run it more than
+  once before quoting a number.
+- **Kemal on Windows.** Kemal served about 10,200 req/s on `/json` with one
+  thread (`CRYSTAL_WORKERS=1`) and about 12,400 with twelve: Crystal's
+  Windows event loop, not Kemal's routing, is the likely limit here. Kemal
+  on Linux is a different result.
+- **iyi-web's 228 errors on `/json`.** 228 of about 536,000 requests in
+  that run were not answered `200`; the trial run, the other two endpoints
+  and the other frameworks had none. The run did not record which errors
+  they were, and this has not been reproduced or explained yet.
+- **Express was not measured** because Node.js is not installed on this
+  machine. Its app (`bench/compare/express/`, Express 5 under
+  `node:cluster`) and the runner's support for it are there; on a machine
+  with `node` it runs like the rest.
+- **FastAPI** refuses `/users/abc` with `422` (its `id: int` validation),
+  the others with `404`; the check accepts any 4xx.
+
+## Files
+
+```
+bench/compare/
+  run.sh             builds run.iyi and runs it
+  run.iyi            the runner
+  iyiweb/app.iyi     iyi-web
+  fastapi/app.py     FastAPI (requirements.txt: fastapi, uvicorn, httptools)
+  express/app.js     Express (package.json)
+  kemal/src/app.cr   Kemal (shard.yml)
+  go/main.go         Go net/http (go.mod)
+```
