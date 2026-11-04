@@ -1,0 +1,144 @@
+# What `iyi-web dev` watches, and how it notices a change: by polling.
+#
+# std has no file-change notification (no inotify, kqueue or
+# ReadDirectoryChangesW binding), so the watcher walks the tree every
+# interval and compares what it finds with the walk before. A walk records
+# each file's modification time and size; for a project's sources and
+# assets that costs well under a millisecond per hundred files.
+#
+# One trap decides the shape of a `Stamp`. `File.info` reports the
+# modification time in whole seconds, on Windows too, so a file saved twice
+# within one second - an editor's save then a formatter's, or a quick fix
+# after a typo - keeps its time, and very often its size. A walk therefore
+# also keeps the *text* of every file modified in the current second (or
+# the one before, for a clock that ticks between the stat and the
+# comparison), and of every file it kept the text of last time whose time
+# has not moved since: a change within that second is a change of text,
+# and is caught. A file that is older than that cannot change without its
+# time moving, and is compared by time and size alone.
+#
+# What is watched, under each root:
+#
+#   *.iyi, *.eiy, *.ecr, iyi.mod   sources: a change means a rebuild
+#   public/**                      assets: served from disk, no rebuild
+#
+# Directories whose names start with `.` (`.git`, `.iyi-web`, where dev
+# keeps its builds) are not walked.
+module cmd/watch
+
+import std/dir::{Dir}
+import std/file::{File}
+import std/text
+import std/enumerable
+
+# What a change to a file asks for.
+pub enum Kind
+  # A source the program is built from: rebuild, then restart.
+  Source
+  # A file under public/, read from disk on every request: nothing.
+  Asset
+end
+
+# One file as one walk found it.
+pub struct Stamp
+  getter mtime : Int64
+  getter size : Int64
+  getter kind : Kind
+  # The file's text, when it was modified recently enough that another
+  # save may not move `mtime` (see the module comment); nil otherwise.
+  getter text : String?
+
+  def initialize(@mtime : Int64, @size : Int64, @kind : Kind, @text : String? = nil)
+  end
+
+  # Whether *later*, the same path at a later walk, holds something else.
+  def changed?(later : Stamp) : Bool
+    return true if later.mtime != @mtime || later.size != @size
+    mine = @text
+    theirs = later.text
+    !mine.nil? && !theirs.nil? && mine != theirs
+  end
+end
+
+# Every watched file under the roots of one walk, by path.
+pub class Snapshot
+  getter files : Hash(String, Stamp)
+
+  def initialize(@files : Hash(String, Stamp) = {} of String => Stamp)
+  end
+
+  # The paths whose files differ from *before*'s: new, gone or changed,
+  # sorted.
+  def changes(before : Snapshot) : Array(String)
+    changed = [] of String
+    @files.each do |path, stamp|
+      old = before.files[path]?
+      changed << path if old.nil? || old.changed?(stamp)
+    end
+    before.files.each_key do |path|
+      changed << path unless @files.has_key?(path)
+    end
+    changed.sorted
+  end
+
+  # What a list of `changes` asks for: a rebuild when any of them is a
+  # source (a file that is gone counts as one: it may be a module).
+  def rebuild?(paths : Array(String), before : Snapshot) : Bool
+    paths.any? do |path|
+      stamp = @files[path]? || before.files[path]?
+      stamp.nil? || stamp.kind == Kind::Source
+    end
+  end
+end
+
+# What a file at *relative*, a path under a root with `/` separators, is
+# watched as; nil when it is not watched.
+pub def watched_kind(relative : String) : Kind?
+  return Kind::Asset if relative.starts_with?("public/")
+  return Kind::Source if relative == "iyi.mod"
+  extension = File.extname(relative)
+  return Kind::Source if extension == ".iyi" || extension == ".eiy" || extension == ".ecr"
+  nil
+end
+
+# Walks every root and stamps what it watches. *now* is the current unix
+# second; *previous* is the walk before, whose kept texts are kept going
+# while their files' times stand still.
+pub def snapshot(roots : Array(String), now : Int64, previous : Snapshot? = nil) : Snapshot
+  files = {} of String => Stamp
+  roots.each { |root| walk(root, "", now, previous, files) }
+  Snapshot.new(files)
+end
+
+# *directory* is the path on disk, joined a name at a time so its
+# separators are the platform's; *relative* is the same place under the
+# root with `/`, which `watched_kind` reads.
+private def walk(directory : String, relative : String, now : Int64, previous : Snapshot?, files : Hash(String, Stamp)) : Nil
+  return unless File.directory?(directory)
+  Dir.children(directory).sorted.each do |name|
+    child = relative.empty? ? name : relative + "/" + name
+    path = File.join(directory, name)
+    info = File.info?(path)
+    next unless info
+    if info.directory?
+      walk(path, child, now, previous, files) unless name.starts_with?(".")
+      next
+    end
+    kind = watched_kind(child)
+    next unless kind
+    files[path] = stamp(path, info.modification_time, info.size, kind, now, previous)
+  end
+end
+
+private def stamp(path : String, mtime : Int64, size : Int64, kind : Kind, now : Int64, previous : Snapshot?) : Stamp
+  old = previous ? previous.files[path]? : nil
+  kept = !old.nil? && !old.text.nil? && old.mtime == mtime
+  if mtime >= now - 1 || kept
+    text = File.read(path)
+    # A file written between the stat and the read: the next walk sees
+    # its new time. Keeping this text keeps it comparable meanwhile.
+    Stamp.new(mtime, size, kind, text)
+  else
+    Stamp.new(mtime, size, kind)
+  end
+end

@@ -14,3 +14,6 @@
 # Benchmark builds and results (bench/run.sh)
 /bench/.build/
 /bench/results*.json
+
+# iyi-web dev builds (cmd/dev.iyi)
+.iyi-web/
