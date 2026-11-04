@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Builds bench/compare/run.iyi and runs it: iyi-web, FastAPI, Express, Kemal
-# and Go's net/http on the same three endpoints, loaded with oha. Options go
-# to the runner (--help lists them); results land in bench/compare/results.json
-# and bench/compare/results.md.
+# and Go's net/http on the same endpoints (/plaintext, /json, /users/:id and
+# /db, one PostgreSQL row through a pool), loaded with oha. Options go to the
+# runner (--help lists them); results land in bench/compare/results.json and
+# bench/compare/results.md.
 #
 #   bash bench/compare/run.sh
 #   bash bench/compare/run.sh --duration 5 --only iyi-web,go

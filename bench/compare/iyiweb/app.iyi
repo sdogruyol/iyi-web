@@ -1,11 +1,30 @@
-# iyi-web's side of bench/compare: the three endpoints every framework
-# there implements, with request logging and static files off, served on
-# every core (the default `workers`). bench/compare/run.iyi builds it with
-# `--release` and starts it with `-p PORT`.
-module bench/compare/iyiweb/app
+# iyi-web's side of bench/compare: the endpoints every framework there
+# implements, with request logging and static files off, served on every
+# core (the default `workers`). bench/compare/run.iyi builds it with
+# `--release` from this directory (iyi.mod beside this file) and starts it
+# with `-p PORT`.
+#
+# Keep-alive connections are not capped, as they are not in the other
+# servers: iyi-web's default closes one after 100 requests, and under
+# `oha` that is hundreds of new connections a second, whose client-side
+# TIME_WAITs use up Windows' 16,384 ephemeral ports within a run.
+#
+# `/db` is there when DATABASE_URL is: one pool (iyilang/db, driver
+# iyilang/pg) shared by every worker, at most DB_POOL_SIZE connections
+# (default 48), all of them kept open between bursts.
+module app
 
-import std/json::{serializable}
-import iyi_web/dsl::*
+import std/json::{JSON, serializable}
+import std/random::{Random}
+import db
+import pg
+import db/db/core::{Database}
+import db/db/errors::{DBError}
+import db/db/serializable::{db_serializable}
+import web/iyi_web/router::{Router}
+import web/iyi_web/failure::{StatusError}
+import web/iyi_web/config::{config}
+import web/iyi_web/dsl::*
 
 struct User
   getter id : Int64
@@ -16,6 +35,15 @@ struct User
   def initialize(@id : Int64, @fields : String)
     @name = "user-" + @id.to_s
   end
+end
+
+# A row of `world`, written out as TechEmpower's single query writes it.
+struct World
+  getter id : Int32
+  @[JSON::Field(key: "randomNumber")]
+  getter randomnumber : Int32
+  derive db_serializable
+  derive serializable
 end
 
 get "/plaintext" do |env|
@@ -34,6 +62,29 @@ get "/users/:id" do |env|
   end
 end
 
+def db_routes(database : Database) : Router
+  router = Router.new
+  router.get "/db" do |env|
+    case world = database.query_one("SELECT id, randomnumber FROM world WHERE id = $1", Random.rand(1..10000), as: World)
+    in DBError then StatusError.new(503)
+    in World   then env.json(world)
+    end
+  end
+  router
+end
+
+if url = ENV["DATABASE_URL"]?
+  pool = ENV["DB_POOL_SIZE"]? || "48"
+  url = url + (url.includes?("?") ? "&" : "?") + "max_pool_size=" + pool + "&max_idle_pool_size=" + pool
+  case opened = Db.open(url)
+  in Database then mount db_routes(opened)
+  in DBError
+    STDERR.puts "cannot open the database: " + opened.message
+    exit 1
+  end
+end
+
+config.max_keepalive_requests = 2147483647
 logging(false)
 serve_static(false)
 run

@@ -280,12 +280,13 @@ göstermek lazım.
 - [ ] TechEmpower'a başvuru. Açık, çünkü TechEmpower'ın kendi deposuna
       yapılacak dış bir başvuru; bu repodaki işin parçası değil.
 
-**Durum:** `bench/compare/` beş framework'ü aynı makinede ölçüyor (DB query
-yerine path ve query parametreli bir endpoint ile; sonuçlar
-`docs/benchmarks.md`'de, Express o ölçümde makinede `node` olmadığı için
-atlandı). Faz 4'ten sonra `wire.get` (eski `intake.get`) 5966 → 3397 ns'ye
-indi, öncesi/sonrası tablosu `docs/benchmarks.md`'de. TechEmpower başvurusu
-sonraya kaldı.
+**Durum:** `bench/compare/` beş framework'ü aynı makinede dört endpoint'te
+ölçüyor: hello, JSON, path ve query parametreli bir endpoint ve DB query
+(`/db`: TechEmpower'ın single query'si, PostgreSQL 16 ve her framework'te
+bağlantı havuzu). Sonuçlar `docs/benchmarks.md`'de; Express o ölçümde
+makinede `node` olmadığı için atlandı. Faz 4'ten sonra `wire.get` (eski
+`intake.get`) 5966 → 3397 ns'ye indi, öncesi/sonrası tablosu
+`docs/benchmarks.md`'de. TechEmpower başvurusu sonraya kaldı.
 
 ## Sadelik çizgisi (Kemal'den ne kadar uzaklaşmalı)
 

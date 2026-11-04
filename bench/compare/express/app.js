@@ -1,7 +1,10 @@
-// Express's side of bench/compare: the three endpoints, served by one
-// worker process per core through node:cluster, Express's own answer to
-// using every core. bench/compare/run.iyi runs `npm install` here, then
+// Express's side of bench/compare: the endpoints, served by one worker
+// process per core through node:cluster, Express's own answer to using
+// every core. bench/compare/run.iyi runs `npm install` here, then
 // `node app.js` with PORT set.
+//
+// `/db` is there when DATABASE_URL is: a `pg` Pool per worker process,
+// DB_POOL_SIZE connections each (default 4).
 const cluster = require("node:cluster");
 const os = require("node:os");
 
@@ -31,6 +34,24 @@ if (cluster.isPrimary) {
     const id = Number(req.params.id);
     res.json({ id, name: `user-${id}`, fields: req.query.fields ?? "" });
   });
+
+  if (process.env.DATABASE_URL) {
+    const { Pool } = require("pg");
+    const pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: Number(process.env.DB_POOL_SIZE) || 4,
+    });
+
+    app.get("/db", async (req, res) => {
+      try {
+        const id = 1 + Math.floor(Math.random() * 10000);
+        const { rows } = await pool.query("SELECT id, randomnumber FROM world WHERE id = $1", [id]);
+        res.json({ id: rows[0].id, randomNumber: rows[0].randomnumber });
+      } catch (err) {
+        res.status(503).send("database unavailable");
+      }
+    });
+  }
 
   app.listen(Number(process.env.PORT) || 3000);
 }
