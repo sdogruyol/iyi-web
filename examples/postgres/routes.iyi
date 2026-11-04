@@ -1,0 +1,109 @@
+# The HTTP side of the todos: a router built around one `Database`.
+#
+# The pool is passed in rather than read from a constant, so app.iyi opens
+# it once with the URL it was given, and a test could hand in another. A
+# `Database` is `Share` - its pool decides under a `Mutex` which task gets
+# which connection - so every route captures it and the server still runs
+# on every core.
+#
+# A route answers a query's `DBError` by returning it: the `error DBError`
+# page below turns it into a 503 with a JSON body, and the log gets the
+# message, which the client does not.
+module routes
+
+import web/iyi_web/log::{StdoutLogger}
+import db/db/core::{Database}
+import db/db/errors::{DBError}
+import web/iyi_web/router::{Router}
+import web/iyi_web/context::{Context}
+import web/iyi_web/failure::{StatusError}
+import web/iyi_web/validation::{BodyError}
+import todos::*
+
+# The request log's own writer: its lines go out under one lock, from any
+# worker, so an error line never lands inside another.
+LOG = StdoutLogger.new
+
+# `:id` as a todo id: a positive number, and nil for anything else, which
+# the routes answer as a todo that is not there.
+def todo_id(env : Context) : Int64?
+  id = env.params.url["id"].to_i64?
+  id && id > 0 ? id : nil
+end
+
+pub def todo_routes(db : Database) : Router
+  router = Router.new
+
+  router.get "/todos" do |env|
+    case todos = all_todos(db)
+    in DBError then todos
+    in Array(Todo) then env.json(todos)
+    end
+  end
+
+  router.get "/todos/:id" do |env|
+    id = todo_id(env)
+    case todo = (id ? find_todo(db, id) : nil)
+    in DBError then todo
+    in Todo    then env.json(todo)
+    in Nil     then StatusError.new(404)
+    end
+  end
+
+  router.post "/todos" do |env|
+    case input = env.params.json_as(NewTodo)
+    in BodyError then input
+    in NewTodo
+      case todo = create_todo(db, input.title, input.done)
+      in DBError then todo
+      in Todo    then env.status(201).json(todo)
+      end
+    end
+  end
+
+  router.patch "/todos/:id" do |env|
+    id = todo_id(env)
+    case change = env.params.json_as(TodoChange)
+    in BodyError then change
+    in TodoChange
+      case todo = (id ? update_todo(db, id, change) : nil)
+      in DBError then todo
+      in Todo    then env.json(todo)
+      in Nil     then StatusError.new(404)
+      end
+    end
+  end
+
+  router.delete "/todos/:id" do |env|
+    id = todo_id(env)
+    case deleted = (id ? delete_todo(db, id) : false)
+    in DBError then deleted
+    in Bool
+      if deleted
+        env.response.status_code = 204
+        nil
+      else
+        StatusError.new(404)
+      end
+    end
+  end
+
+  # The database is reachable: a load balancer's health check.
+  router.get "/health" do |env|
+    answer = db.scalar("SELECT 1")
+    answer.is_a?(DBError) ? answer : env.json({"status" => "ok"})
+  end
+
+  router.error 404 do |env|
+    env.json({"error" => "not found"})
+  end
+
+  router.error DBError do |env, err|
+    # A lost connection can carry no message; its type still says what.
+    LOG.write("database error: " + (err.message.empty? ? err.class.to_s : err.message))
+    env.response.status_code = 503
+    env.json({"error" => "database unavailable"})
+  end
+
+  router
+end
