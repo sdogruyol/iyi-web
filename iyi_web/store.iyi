@@ -15,8 +15,10 @@
 #     end
 #
 #     post "/todos" do |env|
-#       todo = Todo.new(TODOS.update { |todos| todos.size + 1 }, "new")
-#       TODOS.update { |todos| todos[todo.id] = todo }
+#       title = env.params.body["title"]? || "untitled"
+#       # One critical section: the id is taken and the todo stored under
+#       # one lock, so two requests never get the same id.
+#       todo = TODOS.update { |todos| made = Todo.new(todos.size + 1, title); todos[made.id] = made; made }
 #       env.status(201).json(todo)
 #     end
 #
@@ -103,6 +105,11 @@ pub class Store(T)
   pub def size : Int32
     read { |value| value.size }
   end
+
+  # The helpers below have no written return type: what they answer is
+  # `T`'s element or key type, which only exists once `T` is known, and a
+  # call on a store whose value has no such method is refused where it is
+  # written.
 
   # The entry under *key* of a `Hash`, or the element at *key* of an
   # `Array`; nil when there is none.
