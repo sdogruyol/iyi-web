@@ -49,15 +49,13 @@ pub struct SafeHTML
     @html
   end
 
-  # `print`, the verb a std/eiy target has, so a `SafeHTML` prints into one.
-  pub def to_s(io) : Nil
-    io.print(@html)
-  end
-
+  # Whether there is no markup: a `yield_content` nothing was captured for.
   pub def empty? : Bool
     @html.empty?
   end
 
+  # The same markup. A `SafeHTML` is never equal to a `String`: one is
+  # markup and the other text, even when the bytes agree.
   pub def ==(other : SafeHTML) : Bool
     @html == other.to_s
   end
