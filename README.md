@@ -23,7 +23,8 @@ a route returns is checked when the program compiles.
 - Routes for `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `HEAD` and
   `QUERY`, with named and wildcard path segments
 - URL, query-string, form, JSON and `multipart/form-data` parameters, with
-  file uploads
+  file uploads, and `env.params.int(...)` and friends, which answer `422`
+  for a value that is not of the type
 - JSON bodies read into your own types, with validation and `400`/`422`
   answers that name each bad field
 - Before and after filters for every route, a path pattern or a single method
@@ -235,6 +236,10 @@ values; `env.params["name"]?` searches them in that order. Indexing without
 `?` panics when the key is missing, so use `[]?` for optional values.
 `env.params.raw_body` is the body as it arrived.
 
+These are strings. To read one as a number or a flag, with a `422` naming
+it when it is not one, use `env.params.int("id")`, `int64`, `float`, `bool`
+or `string` (see [One parameter at a time](#one-parameter-at-a-time)).
+
 A name sent more than once keeps its last value in the tables.
 `env.params.query_all("tag")` and `env.params.body_all("tag")` return every
 value, in the order sent, and an empty array when there is none; `body_all`
@@ -253,6 +258,42 @@ a top-level array is under the key `"_json"`. A request that declares JSON
 and sends something that does not parse gets `400 Bad Request` before the
 route runs, with the line and column where the body stopped making sense
 (see [Typed JSON bodies](#typed-json-bodies)).
+
+### One parameter at a time
+
+`env.params` reads a single parameter as a type. Each answers the value or a
+`ParamError` (422, naming the parameter):
+
+```iyi
+import web/iyi_web/coerce::{ParamError}
+
+get "/notes/:id" do |env|
+  id = env.params.int("id")
+  next id if id.is_a?(ParamError)          # answered 422
+  page = env.params.int("page", from: :query, default: 1)
+  next page if page.is_a?(ParamError)
+  "note #{id}, page #{page}"
+end
+```
+
+| Method | Type | Accepts |
+|---|---|---|
+| `string(key)` | `String` | anything |
+| `int(key)` | `Int32` | decimal digits with an optional sign |
+| `int64(key)` | `Int64` | the same, in Int64's range |
+| `float(key)` | `Float64` | a finite decimal or exponent number |
+| `bool(key)` | `Bool` | `true`, `1`, `yes`, `on`, `false`, `0`, `no`, `off`, in any case |
+
+Each takes `from:` (`:any`, the default, which searches url, then query,
+then form body as `env.params["key"]?` does; or `:url`, `:query`, `:body`)
+and `default:`. The default is used only when the parameter is missing: one
+that was sent and is not the type is still a 422. Reading is strict: `" 12"`,
+`"12abc"`, `"0x1f"` and `""` are not integers, and `"nan"` and `"inf"` are not
+numbers, so nothing turns a client's mistake into a silent `0`.
+
+A route's block is kept and called later, so `!` cannot leave it (the
+compiler says so). `next` the error, as above, and the router answers it with
+its status. Inside a `def`, `env.params.int("id")!` does the same.
 
 ### Typed JSON bodies
 
@@ -1504,6 +1545,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/response` | `Response` |
 | `web/iyi_web/params` | `Params`, `json_as` |
 | `web/iyi_web/validation` | `BodyError`, `Validate`, `Validator`, `read_json`: typed JSON bodies and their checks |
+| `web/iyi_web/coerce` | `ParamError`, `decode_param`: parameters read as `Int32`, `Int64`, `Float64`, `Bool`, enums |
 | `web/iyi_web/multipart` | `FileUpload` and the `multipart/form-data` parser |
 | `web/iyi_web/cookies` | `CookieJar` |
 | `web/iyi_web/headers` | `Headers` |

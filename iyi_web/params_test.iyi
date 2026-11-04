@@ -4,6 +4,7 @@ module iyi_web/params_test
 
 import std/json::{serializable}
 import iyi_web/params::{Params}
+import iyi_web/coerce::{ParamError}
 import iyi_web/request::{Request}
 import iyi_web/headers::{Headers}
 import iyi_web/validation::{BodyError}
@@ -221,4 +222,50 @@ def typed(content_type : String, body : String) : Request
   headers = Headers.new
   headers["Content-Type"] = content_type
   Request.new("POST", "/", "", "HTTP/1.1", headers, body)
+end
+
+describe "typed lookups" do
+  headers = Headers.new
+  headers["Content-Type"] = "application/x-www-form-urlencoded"
+  req = Request.new("POST", "/notes/7", "page=3&id=query&flag=on&ratio=0.25&big=9000000000&blank=", "HTTP/1.1", headers, "page=body&n=12abc")
+  params = Params.from(req, {"id" => "7"})
+
+  it "reads each type strictly from the source asked" do
+    assert params.int("id").or_panic == 7
+    assert params.int("page", from: :query).or_panic == 3
+    assert params.bool("flag").or_panic == true
+    assert params.float("ratio").or_panic == 0.25
+    assert params.int64("big").or_panic == 9000000000_i64
+    assert params.string("page", from: :body).or_panic == "body"
+  end
+
+  it "answers a default only for a missing parameter, never for a wrong one" do
+    assert params.int("per_page", from: :query, default: 20).or_panic == 20
+    assert params.bool("draft", default: false).or_panic == false
+    wrong = params.int("n", from: :body, default: 1)
+    assert wrong.is_a?(ParamError)
+    if wrong.is_a?(ParamError)
+      assert wrong.status == 422
+      assert wrong.fields == {"n" => "must be an integer"}
+      assert wrong.message == "invalid form parameters: n must be an integer"
+    end
+  end
+
+  it "names a missing parameter, and an empty one as not its type" do
+    missing = params.int("id", from: :query)
+    assert missing.is_a?(ParamError)
+    if missing.is_a?(ParamError)
+      assert missing.fields == {"id" => "must be an integer"}
+    end
+    absent = params.int("nope")
+    assert absent.is_a?(ParamError)
+    if absent.is_a?(ParamError)
+      assert absent.fields == {"nope" => "is required"}
+      assert absent.message == "invalid request parameters: nope is required"
+    end
+    blank = params.int("blank", from: :query)
+    assert blank.is_a?(ParamError)
+    assert params.string("blank", from: :query).or_panic == ""
+    assert params.int("2147483648").is_a?(ParamError)
+  end
 end

@@ -10,6 +10,7 @@ module examples/templates
 
 import std/list::{List}
 import iyi_web/dsl::*
+import iyi_web/coerce::{ParamError}
 
 struct Book
   getter id : Int32
@@ -46,8 +47,11 @@ get "/" do |env|
   render "views/books.eiy", "views/layout.eiy"
 end
 
+# `env.params.int` reads `:id` as a number: `/books/abc` is answered 422,
+# naming the parameter, rather than looked up as book 0.
 get "/books/:id" do |env|
-  id = env.params.url["id"].to_i? || 0
+  id = env.params.int("id", from: :url)
+  next id if id.is_a?(ParamError)
   if book = BOOKS.find { |candidate| candidate.id == id }
     render "views/book.eiy", "views/layout.eiy"
   else

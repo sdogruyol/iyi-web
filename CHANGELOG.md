@@ -13,6 +13,12 @@ Removed, and `docs/templates.md` for the migration).
 
 ### Added
 
+- Typed parameter lookups: `env.params.int("id")`, `int64`, `float`,
+  `bool` and `string` answer the value or a `ParamError` (422, naming the
+  parameter), with `from: :url | :query | :body` and `default:`. Reading
+  is strict: `"12abc"`, `" 12"` and `""` are not integers, `nan` and
+  `inf` are not numbers (`iyi_web/coerce`, `iyi_web/params`).
+- `json_errors(root, T)` in `iyi_web/validation`, used by the above.
 - `raw(value)` (in `iyi_web/dsl` and `iyi_web/templates`): `value.to_s` as
   `SafeHTML`, printed by `<%= %>` without escaping.
 - `SafeHTML` and `HTMLBuffer` in `iyi_web/templates`.
@@ -37,6 +43,8 @@ Removed, and `docs/templates.md` for the migration).
 - Templates are translated by iyi-web's own compile-time program,
   `iyi_web/templates/process.iyi`, instead of std/eiy's `eiy/process`; tags,
   `<%- -%>` trimming, comments and error positions are unchanged.
+- `examples/templates.iyi` reads its `:id` capture with `env.params.int`, so
+  a word there is a `422`.
 
 ### Removed
 
