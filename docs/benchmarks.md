@@ -49,30 +49,31 @@ Results go to `bench/compare/results.json` and `bench/compare/results.md`
 
 ### Results
 
-Measured 2026-11-04 with `bash bench/compare/run.sh` (defaults):
+Measured 2026-11-04 with `bash bench/compare/run.sh` (defaults), on the
+`roadmap` branch after the move onto std/http, with nothing else running:
 
 | Framework | `/plaintext` req/s | `/json` req/s | `/users/42` req/s |
 |---|---:|---:|---:|
-| iyi-web | 59754 | 53627 | 68612 |
-| FastAPI | 26627 | 27704 | 22848 |
+| iyi-web | 100281 | 96859 | 95052 |
+| FastAPI | 41937 | 41209 | 34632 |
 | Express | skipped: node not found on PATH | | |
-| Kemal | 12406 | 12374 | 12927 |
-| Go net/http | 64358 | 51612 | 55107 |
+| Kemal | 14970 | 15384 | 15886 |
+| Go net/http | 87599 | 78822 | 77650 |
 
 | Framework | Endpoint | req/s | p50 ms | p99 ms | non-200 / errors |
 |---|---|---:|---:|---:|---:|
-| iyi-web | `/plaintext` | 59754 | 0.685 | 8.652 | 0 |
-| iyi-web | `/json` | 53627 | 0.694 | 9.649 | 228 |
-| iyi-web | `/users/42?fields=name,email` | 68612 | 0.617 | 6.719 | 0 |
-| FastAPI | `/plaintext` | 26627 | 1.554 | 21.301 | 0 |
-| FastAPI | `/json` | 27704 | 1.540 | 20.352 | 0 |
-| FastAPI | `/users/42?fields=name,email` | 22848 | 1.757 | 22.111 | 0 |
-| Kemal | `/plaintext` | 12406 | 3.804 | 20.751 | 0 |
-| Kemal | `/json` | 12374 | 3.940 | 19.536 | 0 |
-| Kemal | `/users/42?fields=name,email` | 12927 | 3.817 | 17.927 | 0 |
-| Go | `/plaintext` | 64358 | 0.421 | 8.767 | 0 |
-| Go | `/json` | 51612 | 0.437 | 11.920 | 0 |
-| Go | `/users/42?fields=name,email` | 55107 | 0.423 | 11.067 | 0 |
+| iyi-web | `/plaintext` | 100281 | 0.461 | 2.609 | 0 |
+| iyi-web | `/json` | 96859 | 0.481 | 2.791 | 0 |
+| iyi-web | `/users/42?fields=name,email` | 95052 | 0.481 | 2.958 | 0 |
+| FastAPI | `/plaintext` | 41937 | 1.200 | 7.758 | 0 |
+| FastAPI | `/json` | 41209 | 1.232 | 7.748 | 0 |
+| FastAPI | `/users/42?fields=name,email` | 34632 | 1.496 | 9.369 | 0 |
+| Kemal | `/plaintext` | 14970 | 3.312 | 15.110 | 0 |
+| Kemal | `/json` | 15384 | 3.256 | 14.452 | 0 |
+| Kemal | `/users/42?fields=name,email` | 15886 | 3.160 | 14.149 | 0 |
+| Go | `/plaintext` | 87599 | 0.337 | 5.921 | 0 |
+| Go | `/json` | 78822 | 0.320 | 7.395 | 0 |
+| Go | `/users/42?fields=name,email` | 77650 | 0.332 | 7.363 | 0 |
 
 - Machine: Windows 10.0.26200.9711, QEMU Virtual CPU version 2.5+, 12
   logical cores, a virtual machine.
@@ -90,20 +91,19 @@ Measured 2026-11-04 with `bash bench/compare/run.sh` (defaults):
   Windows I/O path is a different code path from its Linux one. These
   numbers rank the frameworks on this machine; they are not what any of
   them does on a Linux server with a separate load generator.
-- **The machine was not quiet.** Other builds and test suites were running
-  on it during the run. A shorter trial run earlier the same day (2 s per
-  endpoint) gave iyi-web about 87,000-90,000 req/s and Go about
-  69,000-77,000 req/s on the same endpoints, with Kemal at about 13,000:
-  the order held, the absolute numbers moved by a third. Run it more than
-  once before quoting a number.
+- **Run it more than once.** An earlier run the same day on the old
+  transport, while other builds and test suites were running, gave
+  iyi-web 54,000-69,000 req/s, Go 52,000-64,000, FastAPI 23,000-28,000
+  and Kemal about 12,000: the order of FastAPI and Kemal held, the absolute
+  numbers moved by a third or more. Quote a number only after repeating it.
 - **Kemal on Windows.** Kemal served about 10,200 req/s on `/json` with one
   thread (`CRYSTAL_WORKERS=1`) and about 12,400 with twelve: Crystal's
   Windows event loop, not Kemal's routing, is the likely limit here. Kemal
   on Linux is a different result.
-- **iyi-web's 228 errors on `/json`.** 228 of about 536,000 requests in
-  that run were not answered `200`; the trial run, the other two endpoints
-  and the other frameworks had none. The run did not record which errors
-  they were, and this has not been reproduced or explained yet.
+- **Non-200 answers.** That earlier run on the old transport had 228 of
+  about 536,000 `/json` requests not answered `200`; the run did not record
+  which. The transport they came from has since been replaced, and no run
+  on std/http has had any.
 - **Express was not measured** because Node.js is not installed on this
   machine. Its app (`bench/compare/express/`, Express 5 under
   `node:cluster`) and the runner's support for it are there; on a machine
@@ -180,6 +180,4 @@ not a number):
 | End to end, parameter route | 25,310 req/s | 27,004 req/s |
 
 A request head is no longer copied into a string and parsed a second time.
-`bench/compare` with iyi-web alone after the move gave 65,780 req/s on
-`/plaintext`, 60,286 on `/json` and 81,050 on `/users/42`, with no
-non-200 answers; the cross-framework table above predates it.
+The cross-framework table above was measured after the move.

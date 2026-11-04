@@ -78,18 +78,18 @@ dokümanı**. Express'in önündeki asıl engel kod değil, ekosistem.
 
 ## Rakiplerle yan yana
 
-| | FastAPI | Express | Kemal | iyi-web bugün |
-|---|---|---|---|---|
-| 3 satırda hello | ✅ | ✅ | ✅ | ✅ |
-| Tipli parametre | ✅ | ❌ | ❌ | ⚠️ sadece JSON body |
-| Validasyon | ✅ Pydantic | ❌ (paketle) | ❌ | ✅ |
-| OpenAPI + UI | ✅ | ❌ (paketle) | ❌ | ❌ |
-| DI | ✅ `Depends` | ❌ | ❌ | ❌ |
-| Çok çekirdek | ⚠️ worker process'leri | ⚠️ cluster | ✅ | ✅ + derleme anında race kontrolü |
-| HTTP/2 | ⚠️ sunucuya bağlı | ⚠️ | ❌ | ❌ (std'de var) |
-| WebSocket/SSE | ✅ | ⚠️ paketle | ✅ | ✅ |
-| Session/CSRF dahili | ❌ | ❌ | ⚠️ ayrı shard | ✅ |
-| Ekosistem | 🟢 dev | 🟢 dev | 🟡 | 🔴 |
+| | FastAPI | Express | Kemal | iyi-web (inceleme anı) | iyi-web (roadmap sonrası) |
+|---|---|---|---|---|---|
+| 3 satırda hello | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Tipli parametre | ✅ | ❌ | ❌ | ⚠️ sadece JSON body | ✅ `path:`/`query:`/`headers:`/`body:` |
+| Validasyon | ✅ Pydantic | ❌ (paketle) | ❌ | ✅ | ✅ |
+| OpenAPI + UI | ✅ | ❌ (paketle) | ❌ | ❌ | ✅ derleme anında, `/docs` |
+| DI | ✅ `Depends` | ❌ | ❌ | ❌ | ✅ `deps:` + `Dep` |
+| Çok çekirdek | ⚠️ worker process'leri | ⚠️ cluster | ✅ | ✅ + derleme anında race kontrolü | ✅ + `Store(T)` |
+| HTTP/2 | ⚠️ sunucuya bağlı | ⚠️ | ❌ | ❌ (std'de var) | ✅ h2c + ALPN h2 |
+| WebSocket/SSE | ✅ | ⚠️ paketle | ✅ | ✅ | ✅ |
+| Session/CSRF dahili | ❌ | ❌ | ⚠️ ayrı shard | ✅ | ✅ |
+| Ekosistem | 🟢 dev | 🟢 dev | 🟡 | 🔴 | 🟡 CLI, DB örneği, metrics/tracing; topluluk hâlâ küçük |
 
 ## ELI5 roadmap
 
