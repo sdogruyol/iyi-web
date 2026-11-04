@@ -50,9 +50,8 @@ a route returns is checked when the program compiles.
 
 ## Requirements
 
-[iyi](https://iyi-lang.com) 0.20.0 or later (the first release that
-has what follows): `spawn_parallel`, the pool every connection is served
-on, and the `@[Share(serial: workers, crossing: ...)]` mark every
+[iyi](https://iyi-lang.com) 0.20.1 or later: `spawn_parallel`, the pool
+every connection is served on, and the `@[Share(serial: workers, crossing: ...)]` mark every
 registration carries, so a refusal is made on your line and names both
 ways past it.
 TLS (`std/tls`'s server), the streaming compressor (`std/compress`'s
