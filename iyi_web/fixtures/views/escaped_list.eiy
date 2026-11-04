@@ -1,0 +1,1 @@
+<ul><%= render "escaped_item.eiy" %></ul>|<%= page %>|<%= raw(page) %>

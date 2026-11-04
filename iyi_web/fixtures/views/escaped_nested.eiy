@@ -1,0 +1,1 @@
+[<%= render "escaped_content_for.eiy", "layout_with_yield.eiy" %>]

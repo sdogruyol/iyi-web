@@ -1,0 +1,2 @@
+<p>ok</p>
+<p><%= nonexistent_name %></p>
