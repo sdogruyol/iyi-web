@@ -181,7 +181,7 @@ Found later and fixed:
 | WebSocket | `ws`, `Router#ws`; handshake with 101, 400, 403 (`websocket_allowed_origins`), 405 and 426; `on_message`, `on_binary`, `on_ping`, `on_pong`, `on_close`, `send`, `send_binary`, `ping`, `pong`, `close`; sends from any fiber |
 | Static files | gzip and deflate (`Vary`) at any size, compressed as the file is read; precompressed `.gz` files; 304 via ETag/Last-Modified, Range (206, 416, `multipart/byteranges`), `dir_index`, `dir_listing`, a trailing-`/` redirect for directories, `static_headers`, `nosniff`, `Accept-Ranges`; files streamed from disk, HEAD without reading them; types from `std/mime` |
 | `send_file` | Range, gzip under Kemal's conditions, `disposition:`, filename encoding, streamed from disk, HEAD without reading the file; `send_data` for bytes in memory |
-| Templates | `render` (with a layout), `content_for`, `yield_content`; nested `render` works |
+| Templates | `render` (with a layout), `content_for`, `yield_content`; nested `render` works; `<%= %>` escapes what it prints unless it is marked `raw(...)` (Kemal's ECR does not escape) |
 | Context | `set`/`get`/`get?`, `route_pattern`, `route_found?`. A value of any type is stored and read back by type, `env.get("user", User)`, in place of `add_context_storage_type` and `.as(User)` |
 | Helpers | Everything in the row; `status` takes the code as an `Int32` rather than an `HTTP::Status` |
 | Middleware | `only`/`exclude`, `use(handler, position)`, `use(path, [handlers])`, `CompressHandler` |

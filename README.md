@@ -41,7 +41,8 @@ a route returns is checked when the program compiles.
 - Response compression, CORS and HTML form method override
 - Basic authentication, security headers, request ids and per-client rate
   limiting
-- Templates with layouts, compiled into the program
+- Templates with layouts and partials, compiled into the program, escaping
+  every value they print unless it is marked as markup
 - Command-line flags for host, port and TLS
 - HTTPS and `wss://` with iyi's own TLS 1.3
 - Persistent connections, each served by its own fiber
@@ -1140,10 +1141,8 @@ end
 ## Templates
 
 ```iyi
-import std/html::{HTML}
-
-get "/profile/:name" do |env|
-  name = HTML.escape(env.params.url["name"])
+get "/profile" do |env|
+  name = env.params.query["name"]? || "stranger"
   render "views/profile.eiy", "views/layout.eiy"
 end
 ```
@@ -1165,6 +1164,18 @@ end
 </html>
 ```
 
+`curl -G localhost:3000/profile --data-urlencode 'name=<script>alert(1)</script>'`
+prints
+
+```html
+<!DOCTYPE html>
+<html>
+<head><title>Profile of &lt;script&gt;alert(1)&lt;/script&gt;</title></head>
+<body><h1>Hello, &lt;script&gt;alert(1)&lt;/script&gt;</h1>
+</body>
+</html>
+```
+
 Templates use iyi's `.eiy` format: `<%= expr %>` prints a value and
 `<% code %>` runs iyi code. They are compiled into the program, and see the
 local variables where `render` is written: a route block, or a method, as a
@@ -1177,8 +1188,14 @@ controller's `def show(name : String) : String` with `render` inside.
   nothing.
 - A template path is relative to the file that calls `render`, or, for a
   template rendered inside another template, to that template.
-- Output is not escaped automatically; escape untrusted text with
-  `HTML.escape`.
+- `<%= expr %>` prints `expr.to_s` HTML-escaped, as `HTML.escape` does, in
+  an element or an attribute alike. `raw(value)` prints markup the program
+  built or trusts as it is, as `<%= raw(csrf_tag(env)) %>`; a layout's
+  `content`, `yield_content` and a `render` inside a template are markup
+  already and are not escaped again.
+
+[docs/templates.md](docs/templates.md) has the details of autoescape and
+the migration from 0.5, where `<%= %>` printed values as they were.
 
 ## Every core
 
@@ -1496,7 +1513,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/cli` | `CLIParser` |
 | `web/iyi_web/event_stream` | `EventStream` |
 | `web/iyi_web/websocket` | `WebSocket`, `Frame`, `FrameError` |
-| `web/iyi_web/templates` | `render`, `content_for`, `yield_content` |
+| `web/iyi_web/templates` | `render`, `content_for`, `yield_content`, `raw`, `SafeHTML` ([Templates](docs/templates.md)) |
 | `web/iyi_web/compress` | `CompressHandler` |
 | `web/iyi_web/content_coding` | `Accept-Encoding` negotiation, `Vary` and `ETag` helpers, `COMPRESS_MIN_SIZE` |
 | `web/iyi_web/failure` | `StatusError`, the built-in error pages |
@@ -1534,7 +1551,7 @@ iyi run examples/json_api.iyi -- -p 8080
 | `json_api.iyi` | CRUD over an in-memory store with `env.json`, `env.params.json`, status codes and `404` via `halt` |
 | `typed_json.iyi` | JSON bodies read into a type with `json_as`, `Validate` rules, `400`/`415`/`422` answers, and responses written from `derive serializable` types |
 | `forms_and_uploads.iyi` | Form fields, multipart uploads with limits, and `_method` override |
-| `templates.iyi` | Views in `examples/views/` with a layout, `content_for` and a partial |
+| `templates.iyi` | Views in `examples/views/` with a layout, `content_for`, a partial and autoescape |
 | `routers.iyi` | `Router`, `mount`, `namespace`, router filters and error pages |
 | `middleware.iyi` | A custom `Handler` with `only` and `exclude`, CORS, gzip and static files from `examples/public/` |
 | `streaming_and_sse.iyi` | `flush`, chunked responses and server-sent events |
