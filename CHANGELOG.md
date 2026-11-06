@@ -14,6 +14,9 @@ std/http's: `Response#attach` takes `(sink, head)`, `Response#reusable?`
 and `iyi_web/intake` are gone, and std/http caps every request body at
 64 MiB (see Changed and Removed, and `docs/transport.md`).
 
+<!-- Release: bump WEB_VERSION in cmd/scaffold.iyi (0.5.1) to the release
+     that ships the iyi-web command, so new projects require it. -->
+
 ### Added
 
 - Typed parameter lookups: `env.params.int("id")`, `int64`, `float`,
@@ -69,19 +72,85 @@ and `iyi_web/intake` are gone, and std/http caps every request body at
   in order before the server is bound; one that answers an `Error` or panics
   stops the start, and the program exits 1 naming the hook's file and line
   (`could not start: on_start (app.iyi:3) failed: ...`). Stop hooks run
-  after the drain, the last written first; one that fails is reported and
-  the rest still run. Blocks are checked like a route's; `workers: 1` keeps
-  one unchecked without putting the server on one thread. `Lifecycle`,
-  `lifecycle_hook` and `LIFECYCLE` run hooks as a value, for tests.
-- A guide in `docs/`: `lifecycle-and-background.md`, the start and stop
-  hooks.
+  after the drain and the background tasks, the last written first; one
+  that fails is reported and the rest still run. Blocks are checked like a
+  route's; `workers: 1` keeps one unchecked without putting the server on
+  one thread. `Lifecycle`, `lifecycle_hook` and `LIFECYCLE` run hooks as a
+  value, for tests.
+- Background tasks (`iyi_web/background`): `env.background { }` in a route
+  and `background { }` anywhere run work off the request path on whichever
+  worker is free. A panic is caught, reported on standard error (or through
+  `on_panic`) and counted; it never reaches the server. The stop waits up to
+  `shutdown_timeout` for queued and running tasks, then cancels the rest,
+  before the `on_stop` hooks. Outside a running server the work runs at
+  once, isolated. `Background` is the runner as a value (`run`, `close`,
+  `pending`, `panics`, `completed`, `running?`, `closing?`); `BACKGROUND`
+  is the process's, started beside the listener by `run`.
+- Stores (`iyi_web/store`): shared state every worker may change without
+  the `Mutex` showing. `HashStore(K, V)` and `ArrayStore(E)` start empty
+  and copy out what a route wants (`values`, `keys`, `to_h`, `to_a`,
+  `[]?`, `size`), as `Array(V)`, `Hash(K, V)` and so on; `Store(T)` holds
+  whatever its block makes, with `get`, `set` and `replace`. All run a
+  block under the lock with `read` and `update`, and are `Share`, so
+  routes, handlers and background tasks capture them on every core.
+- Prometheus metrics (`iyi_web/metrics`): `MetricsHandler` counts
+  `http_requests_total{method,route,status}`, times
+  `http_request_duration_seconds{method,route}` over Prometheus' default
+  buckets and gauges `http_requests_in_flight`, labelling by route pattern
+  (`/users/:id`), never by raw path, and serves the text exposition format
+  at `/metrics`. `MetricsRegistry` (`METRICS` by default) makes `Counter`s,
+  `Gauge`s, `Histogram`s and `gauge_function`s of an application's own; each
+  family is behind its own lock.
+- Tracing (`iyi_web/tracing`): `TraceHandler` records a span per request,
+  the child of an incoming W3C `traceparent` (version `ff`, upper-case hex,
+  zero ids and bad lengths refused) with its `tracestate` passed on, named by
+  route pattern, with OpenTelemetry's HTTP attributes; `current_span(env)`
+  adds the route's own attributes and events, and `Span#traceparent` carries
+  the trace downstream. Spans go through a bounded `BatchSpanProcessor`
+  drained by a background task, flushed when the server stops, to a
+  `SpanExporter`: `OtlpHttpExporter` posts OTLP/HTTP JSON to a collector,
+  `JsonLinesExporter` writes one JSON line per span.
+- `examples/observability.iyi`: a `HashStore`, metrics, tracing to a collector
+  or standard output, background work and start/stop hooks together.
+- Guides in `docs/`: `lifecycle-and-background.md`, `state.md`,
+  `observability.md` and `plugins.md` (writing, testing and publishing a
+  handler package).
 - `raw(value)` (in `iyi_web/dsl` and `iyi_web/templates`): `value.to_s` as
   `SafeHTML`, printed by `<%= %>` without escaping.
 - `SafeHTML` and `HTMLBuffer` in `iyi_web/templates`.
 - `docs/templates.md`, with autoescape and the migration from 0.5.
 - `examples/templates.iyi` has a `/search` page that prints the visitor's
   query in an attribute and a heading, and a `raw` rating.
-- Docs: `docs/transport.md`.
+- The `iyi-web` command (`cmd/`, `iyi build --release cmd/iyi_web.iyi -o
+  bin/iyi-web`):
+  - `iyi-web new DIR [--api | --full] [--web-path PATH]` writes a project
+    that builds and passes its own test: `iyi.mod` requiring iyi-web as
+    `web`, `app.iyi`, routes in their own module, an in-process
+    `app_test.iyi`, `.gitignore`; `--api` a validated JSON CRUD of typed
+    routes (`path: Int32`, `body:`, `response:`) over a `HashStore`, `--full`
+    views in a layout and `public/`. `--web-path` adds a `replace` line
+    for a local checkout. A non-empty directory is refused before anything
+    is written.
+  - `iyi-web dev [ENTRY] [--watch DIR] [--interval MS] [-- ARGS]` builds
+    and runs the app, rebuilds on a saved
+    `*.iyi`/`*.eiy`/`*.ecr`/`iyi.mod` change and restarts it on success; a
+    failed build prints the compiler's error and keeps the previous build
+    serving. Changes under `public/` are reported without a rebuild.
+    Ctrl-C/TERM stops the app, then dev. Same-second saves of the same
+    size are caught by comparing text.
+- `examples/postgres/`: a standalone project on iyilang/db + iyilang/pg
+  with a pool from `DATABASE_URL`, migrations applied at start under an
+  advisory lock, a JSON CRUD with validated bodies, `DBError` answered as
+  `503`, and `smoke.sh`.
+- Docs: `docs/cli.md`, `docs/database.md`, `docs/benchmarks.md`,
+  `docs/transport.md`.
+- A documentation site: `mkdocs.yml` builds `docs/` with mkdocs-material
+  (`mkdocs build --strict`, run by CI's new `docs` job). The README's
+  reference sections are guide pages there (routing, parameters, requests
+  and responses, errors, routers, sessions and CSRF, middleware, security,
+  static files, every core, configuration, testing, WebSockets and SSE,
+  deployment, modules), and `docs/tutorial.md` builds a typed JSON API
+  step by step, from `iyi-web new --api` to a release build.
 - HTTP/2 (`docs/transport.md`): h2c with prior knowledge beside HTTP/1.1
   on the same port, and h2 over TLS by ALPN. A TLS config that names no
   protocol is offered `["h2", "http/1.1"]` when the server binds it, and
@@ -128,12 +197,21 @@ and `iyi_web/intake` are gone, and std/http caps every request body at
   per combination of the typed options, and takes `response:`, `status:`,
   `summary:`, `description:` and `tags:`. `get "/" do |env| ... end`
   keeps working unchanged.
-- `run`, after the drain, runs the `on_stop` hooks before returning.
-- `examples/templates.iyi` and `examples/testing/notes.iyi` read their `:id`
-  captures with `path: Int32`, so a word there is a `422`.
-- The README's install lines name `@v0.5.1`, the latest release, and
-  `iyi-web-vs-kemal.md`'s status names iyi 0.20.1, the 48 test files and
-  the fourteen examples.
+- `Context` imports `iyi_web/background` for `Context#background`, and
+  `iyi_web/log`'s `STDOUT_LOCK` is exported so other writers to standard
+  output share the request log's lock.
+- `run` runs the background runner beside the listener and, after the
+  drain, closes it and runs the `on_stop` hooks before returning.
+- `.gitignore` ignores `.iyi-web/` (dev builds) and the postgres
+  example's binary.
+- `examples/typed_json.iyi` and `examples/openapi_auth.iyi` keep their notes
+  in a `HashStore` and serve on every core (`typed_json` no longer registers its
+  routes with `workers: 1`); `examples/templates.iyi`,
+  `examples/observability.iyi` and `examples/testing/notes.iyi` read their
+  `:id` captures with `path: Int32`, so a word there is a `422`.
+- The README is an introduction that links the docs site; what it held is
+  in `docs/`, with stale statements fixed (the rate limiter's lock, the
+  WebSocket chat needing `workers: 1`, `@v0.5.1` in the install lines).
 - The transport is std/http's `Server.handle`, one call per connection;
   iyi-web keeps its accept loop, worker pool, drain, timeouts, `408`, head
   bounds (`414`/`431`) and body limit (`413`) in a thin layer over the

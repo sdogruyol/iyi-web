@@ -80,7 +80,7 @@ jobs:
       - name: What the next release has to be
         run: iyi mod release
 
-  # Benchmarks (bench/, README, Benchmarks), on the latest iyi. A pull
+  # Benchmarks (bench/, docs/benchmarks.md), on the latest iyi. A pull
   # request runs its own benchmark programs against the base branch's
   # library and against its own, on one runner, and compares them in the job
   # summary; a push to master records its results as an artifact.
@@ -178,3 +178,20 @@ jobs:
           name: bench-results
           path: ${{ runner.temp }}/bench/
           if-no-files-found: ignore
+
+  # The documentation site (mkdocs.yml, docs/): every page builds, and
+  # every link and anchor between pages resolves, or the job fails.
+  docs:
+    runs-on: ubuntu-24.04
+    env:
+      NO_MKDOCS_2_WARNING: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install mkdocs-material
+
+      - run: mkdocs build --strict

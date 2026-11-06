@@ -1,7 +1,8 @@
-# Lifecycle hooks
+# Lifecycle hooks and background tasks
 
-Some work happens around requests rather than inside them: what an
-application does once when it starts and once when it stops.
+Two things happen around requests rather than inside them: the work an
+application does once when it starts and once when it stops, and the work a
+request starts and does not wait for. `examples/observability.iyi` uses both.
 
 ## Start and stop hooks
 
@@ -43,7 +44,10 @@ first INT or TERM (Ctrl-C or Ctrl-Break on Windows):
 
 1. the listener closes and the requests in flight finish, for up to
    `shutdown_timeout` seconds;
-2. the `on_stop` hooks run, the last written first, so what was opened last
+2. the background tasks still queued or running finish, for up to
+   `shutdown_timeout` seconds more, and what is still running then is
+   cancelled;
+3. the `on_stop` hooks run, the last written first, so what was opened last
    is closed first.
 
 A stop hook that fails, by an error value or a panic, is reported on
@@ -91,3 +95,83 @@ assert hooks.run_stop.empty?        # the messages of the stop hooks that failed
 
 `lifecycle` (or `LIFECYCLE`) is the application's own, the one `on_start`
 and `on_stop` add to.
+
+## Background tasks
+
+```iyi
+post "/signup" do |env|
+  email = env.params.body["email"]
+  env.background { Mailer.welcome(email) }
+  env.status(201).text("welcome")
+end
+```
+
+`env.background { }` inside a route, or `background { }` anywhere, runs the
+block off the request path: the call returns at once, the response goes
+out, and the block runs on whichever worker is free. FastAPI's
+`BackgroundTasks` runs its tasks after the response on the request's own
+event loop; here they run in parallel with every request, on every core.
+
+- **A panic stays in its task.** It is caught at the task's boundary,
+  reported (`background task panicked: MESSAGE` on standard error, after
+  the runtime's own panic line), counted, and the server goes on.
+- **The stop waits for them.** Queued and running tasks get up to
+  `shutdown_timeout` seconds after the requests have drained; then those
+  still running are cancelled - a `sleep` or a socket wait answers
+  `Cancelled` - and the `on_stop` hooks run. A task computing without ever
+  waiting is not interrupted; the stop waits for it.
+- **Outside a running server** - a test through `web/iyi_web/harness`, a
+  script, an `on_start` hook, or once the stop has begun - nothing would
+  ever take a queued task, so `background` runs the block at once, on the
+  caller's task, still isolated: a panic is reported and the caller goes
+  on. A harness test sees the work done when `dispatch` returns.
+
+### What a background block may capture
+
+The block runs on another worker, so it is checked as a route's block is,
+and there is no `workers: 1` way past it. Copy what it needs from the
+request into locals first - `env` itself is the request's, not `Share` - and
+keep shared state in a [`Store`](state.md), an `Atomic` or behind a `Mutex`:
+
+```iyi
+SENT = Atomic(Int32).new(0)
+
+post "/orders" do |env|
+  id = env.params.body["id"]
+  env.background do
+    Receipts.send(id)
+    SENT.add(1)
+  end
+  "queued"
+end
+```
+
+### The runner as a value
+
+`web/iyi_web/background` exports `Background`, the runner, and
+`BACKGROUND`, the process's own, which `run` starts beside the listener. A
+test or a program of its own can run one:
+
+```iyi
+import web/iyi_web/background::{Background}
+
+pool = Background.new
+pool.on_panic { |message| ERRORS.update { |e| e << message; nil } }
+group do |g|
+  g.spawn do
+    pool.run                       # takes jobs until close
+    0
+  end
+  g.spawn do
+    pool.spawn { work }
+    pool.close(Span.seconds(5))    # waits for the jobs, at most 5 s
+    0
+  end
+end
+pool.completed                     # jobs that ended, pool.panics those that panicked
+```
+
+`pending` is the number queued or running, `running?` whether a runner is
+taking jobs, and `closing?` whether one is finishing: a job that waits on
+purpose, such as a batch of spans held back for more to arrive, stops
+waiting when it sees it.
