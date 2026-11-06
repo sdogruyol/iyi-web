@@ -10,6 +10,8 @@ import std/file::{File}
 import std/json::{JSON}
 import std/mime::{MIME}
 import std/time::{Time}
+import std/shared_proc::{SharedProc}
+import iyi_web/background::{BACKGROUND}
 import iyi_web/request::{Request}
 import iyi_web/response::{Response}
 import iyi_web/params::{Params}
@@ -411,6 +413,17 @@ pub class Context
 
   pub def [](key : String) : String
     self[key]? || raise "no string stored under #{key.inspect}"
+  end
+
+  # Work this request starts and does not wait for, on a worker of its
+  # own; see `iyi_web/background`. The block may capture only `Share`
+  # values, so copy what it needs from the request first:
+  #
+  #     email = env.params.body["email"]
+  #     env.background { send_welcome(email) }
+  @[Share]
+  pub def background(&block : -> Nil) : Nil
+    BACKGROUND.submit(SharedProc(Nil, Nil).of { |_| block.call })
   end
 end
 

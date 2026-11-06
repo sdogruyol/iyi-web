@@ -38,6 +38,7 @@ import iyi_web/event_stream::{EventStream}
 import iyi_web/websocket::{WebSocket}
 import iyi_web/cli::{CLIParser, cli_parser}
 import iyi_web/lifecycle::{LIFECYCLE, LifecycleHook, hook_outcome, lifecycle_hook}
+import iyi_web/background::{BACKGROUND, BackgroundJob}
 pub import iyi_web/templates
 
 # Templates from `iyi_web/templates`, so `import iyi_web/dsl::*` is enough. A
@@ -278,15 +279,25 @@ pub def on_start(*, workers : Int32? = nil, file : String = __FILE__, line : Int
   LIFECYCLE.add_start(hook, site)
 end
 
-# Runs once the server has stopped: after the requests in flight have
-# finished, or `shutdown_timeout` ran out. Several run the last written
-# first; one that fails is reported and the rest still run.
+# Runs once the server has stopped: after the requests in flight and the
+# background tasks have finished, or `shutdown_timeout` ran out. Several
+# run the last written first; one that fails is reported and the rest
+# still run.
 @[Share(serial: workers)]
 pub def on_stop(*, workers : Int32? = nil, file : String = __FILE__, line : Int32 = __LINE__, &block : -> B) : Nil forall B
   site = File.basename(file) + ":" + line.to_s
   what = "on_stop " + site
   hook = kept_serial?(workers, what) ? LifecycleHook.new(->(_none : Nil) { hook_outcome(block.call) }, what) : lifecycle_hook { block.call }
   LIFECYCLE.add_stop(hook, site)
+end
+
+# Work to do off the request path, on a worker of its own; see
+# `iyi_web/background`. Inside a route, `env.background { }` is the same.
+# The block may capture only `Share` values: copy what it needs from the
+# request into locals first.
+@[Share]
+pub def background(&block : -> Nil) : Nil
+  BACKGROUND.submit(BackgroundJob.of { |_| block.call })
 end
 
 class Holder
@@ -398,7 +409,9 @@ private def start_hooks(cfg : Config) : Nil
   end
 end
 
-# Once the listener has drained, the `on_stop` hooks run.
+# Beside the listener, the background runner (`iyi_web/background`); once
+# the listener has drained, the background tasks get up to
+# `shutdown_timeout` to finish, and then the `on_stop` hooks run.
 private def serve(server : Server, cfg : Config) : Nil
   group do |g|
     g.spawn do
@@ -406,7 +419,12 @@ private def serve(server : Server, cfg : Config) : Nil
       0
     end
     g.spawn do
+      BACKGROUND.run
+      0
+    end
+    g.spawn do
       server.listen
+      BACKGROUND.close(Span.seconds(cfg.shutdown_timeout.to_i64))
       LIFECYCLE.run_stop.each { |failure| puts "[" + cfg.env + "] " + cfg.app_name + ": " + failure }
       STDOUT.flush
       # Stopped some other way, or drained: nobody waits for a signal now.
