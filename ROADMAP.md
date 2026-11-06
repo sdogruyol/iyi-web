@@ -76,8 +76,8 @@ The state at the time of the review:
 10. **Some of the docs are stale.** The README says "TLS 1.3 only", but
     std/tls speaks 1.2 too now. `iyi-web-vs-kemal.md` says "33 test files";
     there are 42. The README shows `@v0.5.0`; the latest release is 0.5.1.
-    All the documentation is one 1,600-line README. *(The version and the
-    Kemal comparison's status are fixed in Phase 0.)*
+    All the documentation is one 1,600-line README. *(Fixed in Phases 0
+    and 5.)*
 
 ## Side by side with the competition
 
@@ -133,7 +133,7 @@ the docs matches what the code does.
 friends, and `on_start`/`on_stop` are in. The README's `@v0.5.0` examples and
 the status section of `iyi-web-vs-kemal.md` are updated; the TLS/HTTP
 version claims were fixed with Phase 4's transport work (README,
-`iyi-web-vs-kemal.md`: TLS 1.3 and 1.2, HTTP/2).
+`docs/configuration.md`, `iyi-web-vs-kemal.md`: TLS 1.3 and 1.2, HTTP/2).
 
 ### Phase 1: The waiter writes the order down right (the part that actually beats FastAPI)
 
@@ -244,7 +244,7 @@ everything by hand in the old building.
 `curl --http2` works.
 
 **Status:** done; two items wait on std. The transport is on `std/http`,
-and 48 test files pass on it; HTTP/2, streamed bodies, TLS 1.2/mTLS,
+and 52 test files pass on it; HTTP/2, streamed bodies, TLS 1.2/mTLS,
 autocert and zstd are in (see `docs/transport.md`). Request parsing went
 from 5966 to 3397 ns for a GET and from 2267 to 1688 ns for a form POST.
 `reuse_port` waits on std/socket, anything above 64 MiB on std/http.
@@ -253,23 +253,28 @@ from 5966 to 3397 ns for a GET and from 2267 to 1688 ns for a form POST.
 
 **ELI5:** Even the best kitchen stays empty if nobody knows the way.
 
-- [ ] **Database:** no new driver; use the existing
+- [x] **Database:** no new driver; use the existing
       [iyilang/db](https://github.com/iyilang/db),
       [iyilang/pg](https://github.com/iyilang/pg) and
       [iyilang/mysql](https://github.com/iyilang/mysql).
       The work on iyi-web's side: an example application on them, a
       README/docs section, and the pattern for handing a route a connection
       through Phase 3's `deps:`.
-- [ ] Project scaffolding with `iyi-web new myapp`, hot reload with
+- [x] Project scaffolding with `iyi-web new myapp`, hot reload with
       `iyi-web dev`.
-- [ ] A docs site: tutorial + reference (modelled on FastAPI's docs); the
+- [x] A docs site: tutorial + reference (modelled on FastAPI's docs); the
       1,600-line README is split up.
-- [ ] Shared-state ergonomics: a small `Store(T)` helper that hides the
+- [x] Shared-state ergonomics: a small `Store(T)` helper that hides the
       `Mutex` + `List` dance, so examples don't have to escape to
       `workers: 1`.
-- [ ] `/metrics` (Prometheus), OpenTelemetry trace middleware, background
+- [x] `/metrics` (Prometheus), OpenTelemetry trace middleware, background
       tasks.
-- [ ] A plugin guide on how to write community middleware.
+- [x] A plugin guide on how to write community middleware.
+
+**Status:** done. `examples/postgres`, `iyi-web new`/`dev`, the `docs/`
+site with `mkdocs.yml` and `docs/tutorial.md`, `Store(T)` (with
+`HashStore` and `ArrayStore`), metrics/tracing/background and
+`docs/plugins.md` are in; the README is down to an introduction.
 
 ### Phase 6: Enter the race (a public benchmark)
 

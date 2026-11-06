@@ -1,0 +1,84 @@
+# The `iyi-web` command: a new project, and a development loop.
+#
+#   iyi build --release cmd/iyi_web.iyi -o bin/iyi-web
+#
+#   iyi-web new myapp                 a small application: routes, a test
+#   iyi-web new myapi --api           a JSON API with a typed, validated body
+#   iyi-web new mysite --full         pages from views/, files from public/
+#   iyi-web dev                       build app.iyi, run it, rebuild on save
+#   iyi-web dev app.iyi -- -p 8080    arguments after -- go to the program
+#
+# Everything else is `iyi`'s: `iyi test`, `iyi build --release`, `iyi get
+# -u`. This program only writes files (cmd/scaffold.iyi) and drives the
+# compiler (cmd/dev.iyi); it builds nothing itself.
+module cmd/iyi_web
+
+import cmd/scaffold::*
+import cmd/dev::{DevOptions, dev, parse_dev_args}
+import cmd/usage::{UsageError}
+
+USAGE = <<-TEXT
+  usage: iyi-web COMMAND [options]
+
+    new DIR [--api | --full] [--web-path PATH]
+        Write a new application into DIR (created; refused if not empty).
+        --api        a JSON API: typed request bodies, validation, JSON errors
+        --full       HTML pages from views/ in a layout, static files in public/
+        --web-path   build against the iyi-web checkout at PATH (a replace
+                     line in iyi.mod) instead of the v#{WEB_VERSION} release
+
+    dev [ENTRY] [--watch DIR]... [--interval MS] [-- ARGS...]
+        Build ENTRY (app.iyi), run it, and rebuild and restart it when a
+        *.iyi, *.eiy or iyi.mod under its directory changes. A failed build
+        keeps the running program. ARGS go to the program.
+        --watch DIR    watch DIR as well (repeatable)
+        --interval MS  milliseconds between checks (500)
+
+    version   print the version
+    help      print this text
+
+  TEXT
+
+def fail(message : String) : Int32
+  STDERR.puts "iyi-web: " + message
+  STDERR.puts "run `iyi-web help` for usage"
+  2
+end
+
+def new_command(args : Array(String)) : Int32
+  options = parse_new_args(args)
+  return fail(options.message) if options.is_a?(UsageError)
+  dir = options.directory
+  case error = write_project(dir, scaffold_files(options.name, options.kind, options.web_path))
+  in ScaffoldError
+    fail(error.message)
+  in Nil
+    puts "created " + dir + " (" + options.kind.to_s.downcase + ")"
+    puts ""
+    puts "  cd " + dir
+    puts "  iyi test        # runs app_test.iyi"
+    puts "  iyi-web dev     # serves http://localhost:3000, rebuilds on save"
+    0
+  end
+end
+
+def dev_command(args : Array(String)) : Int32
+  options = parse_dev_args(args)
+  return fail(options.message) if options.is_a?(UsageError)
+  dev(options)
+end
+
+def main(args : Array(String)) : Int32
+  return fail("no command") if args.empty?
+  rest = args[1..]
+  case args[0]
+  when "new"                     then new_command(rest)
+  when "dev"                     then dev_command(rest)
+  when "version", "--version"    then puts("iyi-web " + WEB_VERSION); 0
+  when "help", "--help", "-h"    then print(USAGE); 0
+  else
+    fail("unknown command " + args[0])
+  end
+end
+
+exit main(Program.args)

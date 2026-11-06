@@ -1,0 +1,116 @@
+# Background work: off the caller's path while a runner runs, at once
+# without one, a panic caught and counted rather than spreading, and a
+# close that waits for the work and cuts off what outlives its timeout.
+module iyi_web/background_test
+
+import std/mutex::{Mutex}
+import std/time::{Span, Time}
+import iyi_web/background::{Background}
+import iyi_web/spec::*
+
+# *pool*'s runner beside *block*, closed with *timeout* when it returns.
+def with_runner(pool : Background, timeout : Span = Span.seconds(5), &block : -> Nil) : Nil
+  group do |g|
+    g.spawn do
+      pool.run
+      0
+    end
+    g.spawn do
+      # The runner's task starts once this one parks.
+      while !pool.running?
+        sleep(1)
+      end
+      block.call
+      pool.close(timeout)
+      0
+    end
+  end
+end
+
+describe "Background" do
+  it "runs the work at once, isolated, when no runner takes it" do
+    pool = Background.new
+    seen = Atomic(Int32).new(0)
+    pool.spawn { seen.add(1) }
+    assert_eq 1, seen.get
+    pool.spawn { raise "inline boom" }
+    pool.spawn { seen.add(1) }
+    assert_eq 2, seen.get
+    assert_eq 1, pool.panics
+    assert_eq 2, pool.completed
+    assert_eq 0, pool.pending
+  end
+
+  it "returns before the work is done while a runner runs, and close waits for it" do
+    pool = Background.new
+    done = Atomic(Int32).new(0)
+    seen_before_close = Atomic(Int32).new(-1)
+    with_runner(pool) do
+      pool.spawn do
+        sleep(150)
+        done.add(1)
+      end
+      seen_before_close.set(done.get)
+    end
+    assert_eq 0, seen_before_close.get
+    assert_eq 1, done.get
+    assert_eq 0, pool.pending
+    assert !pool.running?
+  end
+
+  it "keeps going after a job panics, and reports the panic" do
+    pool = Background.new
+    reports = Mutex.new { [] of String }
+    pool.on_panic { |message| reports.lock { |r| r << message } }
+    total = Atomic(Int32).new(0)
+    with_runner(pool) do
+      10.times do |i|
+        if i == 3 || i == 7
+          pool.spawn { raise "job blew up" }
+        else
+          pool.spawn { total.add(1) }
+        end
+      end
+    end
+    assert_eq 8, total.get
+    assert_eq 2, pool.panics
+    assert_eq 8, pool.completed
+    got = reports.get { |r| r.size }.or_panic
+    assert_eq 2, got
+    first = reports.get { |r| r[0] }.or_panic
+    assert_eq "job blew up", first
+  end
+
+  it "cuts off what is still running when the close's time is up" do
+    pool = Background.new
+    finished = Atomic(Int32).new(0)
+    started = Time.monotonic
+    with_runner(pool, Span.milliseconds(100)) do
+      pool.spawn do
+        outcome = sleep(10_000)
+        finished.add(outcome.is_a?(Cancelled) ? 10 : 1)
+      end
+      pool.spawn { finished.add(100) }
+      sleep(20)
+    end
+    elapsed = Time.monotonic - started
+    assert elapsed < Span.seconds(5), "the close waited " + elapsed.total_milliseconds.to_s + "ms"
+    assert_eq 110, finished.get
+    assert_eq 0, pool.pending
+  end
+
+  it "runs at once again after its runner has closed" do
+    pool = Background.new
+    with_runner(pool) { }
+    seen = Atomic(Int32).new(0)
+    pool.spawn { seen.add(1) }
+    assert_eq 1, seen.get
+  end
+
+  it "refuses a second runner" do
+    pool = Background.new
+    with_runner(pool) do
+      assert panics? { pool.run }
+    end
+  end
+end

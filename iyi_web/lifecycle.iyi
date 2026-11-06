@@ -20,7 +20,8 @@
 # traffic, not on the first request.
 #
 # **Stop.** On `stop`, or the first INT or TERM, the listener closes, the
-# requests in flight finish (`shutdown_timeout`), and then the `on_stop`
+# requests in flight finish (`shutdown_timeout`), the background tasks
+# still running get what is left of that time, and then the `on_stop`
 # hooks run, the last registered first - what was opened last is closed
 # first, as `defer`s unwind. A hook that fails is reported and the others
 # still run: one broken cleanup must not skip the rest.

@@ -1,0 +1,213 @@
+# State every worker shares, without the lock showing.
+#
+# A route may run on every core at once, so a table it changes has to be
+# behind a `Mutex` (SPEC.md III.4.4), and the `Mutex` asks three things of
+# every caller: a `.or_panic` for the `Cancelled` a wait may answer, a
+# `get` whose answer is `Share` because it leaves the lock, and so a
+# `List.new(todos.values)` where the route wanted `todos.values`.
+# `examples/typed_json.iyi` ran on one thread rather than pay that. A
+# store pays it once:
+#
+#     TODOS = HashStore(Int32, Todo).new
+#
+#     get "/todos" do |env|
+#       env.json(TODOS.values)                      # a copy, taken under the lock
+#     end
+#
+#     post "/todos" do |env|
+#       title = env.params.body["title"]? || "untitled"
+#       # One critical section: the id is taken and the todo stored under
+#       # one lock, so two requests never get the same id.
+#       todo = TODOS.update { |todos| made = Todo.new(todos.size + 1, title); todos[made.id] = made; made }
+#       env.status(201).json(todo)
+#     end
+#
+# Three kinds, one lock each:
+#
+# - `HashStore(K, V)`, an empty `Hash(K, V)` to begin with, and
+#   `ArrayStore(E)`, an empty `Array(E)`: the two collections a store
+#   usually holds, with snapshot helpers (`values`, `keys`, `to_h`, `to_a`,
+#   `[]?`, `size`) that copy out the plain `Array` and `Hash` a route
+#   wants. The copy is the caller's, and nothing another worker does
+#   reaches it.
+# - `Store(T)`, any value the block makes: `Store.new { 0 }`, a struct, a
+#   collection seeded with entries. It has `get`, `set` and `replace` for
+#   a value that is `Share` as it is.
+#
+# `read` and `update` run a block with the lock held and answer what it
+# answers; the answer still has to be `Share` - a number, a string, a
+# struct of those, a `List` - and a block that answers an `Array` or a
+# `Hash` is refused where it is written.
+#
+# Each call is one critical section: a read followed by an update is two,
+# and another worker may come between them. Do the read and the change in
+# one `update` when the change depends on what was read.
+#
+# A store is `Share` - a `Mutex` is all it holds - so a route, a handler
+# or a background task captures one as it is, on every worker.
+module iyi_web/store
+
+import std/list::{List}
+import std/mutex::{Mutex}
+
+pub class Store(T)
+  @mutex : Mutex(T)
+
+  # The value is the block's, made here, so nothing outside the store
+  # holds it: `Store.new { {} of String => Int32 }`. The block is checked
+  # as `Mutex.new`'s is: it may capture only `Share` values.
+  @[Share]
+  def self.new(&block : -> U) : Store(U) forall U
+    Store(U).wrap(Mutex.new(&block))
+  end
+
+  protected def self.wrap(mutex : Mutex(T)) : Store(T)
+    new(mutex)
+  end
+
+  private def initialize(@mutex : Mutex(T))
+  end
+
+  # The block's answer, worked out with the lock held. Meant for looking:
+  # nothing stops the block from changing the value, but `update` says so
+  # to the reader.
+  @[Share]
+  pub def read(&block : T -> R) : R forall R
+    outcome = @mutex.get(&block)
+    raise CANCELLED if outcome.is_a?(Cancelled)
+    outcome
+  end
+
+  # Changes the value in place - a `Hash` or an `Array` - with the lock
+  # held, and answers the block's answer: an id handed out, the count after
+  # the change, or nil.
+  @[Share]
+  pub def update(&block : T -> R) : R forall R
+    outcome = @mutex.get(&block)
+    raise CANCELLED if outcome.is_a?(Cancelled)
+    outcome
+  end
+
+  # The value replaced by the block's answer, with the lock held: what a
+  # number or a struct wants, which a block cannot change in place.
+  #
+  #     HITS = Store.new { 0 }
+  #     HITS.replace { |n| n + 1 }
+  @[Share]
+  pub def replace(&block : T -> T) : Nil
+    outcome = @mutex.update(&block)
+    raise CANCELLED if outcome.is_a?(Cancelled)
+  end
+
+  # The value itself, for a `Share` one: a number, a string, a struct.
+  pub def get : T
+    read { |value| value }
+  end
+
+  # Replaces the value; *value* must be `Share`, since the store keeps it.
+  pub def set(value : T) : Nil
+    replace { |_| value }
+  end
+
+  # How many entries a collection holds.
+  pub def size : Int32
+    read { |value| value.size }
+  end
+end
+
+# A `Hash(K, V)` every worker shares, empty to begin with:
+# `HashStore(Int32, Todo).new`. *V* has to be `Share` for the snapshot
+# helpers, which hand entries out of the lock.
+pub class HashStore(K, V)
+  @store : Store(Hash(K, V))
+
+  def initialize
+    @store = Store.new { {} of K => V }
+  end
+
+  # The block's answer, worked out with the lock held; see `Store#read`.
+  @[Share]
+  pub def read(&block : Hash(K, V) -> R) : R forall R
+    @store.read(&block)
+  end
+
+  # Changes the hash in place with the lock held, and answers the block's
+  # answer; see `Store#update`.
+  @[Share]
+  pub def update(&block : Hash(K, V) -> R) : R forall R
+    @store.update(&block)
+  end
+
+  # The entry under *key*, or nil when there is none.
+  pub def []?(key : K) : V?
+    @store.read { |hash| hash[key]? }
+  end
+
+  # The values, copied out in insertion order.
+  pub def values : Array(V)
+    @store.read { |hash| List.new(hash.values) }.to_a
+  end
+
+  # The keys, copied out in insertion order.
+  pub def keys : Array(K)
+    @store.read { |hash| List.new(hash.keys) }.to_a
+  end
+
+  # A copy of the hash, entries in the same order.
+  pub def to_h : Hash(K, V)
+    pairs = @store.read { |hash| List.new(hash.to_a) }
+    copy = {} of K => V
+    pairs.each { |pair| copy[pair[0]] = pair[1] }
+    copy
+  end
+
+  # How many entries the hash holds.
+  pub def size : Int32
+    @store.size
+  end
+end
+
+# An `Array(E)` every worker shares, empty to begin with:
+# `ArrayStore(String).new`. *E* has to be `Share` for the snapshot
+# helpers, which hand elements out of the lock.
+pub class ArrayStore(E)
+  @store : Store(Array(E))
+
+  def initialize
+    @store = Store.new { [] of E }
+  end
+
+  # The block's answer, worked out with the lock held; see `Store#read`.
+  @[Share]
+  pub def read(&block : Array(E) -> R) : R forall R
+    @store.read(&block)
+  end
+
+  # Changes the array in place with the lock held, and answers the block's
+  # answer; see `Store#update`.
+  @[Share]
+  pub def update(&block : Array(E) -> R) : R forall R
+    @store.update(&block)
+  end
+
+  # The element at *index*, or nil when there is none.
+  pub def []?(index : Int32) : E?
+    @store.read { |array| array[index]? }
+  end
+
+  # The elements, copied out.
+  pub def to_a : Array(E)
+    @store.read { |array| List.new(array) }.to_a
+  end
+
+  # How many elements the array holds.
+  pub def size : Int32
+    @store.size
+  end
+end
+
+# What a task cancelled while it waited for a store's lock panics with. It
+# is being cut off - a request at shutdown, a background task past the
+# drain - and has nothing to give its caller, so it ends there, as
+# `.or_panic` would end it.
+CANCELLED = "Store: cancelled while waiting for the lock"

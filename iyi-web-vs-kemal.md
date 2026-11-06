@@ -111,7 +111,7 @@ Not in Kemal's core, but seen in its examples:
 ## 5. Status
 
 iyi-web `master`, on iyi 0.20.1, the oldest it supports. `iyi test iyi_web`
-passes in all 48 test files and `iyi test examples` in its one. Every example
+passes in all 52 test files and `iyi test examples` in its one. Every example
 was built, run and exercised with curl; WebSockets with Node's client, and
 over TLS with Python's.
 
@@ -195,8 +195,8 @@ Found later and fixed:
 | Command line | `-b` (IPv4 or IPv6), `-p`, `-s`, `--ssl-key-file`, `--ssl-cert-file`, `-h`, `extra_options`; also `--ssl-min-version 1.2` and `--ssl-client-ca FILE` (not in Kemal) |
 | TLS | `config.ssl` (a `TlsServerConfig`), `bind_tls`, `wss://`; TLS 1.3 and 1.2 over iyi's own std/tls, with mutual TLS (`client_roots`, `env.request.peer_certificates`) |
 | Listening options | IPv6 and `unix_socket` (with TLS too); `read_timeout`, `write_timeout` and `idle_timeout` (not in Kemal) |
-| Installation | `iyi get github.com/sdogruyol/iyi-web` writes `require github.com/sdogruyol/iyi-web v0.5.1` to `iyi.mod`, and files write `import github.com/sdogruyol/iyi-web/iyi_web/dsl::*`; with `--as web` the line ends `as web` and files write `import web/iyi_web/dsl::*` (iyi 0.18.0 and later) |
-| Examples | Fourteen, from `hello` to a JSON API, typed routes with OpenAPI and JWT sign-in, uploads, templates, routers, middleware, SSE, a WebSocket chat room, cookies and in-process testing |
+| Installation | `iyi get github.com/sdogruyol/iyi-web` writes `require github.com/sdogruyol/iyi-web v0.5.1` to `iyi.mod`, and files write `import github.com/sdogruyol/iyi-web/iyi_web/dsl::*`; with `--as web` the line ends `as web` and files write `import web/iyi_web/dsl::*` (iyi 0.18.0 and later); `iyi-web new` writes a project that already requires it |
+| Examples | Fifteen programs and a PostgreSQL project, from `hello` to a JSON API, typed routes with OpenAPI and JWT sign-in, uploads, templates, routers, middleware, SSE, a WebSocket chat room, cookies, metrics and tracing, and in-process testing |
 
 ### Beyond Kemal
 
@@ -204,14 +204,19 @@ Since the gaps above closed, iyi-web has grown past what Kemal offers, in
 the direction of FastAPI:
 
 - Every request is served on whichever core is free, and a route that would
-  race on shared state does not compile ([Every core](README.md#every-core)).
+  race on shared state does not compile ([Every core](docs/every-core.md));
+  `Store` keeps shared state behind one lock ([state](docs/state.md)).
 - Typed routes read the path, query string, headers and JSON body into the
   application's own types and validate them before the block runs
   ([Typed routes](docs/typed-routes.md)), and the same declarations make an
   OpenAPI 3.1 document with a Swagger UI page ([OpenAPI](docs/openapi.md)).
 - Dependencies, bearer tokens, HS256 JWTs, API keys and OAuth2's password
   flow ([Dependencies and auth](docs/dependencies-and-auth.md)).
-- `on_start`/`on_stop` hooks ([Lifecycle](docs/lifecycle-and-background.md)).
+- `on_start`/`on_stop` hooks, background tasks, Prometheus metrics and W3C
+  trace context tracing ([Lifecycle](docs/lifecycle-and-background.md),
+  [Observability](docs/observability.md)).
+- The `iyi-web` command: `new` scaffolds a project, `dev` rebuilds it on
+  every save ([cli](docs/cli.md)).
 - HTTP/2 beside HTTP/1.1 (h2c, and h2 by ALPN over TLS), certificates from
   Let's Encrypt (`config.autocert`), request bodies read as they arrive
   (`stream_bodies`), multipart uploads streamed to disk, and zstd or gzip

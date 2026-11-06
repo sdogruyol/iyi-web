@@ -21,8 +21,10 @@
 module examples/typed_json
 
 import std/json::{serializable}
+import std/list::{List}
 import iyi_web/dsl::*
 import iyi_web/failure::{StatusError}
+import iyi_web/store::{HashStore}
 import iyi_web/validation::{Validate, Validator}
 
 # What a client sends. A field with a default may be left out; `title`
@@ -61,6 +63,24 @@ impl Validate for NoteFilter
   end
 end
 
+# What is kept: a note's fields, its tags in a `List`. A `List` of
+# strings is `Share`, so a `StoredNote` may leave the store's lock below
+# and every worker may read it; a struct holding an `Array` may not.
+struct StoredNote
+  getter id : Int32
+  getter title : String
+  getter body : String
+  getter priority : Int32
+  getter tags : List(String)
+
+  def initialize(@id : Int32, input : NoteInput)
+    @title = input.title.strip
+    @body = input.body
+    @priority = input.priority
+    @tags = List.new(input.tags)
+  end
+end
+
 # What the API answers with. `derive serializable` is also what lets a
 # route declare it as its `response:`.
 struct Note
@@ -71,11 +91,12 @@ struct Note
   getter tags : Array(String)
   derive serializable
 
-  def initialize(@id : Int32, input : NoteInput)
-    @title = input.title.strip
-    @body = input.body
-    @priority = input.priority
-    @tags = input.tags
+  def initialize(stored : StoredNote)
+    @id = stored.id
+    @title = stored.title
+    @body = stored.body
+    @priority = stored.priority
+    @tags = stored.tags.to_a
   end
 end
 
@@ -92,32 +113,34 @@ struct NoteList
   end
 end
 
-# Kept in memory for as long as the program runs: a bare `Array` of
-# `Note`s, whose tags are an `Array` too. Neither may be shared between
-# workers, so the routes that reach it are registered with `workers: 1`,
-# and the program serves on one thread; `examples/json_api.iyi` keeps its
-# store behind a `Mutex` instead and serves on every core.
-NOTES = [] of Note
+# Kept in memory for as long as the program runs, behind a `HashStore`'s
+# lock: every route below runs on whichever core is free. Ids come from
+# an atomic counter, so no two requests are handed the same one.
+NOTES   = HashStore(Int32, StoredNote).new
+LAST_ID = Atomic(Int32).new(0)
 
 # The block gets a `NoteInput` that passed `validate`, and answers the
 # `Note` it made: `response:` writes it as JSON, with `status:`.
-post "/notes", body: NoteInput, response: Note, status: 201, workers: 1 do |env, input|
-  note = Note.new(NOTES.size + 1, input)
-  NOTES << note
-  note
+post "/notes", body: NoteInput, response: Note, status: 201 do |env, input|
+  stored = StoredNote.new(LAST_ID.add(1) + 1, input)
+  NOTES.update { |notes| notes[stored.id] = stored; nil }
+  Note.new(stored)
 end
 
-get "/notes", query: NoteFilter, response: NoteList, workers: 1 do |env, filter|
+# `values` copies the notes out under the lock, in the order they were
+# written; filtering the copy holds no lock at all.
+get "/notes", query: NoteFilter, response: NoteList do |env, filter|
   wanted = filter.tag
-  found = wanted ? NOTES.select { |note| note.tags.includes?(wanted) } : NOTES
-  NoteList.new(found.first(filter.limit))
+  every = NOTES.values
+  found = wanted ? every.select { |note| note.tags.includes?(wanted) } : every
+  NoteList.new(found.first(filter.limit).map { |note| Note.new(note) })
 end
 
 # `path: Int32` reads the one capture, `:id`. A `StatusError` answered
 # beside the `Note` is sent with its status: here the 404 page below.
-get "/notes/:id", path: Int32, response: Note, workers: 1 do |env, id|
-  note = id > 0 ? NOTES[id - 1]? : nil
-  note || StatusError.new(404)
+get "/notes/:id", path: Int32, response: Note do |env, id|
+  stored = NOTES[id]?
+  stored ? Note.new(stored) : StatusError.new(404)
 end
 
 error 404 do |env|
