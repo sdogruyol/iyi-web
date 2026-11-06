@@ -269,6 +269,16 @@ same machine gave every framework about a quarter more.
 `bench/run.sh` times iyi-web against itself, and CI compares every pull
 request with its base branch so a slower hot path fails the build.
 
+### HTTP Arena
+
+Against other frameworks, iyi-web is measured on
+[HTTP Arena](https://http-arena.com/), on dedicated hardware under the same
+conditions for every entry. Its entry,
+[`frameworks/iyi-web`](https://github.com/MDA2AV/HttpArena/tree/main/frameworks/iyi-web),
+is a plain iyi-web program with default settings (request logging and static
+files off, `gzip true`) for the baseline, pipelined, limited-conn, async,
+json-comp and latency profiles.
+
 ## Development
 
 ```sh
