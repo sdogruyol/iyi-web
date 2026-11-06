@@ -30,6 +30,7 @@ import iyi_web/websocket::{WebSocket}
 import iyi_web/config::{Config, config}
 import iyi_web/failure::{StatusError, render_error_type_page, render_failure_page, render_client_error_page}
 import iyi_web/validation::{BodyError}
+import iyi_web/typed::{scalar_capture, scalar_param?, decode_path, decode_query, decode_headers, decode_body, response_value}
 
 alias HandlerProc = Context -> String
 
@@ -51,6 +52,11 @@ alias KeptSocket = Kept({WebSocket, Context}, Nil)
 
 HTTP_METHODS   = %w(get post put patch delete options head query)
 FILTER_METHODS = %w(get post put patch delete options query)
+
+# What a typed route may read before its block runs, in the order its
+# block gets them after `env`: the option's name, the type variable its
+# value has, and the parameter's internal name.
+TYPED_KINDS = [{"path", "P", "path_type"}, {"query", "Q", "query_type"}, {"headers", "H", "headers_type"}, {"body", "J", "body_type"}]
 
 pub struct Route
   def initialize(@method : String, @path : String, @handler : RouteProc)
@@ -86,7 +92,8 @@ end
 private record RouteDefinition,
   method : String,
   path : String,
-  handler : KeptRoute
+  handler : KeptRoute,
+  path_fields : Array(String)
 
 private record FilterDefinition,
   kind : Symbol,
@@ -132,12 +139,42 @@ pub class Router
   # ways out - a lock, or `workers: 1`. A call that passes the literal 1
   # is not checked, and its block is kept as the `Proc` it is
   # (`iyi_web/kept`).
+  #
+  # Typed routes (`iyi_web/typed`): `path:`, `query:`, `headers:` and
+  # `body:` name types the request is read into; the block gets each,
+  # after `env`, in that order. They are read in that order, and the
+  # first that fails answers its error before the block runs. Each
+  # combination is an overload of its own, so the block's parameters are
+  # typed from the options given; one with none of them is the plain
+  # `get path do |env|`.
+  #
+  # `response:` names the type the block answers, which is written as
+  # JSON, and is checked when the program is compiled; errors may still
+  # be answered beside it. `status:` is the status a route answers with
+  # unless its block sets another.
   {% for method in HTTP_METHODS %}
-    @[Share(serial: workers)]
-    pub def {{ method.id }}(path : String, *, workers : Int32? = nil, &block : Context -> B) : Nil forall B
-      what = {{ method.upcase }} + " " + path
-      add_route({{ method.upcase }}, path, kept_serial?(workers, what) ? KeptRoute.new(->(ctx : Context) : String | Error { route_answer(block.call(ctx)) }, what) : KeptRoute.new(SharedProc(Context, String | Error).of { |ctx| route_answer(block.call(ctx)) }))
-    end
+    {% for mask in (0..15).to_a %}
+      {% chosen = [] of TupleLiteral %}
+      {% for kind, index in TYPED_KINDS %}
+        {% if mask & [1, 2, 4, 8][index] != 0 %}
+          {% chosen << kind %}
+        {% end %}
+      {% end %}
+      {% names = chosen.map { |kind| kind[0] } %}
+      {% route = (mask == 0 ? "path" : "route").id %}
+      @[Share(serial: workers)]
+      pub def {{ method.id }}({{ route }} : String, *, {% for kind in chosen %}{{ kind[0].id }} {{ kind[2].id }} : {{ kind[1].id }}.class, {% end %}workers : Int32? = nil, response : M.class = Nil, status : Int32 = 200, &block : Context{% for kind in chosen %}, {{ kind[1].id }}{% end %} -> B) : Nil forall B, M{% for kind in chosen %}, {{ kind[1].id }}{% end %}
+        what = {{ method.upcase }} + " " + {{ route }}
+        {% if names.includes?("path") %}
+          capture = scalar_param?(P) ? scalar_capture(what, path_captures({{ route }})) : ""
+          fields = capture.empty? ? path_fields(P) : [capture]
+        {% else %}
+          capture = ""
+          fields = [] of String
+        {% end %}
+        add_route({{ method.upcase }}, {{ route }}, kept_serial?(workers, what) ? KeptRoute.new(->(ctx : Context) : String | Error { typed_answer_{{ mask }}(ctx, block, capture, {% for kind in chosen %}{{ kind[1].id }}, {% end %}M, status) }, what) : KeptRoute.new(SharedProc(Context, String | Error).of { |ctx| typed_answer_{{ mask }}(ctx, block, capture, {% for kind in chosen %}{{ kind[1].id }}, {% end %}M, status) }), fields)
+      end
+    {% end %}
   {% end %}
 
   # A GET route that answers with a server-sent event stream. The block
@@ -273,12 +310,16 @@ pub class Router
     kept_routes(base_prefix).map { |route| Route.new(route[0], route[1], route[2].serial) }
   end
 
-  # Method, full path and block of every route, mounts included.
+  # Method, full path and block of every route, mounts included. A typed
+  # `path:` whose fields the full path does not capture is refused here,
+  # where the full path is first known.
   pub def kept_routes(base_prefix : String = "") : Array(Tuple(String, String, KeptRoute))
     full_prefix = join_paths(base_prefix, @prefix)
     collected = [] of Tuple(String, String, KeptRoute)
     @routes.each do |route|
-      collected << {route.method, join_paths(full_prefix, route.path), route.handler}
+      full_path = join_paths(full_prefix, route.path)
+      check_captures(route.method, full_path, route.path_fields)
+      collected << {route.method, full_path, route.handler}
     end
     @sub_routers.each do |sub|
       collected.concat(sub.router.kept_routes(join_paths(full_prefix, sub.path)))
@@ -341,9 +382,9 @@ pub class Router
     nil
   end
 
-  private def add_route(method : String, path : String, kept : KeptRoute) : Nil
+  private def add_route(method : String, path : String, kept : KeptRoute, path_fields : Array(String)) : Nil
     raise "path must start with /" unless path.starts_with?('/')
-    @routes << RouteDefinition.new(method: method, path: path, handler: kept)
+    @routes << RouteDefinition.new(method: method, path: path, handler: kept, path_fields: path_fields)
   end
 
   private def add_filter(kind : Symbol, method : String, path : String, kept : KeptRoute) : Nil
@@ -366,6 +407,87 @@ end
 
 private def body_of(value : IntoBody) : String
   value.into_body
+end
+
+# A typed route's answer: plain, as `route_answer` makes it, or its
+# `response:` type written as JSON. An error is answered as an error
+# either way.
+private def route_reply(ctx : Context, answer : A, model : M.class) : String | Error forall A, M
+  {% if M == Nil %}
+    route_answer(answer)
+  {% else %}
+    return answer.as(Error) if answer.is_a?(::Error)
+    ctx.json(response_value(answer, M))
+    ""
+  {% end %}
+end
+
+# One per combination of `TYPED_KINDS` a route was registered with, as
+# `Router#get` is: path, query, headers and body, each read or the
+# request answered with its error; then the block, with the values in
+# `TYPED_KINDS` order.
+{% for mask in (0..15).to_a %}
+  {% chosen = [] of TupleLiteral %}
+  {% for kind, index in TYPED_KINDS %}
+    {% if mask & [1, 2, 4, 8][index] != 0 %}
+      {% chosen << kind %}
+    {% end %}
+  {% end %}
+  {% names = chosen.map { |kind| kind[0] } %}
+  private def typed_answer_{{ mask }}(ctx : Context, block : Proc(Context{% for kind in chosen %}, {{ kind[1].id }}{% end %}, B), capture : String, {% for kind in chosen %}{{ kind[2].id }} : {{ kind[1].id }}.class, {% end %}response : M.class, status : Int32) : String | Error forall B, M{% for kind in chosen %}, {{ kind[1].id }}{% end %}
+    {% if names.includes?("path") %}
+      path_value = decode_path(ctx, P, capture)
+      return path_value.as(Error) if path_value.is_a?(::Error)
+    {% end %}
+    {% if names.includes?("query") %}
+      query_value = decode_query(ctx, Q)
+      return query_value.as(Error) if query_value.is_a?(::Error)
+    {% end %}
+    {% if names.includes?("headers") %}
+      headers_value = decode_headers(ctx, H)
+      return headers_value.as(Error) if headers_value.is_a?(::Error)
+    {% end %}
+    {% if names.includes?("body") %}
+      body_value = decode_body(ctx, J)
+      return body_value.as(Error) if body_value.is_a?(::Error)
+    {% end %}
+    ctx.response.status_code = status unless status == 200
+    route_reply(ctx, block.call(ctx{% for kind in chosen %}, {{ kind[0].id }}_value{% end %}), M)
+  end
+{% end %}
+
+# Raises, naming the route, when a field of its typed `path:` is no
+# capture of *full_path*: a route that could only ever answer 422.
+private def check_captures(method : String, full_path : String, fields : Array(String)) : Nil
+  captured = path_captures(full_path)
+  fields.each do |field|
+    raise "#{method} #{full_path}: path: has a field #{field.inspect}, which the path does not capture (#{captured.empty? ? "it captures nothing" : "it captures " + captured.join(", ")})" unless captured.includes?(field)
+  end
+end
+
+# The names a route path captures, in order: `:id` and `*rest`.
+private def path_captures(path : String) : Array(String)
+  names = [] of String
+  path.split('/').each do |segment|
+    if segment.starts_with?(":") || segment.starts_with?("*")
+      name = segment[1, segment.bytesize - 1]
+      names << name unless name.empty?
+    end
+  end
+  names
+end
+
+# The captures a struct `path:` reads: each field its `derive
+# serializable` reads, under its name or its `JSON::Field` key.
+private def path_fields(type : T.class) : Array(String) forall T
+  names = [] of String
+  {% for ivar in T.instance_vars %}
+    {% ann = ivar.annotation(::Std::Json::JSON::Field) %}
+    {% unless ann && (ann[:ignore] || ann[:ignore_deserialize]) %}
+      names << {{ ann && ann[:key] ? ann[:key] : ivar.name.stringify }}
+    {% end %}
+  {% end %}
+  names
 end
 
 # A route in the tree: its method, its path as declared, and its block.

@@ -92,6 +92,11 @@ pub class Params
     values_of(@query_pairs, key)
   end
 
+  # Every query name and value, in the order sent, repeats included.
+  pub def query_pairs : Array(Tuple(String, String))
+    @query_pairs
+  end
+
   # Form fields: an `application/x-www-form-urlencoded` body, or the text
   # parts of a `multipart/form-data` one.
   pub def body : Hash(String, String)
