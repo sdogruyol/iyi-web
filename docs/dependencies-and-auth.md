@@ -17,17 +17,21 @@ def current_user(env : Context) : User | AuthError
   find_user_by_token(token) || AuthError.new(401, "unknown token")
 end
 
-CURRENT_USER = Dep.new { |env| current_user(env) }
+CURRENT_USER = Dep.new(User) { |env| current_user(env) }
 
 get "/me", deps: CURRENT_USER do |env, user|
   user.name
 end
 ```
 
-The block gets the provider's value with its errors taken out: `user` is a
-`User`, not a `User | AuthError`. A provider that answers an error ends the
-request with that error's status before the route runs, so a 401 or a 403 is
-decided in one place:
+`Dep.new(User)` names the provider's value; the block answers it or an
+error. The route's block gets the value with the errors taken out: `user`
+is a `User`, not a `User | AuthError`. A block that answers anything else
+is refused where it is written - `Dep.new(User)` around a block that
+answers `User? | AuthError` says the value is `User?` - so the type on the
+constant is the type every route gets. A provider that answers an error
+ends the request with that error's status before the route runs, so a 401
+or a 403 is decided in one place:
 
 ```sh
 curl localhost:3000/me                                # 401 missing bearer token
@@ -43,7 +47,7 @@ def admin(env : Context) : User | AuthError
   user.admin ? user : AuthError.new(403, "admins only")
 end
 
-ADMIN = Dep.new { |env| admin(env) }
+ADMIN = Dep.new(User) { |env| admin(env) }
 
 delete "/notes/:id", path: Int32, deps: ADMIN, status: 204 do |env, id, admin|
   remove_note(id)
@@ -86,18 +90,20 @@ end
 `deps: {user: CURRENT_USER, db: DB}` is not accepted: a route's block is
 typed from the arguments beside it when it is registered, a provider carries
 the type of its value, and the named tuple of values a named tuple of
-providers would give is a type no signature can spell. `Dep.all` builds that
-type once, as a provider of its own.
+providers would give is a type no signature can spell. `Dep.all` is a macro
+that writes that type where it is called -
+`NamedTuple(user: User, db: Db)` above - and hands it, with the providers,
+to `Dep.combine(type, deps)`, which makes one provider of them.
 
 ### Providers in the OpenAPI document
 
-`Dep.new(security: ...)` names the security scheme a provider checks. Every
-route that depends on it lists the scheme under `security`, and the
+`Dep.new(User, security: ...)` names the security scheme a provider checks.
+Every route that depends on it lists the scheme under `security`, and the
 document lists it under `components.securitySchemes`
 ([OpenAPI](openapi.md)). A provider built on another passes the other's on:
 
 ```iyi
-CURRENT_USER = Dep.new(security: TOKEN.security) { |env| current_user(env) }
+CURRENT_USER = Dep.new(User, security: TOKEN.security) { |env| current_user(env) }
 ```
 
 | Scheme | Made with |
@@ -137,7 +143,7 @@ def stats_client(env : Context) : String | AuthError
   Subtle.constant_time_compare(key, EXPECTED_STATS_KEY) ? "stats" : AuthError.new(401, "unknown API key")
 end
 
-STATS = Dep.new(security: STATS_KEY.security) { |env| stats_client(env) }
+STATS = Dep.new(String, security: STATS_KEY.security) { |env| stats_client(env) }
 ```
 
 Compare a secret with `Subtle.constant_time_compare` (`std/crypto`), never

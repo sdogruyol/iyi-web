@@ -1,9 +1,8 @@
-# Store: no update lost when every worker changes one value at once, the
-# snapshot helpers' copies untouched by later changes, and a store a route
-# captures served on more than one worker.
+# Stores: no update lost when every worker changes one value at once, and
+# the snapshot helpers' copies untouched by later changes.
 module iyi_web/store_test
 
-import iyi_web/store::{Store}
+import iyi_web/store::{Store, HashStore, ArrayStore}
 import iyi_web/spec::*
 
 struct Item
@@ -16,7 +15,7 @@ end
 
 describe "Store" do
   it "loses no update when parallel tasks change it at once" do
-    counts = Store.new { {} of String => Int32 }
+    counts = HashStore(String, Int32).new
     total = Store.new { 0 }
     group do |g|
       8.times do |worker|
@@ -36,7 +35,7 @@ describe "Store" do
   end
 
   it "hands out ids no two tasks share, in one critical section" do
-    items = Store.new { {} of Int32 => Item }
+    items = HashStore(Int32, Item).new
     group do |g|
       4.times do
         g.spawn_parallel do
@@ -52,7 +51,7 @@ describe "Store" do
   end
 
   it "answers copies the store's later changes do not reach" do
-    items = Store.new { {} of Int32 => Item }
+    items = HashStore(Int32, Item).new
     items.update { |h| h[1] = Item.new(1, "one"); h[2] = Item.new(2, "two") }
     values = items.values
     copy = items.to_h
@@ -66,12 +65,20 @@ describe "Store" do
   end
 
   it "copies an array out with to_a" do
-    log = Store.new { [] of String }
+    log = ArrayStore(String).new
     log.update { |a| a << "a"; a << "b" }
     snapshot = log.to_a
     log.update { |a| a.delete("a"); a.delete("b") }
     assert_eq ["a", "b"], snapshot
     assert_eq 0, log.size
+    assert_nil log[0]?
+  end
+
+  it "seeds a store with a value the block makes" do
+    seeded = Store.new { {"a" => 1} }
+    seeded.update { |h| h["b"] = 2 }
+    assert_eq 2, seeded.size
+    assert_eq 3, seeded.read { |h| h.values.sum }
   end
 
   it "reads and sets a plain value" do

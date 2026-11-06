@@ -46,7 +46,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/harness` | `http_request`, `form_request`, `dispatch`, `routes` |
 | `web/iyi_web/session` | `SessionHandler`, `Session`, `session`, `save_session` |
 | `web/iyi_web/csrf` | `CSRFHandler`, `csrf_token`, `csrf_tag` |
-| `web/iyi_web/store` | `Store`: state every worker shares, behind one lock ([Store](state.md)) |
+| `web/iyi_web/store` | `Store`, `HashStore`, `ArrayStore`: state every worker shares, behind one lock ([Store](state.md)) |
 | `web/iyi_web/lifecycle` | `Lifecycle`, `lifecycle_hook`: `on_start` and `on_stop` ([Lifecycle](lifecycle-and-background.md)) |
 | `web/iyi_web/background` | `Background`, `background_runner`: `env.background { }`, work done after the response |
 | `web/iyi_web/metrics` | `MetricsHandler`, `METRICS`, `Counter`, `Gauge`, `Histogram`: Prometheus metrics ([Observability](observability.md)) |

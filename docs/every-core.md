@@ -31,11 +31,11 @@ III.4.4)
 ```
 
 Those are the two ways out. Keep the state behind a lock or in an atomic:
-a [`Store`](state.md) for a table every worker changes
-(`SEEN = Store.new { [] of String }` with
+a [store](state.md) for a table every worker changes
+(`SEEN = ArrayStore(String).new` with
 `SEEN.update { |list| list << path; nil }`), `Atomic(Int32)` for a count, a
-`List` for a table nothing writes, or a `Mutex` from `std/mutex`, which
-`Store` is built on (`examples/json_api.iyi`). Or register the block with
+`List` for a table nothing writes, or a `Mutex` from `std/mutex`, which the
+stores are built on (`examples/json_api.iyi`). Or register the block with
 `workers: 1`: it is kept unchecked, and the application is served on one
 thread, saying so when it starts (`examples/websocket_chat.iyi`):
 

@@ -11,7 +11,7 @@ import iyi_web/dsl::*
 import iyi_web/config::{config}
 import iyi_web/kept::{Kept}
 import iyi_web/lifecycle::{Lifecycle, LifecycleHook, hook_outcome, lifecycle_hook}
-import iyi_web/store::{Store}
+import iyi_web/store::{ArrayStore}
 import iyi_web/harness::{http_body}
 import iyi_web/spec::*
 
@@ -25,7 +25,7 @@ end
 impl Error for Refusal
 end
 
-EVENTS = Store.new { [] of String }
+EVENTS = ArrayStore(String).new
 
 def note(event : String) : Nil
   EVENTS.update { |events| events << event; nil }

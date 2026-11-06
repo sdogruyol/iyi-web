@@ -24,7 +24,7 @@
 #       find_user(claims.sub) || AuthError.new(401, "unknown user")
 #     end
 #
-#     CURRENT_USER = Dep.new(security: USER.security) { |env| current_user(env) }
+#     CURRENT_USER = Dep.new(User, security: USER.security) { |env| current_user(env) }
 #
 # and, for OAuth2's password flow, a token route that checks the password
 # `password_grant` read and answers `token_response`.
@@ -87,13 +87,13 @@ end
 # A bearer token, unchecked: the route, or a provider using this one,
 # decides what it is worth. *format* is OpenAPI's `bearerFormat` hint.
 pub def bearer_auth(name : String = "bearerAuth", format : String? = nil) : Dep(String, String | AuthError)
-  Dep.new(security: SecurityScheme.bearer(name, format)) { |env| bearer_token(env) }
+  Dep.new(String, security: SecurityScheme.bearer(name, format)) { |env| bearer_token(env) }
 end
 
 # An API key, unchecked; see `api_key`. Compare it with
 # `Subtle.constant_time_compare` (std/crypto), never `==`.
 pub def api_key_auth(param : String, location : KeyLocation = KeyLocation::Header, name : String = "apiKeyAuth") : Dep(String, String | AuthError)
-  Dep.new(security: SecurityScheme.api_key(param, location, name)) { |env| api_key(env, param, location) }
+  Dep.new(String, security: SecurityScheme.api_key(param, location, name)) { |env| api_key(env, param, location) }
 end
 
 # A bearer token that must be a JWT signed with *secret* (`JWT.verify`),
@@ -103,7 +103,7 @@ end
 # `oauth2_password` scheme of the route that issues the tokens.
 pub def jwt_auth(secret : String, type : T.class, security : SecurityScheme = SecurityScheme.bearer(format: "JWT"), leeway : Int32 = 0, issuer : String? = nil, audience : String? = nil) : Dep(T, T | AuthError) forall T
   raise "an HS256 secret must be at least 32 bytes (RFC 7518 §3.2); this one is #{secret.bytesize}" if secret.bytesize < 32
-  Dep.new(security: security) { |env| verified(env, secret, T, leeway, issuer, audience) }
+  Dep.new(T, security: security) { |env| verified(env, secret, T, leeway, issuer, audience) }
 end
 
 # `jwt_auth` reading the payload as `Claims`.
@@ -127,7 +127,7 @@ end
 # `password_grant` with `token_response`; *scopes* names what each scope
 # allows, for the docs page.
 pub def oauth2_password_bearer(token_url : String, scopes : Hash(String, String) = {} of String => String, name : String = "OAuth2PasswordBearer") : Dep(String, String | AuthError)
-  Dep.new(security: SecurityScheme.oauth2_password(token_url, scopes, name)) { |env| bearer_token(env) }
+  Dep.new(String, security: SecurityScheme.oauth2_password(token_url, scopes, name)) { |env| bearer_token(env) }
 end
 
 # A token request refused as RFC 6749 §5.2 says: 400 (401 for

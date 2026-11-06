@@ -87,8 +87,9 @@ it at the application's `use` line:
   names the field.
 - **Every field's type `Share` itself.** Strings, numbers, `Bool`, structs
   of those, `std/list`'s `List` for a table nothing writes, `Atomic(T)` for
-  a count, `std/mutex`'s `Mutex(T)` or iyi-web's `Store(T)`
-  ([state](state.md)) for anything that changes, `SharedProc` for a
+  a count, `std/mutex`'s `Mutex(T)` or iyi-web's stores (`Store(T)`,
+  `HashStore(K, V)`, `ArrayStore(E)`, [state](state.md)) for anything that
+  changes, `SharedProc` for a
   callback. An `Array` or a `Hash` field is refused even if nothing writes
   it: copy it into a `List` in `initialize`.
 - **Callbacks are checked where they are written.** A def that keeps a

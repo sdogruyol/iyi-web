@@ -68,7 +68,7 @@ The first `iyi test` or `iyi build` fetches it and writes `iyi.sum`.
 | Flag | What `routes/` holds | Extra files |
 |---|---|---|
 | (none) | `home.iyi`: `GET /` and `GET /hello/:name` | |
-| `--api` | `notes.iyi`: a JSON CRUD over an in-memory store, as [typed routes](typed-routes.md). `path: Int32` reads the `:id` capture (a word there is a `422`), `body:` reads the JSON body into a type checked by `Validate` (`400`, `415` and `422` answers that name the field), `response:` writes `derive serializable` types, missing notes are a JSON `404`. The notes are in a [`Store`](state.md), so it serves on every core. | |
+| `--api` | `notes.iyi`: a JSON CRUD over an in-memory store, as [typed routes](typed-routes.md). `path: Int32` reads the `:id` capture (a word there is a `422`), `body:` reads the JSON body into a type checked by `Validate` (`400`, `415` and `422` answers that name the field), `response:` writes `derive serializable` types, missing notes are a JSON `404`. The notes are in a [`HashStore`](state.md), so it serves on every core. | |
 | `--full` | `pages.iyi`: `GET /` and `GET /about`, rendered from views inside a layout | `views/layout.eiy`, `views/index.eiy`, `views/about.eiy`, `public/css/app.css`, `public/robots.txt`; `app.iyi` sets `public_folder "public"` |
 
 Each kind's `app_test.iyi` covers its own routes: the `--api` one creates a

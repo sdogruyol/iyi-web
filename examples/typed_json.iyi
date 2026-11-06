@@ -24,7 +24,7 @@ import std/json::{serializable}
 import std/list::{List}
 import iyi_web/dsl::*
 import iyi_web/failure::{StatusError}
-import iyi_web/store::{Store}
+import iyi_web/store::{HashStore}
 import iyi_web/validation::{Validate, Validator}
 
 # What a client sends. A field with a default may be left out; `title`
@@ -64,7 +64,7 @@ impl Validate for NoteFilter
 end
 
 # What is kept: a note's fields, its tags in a `List`. A `List` of
-# strings is `Share`, so a `StoredNote` may leave the `Store`'s lock below
+# strings is `Share`, so a `StoredNote` may leave the store's lock below
 # and every worker may read it; a struct holding an `Array` may not.
 struct StoredNote
   getter id : Int32
@@ -113,10 +113,10 @@ struct NoteList
   end
 end
 
-# Kept in memory for as long as the program runs, behind a `Store`'s
+# Kept in memory for as long as the program runs, behind a `HashStore`'s
 # lock: every route below runs on whichever core is free. Ids come from
 # an atomic counter, so no two requests are handed the same one.
-NOTES   = Store.new { {} of Int32 => StoredNote }
+NOTES   = HashStore(Int32, StoredNote).new
 LAST_ID = Atomic(Int32).new(0)
 
 # The block gets a `NoteInput` that passed `validate`, and answers the

@@ -6,9 +6,9 @@
 # `get` whose answer is `Share` because it leaves the lock, and so a
 # `List.new(todos.values)` where the route wanted `todos.values`.
 # `examples/typed_json.iyi` ran on one thread rather than pay that. A
-# `Store` pays it once:
+# store pays it once:
 #
-#     TODOS = Store.new { {} of Int32 => Todo }
+#     TODOS = HashStore(Int32, Todo).new
 #
 #     get "/todos" do |env|
 #       env.json(TODOS.values)                      # a copy, taken under the lock
@@ -22,21 +22,29 @@
 #       env.status(201).json(todo)
 #     end
 #
+# Three kinds, one lock each:
+#
+# - `HashStore(K, V)`, an empty `Hash(K, V)` to begin with, and
+#   `ArrayStore(E)`, an empty `Array(E)`: the two collections a store
+#   usually holds, with snapshot helpers (`values`, `keys`, `to_h`, `to_a`,
+#   `[]?`, `size`) that copy out the plain `Array` and `Hash` a route
+#   wants. The copy is the caller's, and nothing another worker does
+#   reaches it.
+# - `Store(T)`, any value the block makes: `Store.new { 0 }`, a struct, a
+#   collection seeded with entries. It has `get`, `set` and `replace` for
+#   a value that is `Share` as it is.
+#
 # `read` and `update` run a block with the lock held and answer what it
 # answers; the answer still has to be `Share` - a number, a string, a
 # struct of those, a `List` - and a block that answers an `Array` or a
-# `Hash` is refused where it is written. The snapshot helpers (`values`,
-# `keys`, `to_a`, `to_h`, `[]?`, `size`) do the copying for the two
-# collections a store usually holds, and answer the plain `Array` and
-# `Hash` a route wants: the copy is the caller's, and nothing another
-# worker does reaches it.
+# `Hash` is refused where it is written.
 #
 # Each call is one critical section: a read followed by an update is two,
 # and another worker may come between them. Do the read and the change in
 # one `update` when the change depends on what was read.
 #
-# A `Store` is `Share` - a `Mutex` is its only field - so a route, a
-# handler or a background task captures one as it is, on every worker.
+# A store is `Share` - a `Mutex` is all it holds - so a route, a handler
+# or a background task captures one as it is, on every worker.
 module iyi_web/store
 
 import std/list::{List}
@@ -105,39 +113,96 @@ pub class Store(T)
   pub def size : Int32
     read { |value| value.size }
   end
+end
 
-  # The helpers below have no written return type: what they answer is
-  # `T`'s element or key type, which only exists once `T` is known, and a
-  # call on a store whose value has no such method is refused where it is
-  # written.
+# A `Hash(K, V)` every worker shares, empty to begin with:
+# `HashStore(Int32, Todo).new`. *V* has to be `Share` for the snapshot
+# helpers, which hand entries out of the lock.
+pub class HashStore(K, V)
+  @store : Store(Hash(K, V))
 
-  # The entry under *key* of a `Hash`, or the element at *key* of an
-  # `Array`; nil when there is none.
-  pub def []?(key)
-    read { |value| value[key]? }
+  def initialize
+    @store = Store.new { {} of K => V }
   end
 
-  # A `Hash`'s values, copied out in insertion order.
-  pub def values
-    read { |value| List.new(value.values) }.to_a
+  # The block's answer, worked out with the lock held; see `Store#read`.
+  @[Share]
+  pub def read(&block : Hash(K, V) -> R) : R forall R
+    @store.read(&block)
   end
 
-  # A `Hash`'s keys, copied out in insertion order.
-  pub def keys
-    read { |value| List.new(value.keys) }.to_a
+  # Changes the hash in place with the lock held, and answers the block's
+  # answer; see `Store#update`.
+  @[Share]
+  pub def update(&block : Hash(K, V) -> R) : R forall R
+    @store.update(&block)
   end
 
-  # An `Array`'s elements, or a `Hash`'s key-value pairs, copied out.
-  pub def to_a
-    read { |value| List.new(value.to_a) }.to_a
+  # The entry under *key*, or nil when there is none.
+  pub def []?(key : K) : V?
+    @store.read { |hash| hash[key]? }
   end
 
-  # A copy of a `Hash`, entries in the same order.
-  pub def to_h
-    pairs = read { |value| List.new(value.to_a) }
-    copy = {} of typeof(pairs[0][0]) => typeof(pairs[0][1])
+  # The values, copied out in insertion order.
+  pub def values : Array(V)
+    @store.read { |hash| List.new(hash.values) }.to_a
+  end
+
+  # The keys, copied out in insertion order.
+  pub def keys : Array(K)
+    @store.read { |hash| List.new(hash.keys) }.to_a
+  end
+
+  # A copy of the hash, entries in the same order.
+  pub def to_h : Hash(K, V)
+    pairs = @store.read { |hash| List.new(hash.to_a) }
+    copy = {} of K => V
     pairs.each { |pair| copy[pair[0]] = pair[1] }
     copy
+  end
+
+  # How many entries the hash holds.
+  pub def size : Int32
+    @store.size
+  end
+end
+
+# An `Array(E)` every worker shares, empty to begin with:
+# `ArrayStore(String).new`. *E* has to be `Share` for the snapshot
+# helpers, which hand elements out of the lock.
+pub class ArrayStore(E)
+  @store : Store(Array(E))
+
+  def initialize
+    @store = Store.new { [] of E }
+  end
+
+  # The block's answer, worked out with the lock held; see `Store#read`.
+  @[Share]
+  pub def read(&block : Array(E) -> R) : R forall R
+    @store.read(&block)
+  end
+
+  # Changes the array in place with the lock held, and answers the block's
+  # answer; see `Store#update`.
+  @[Share]
+  pub def update(&block : Array(E) -> R) : R forall R
+    @store.update(&block)
+  end
+
+  # The element at *index*, or nil when there is none.
+  pub def []?(index : Int32) : E?
+    @store.read { |array| array[index]? }
+  end
+
+  # The elements, copied out.
+  pub def to_a : Array(E)
+    @store.read { |array| List.new(array) }.to_a
+  end
+
+  # How many elements the array holds.
+  pub def size : Int32
+    @store.size
   end
 end
 

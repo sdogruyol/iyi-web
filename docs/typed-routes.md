@@ -289,7 +289,7 @@ end
 ```
 
 That serves the whole application on one thread. To serve on every core,
-keep the notes in a [`Store`](state.md) instead, as
+keep the notes in a [`HashStore`](state.md) instead, as
 `examples/typed_json.iyi` and `examples/openapi_auth.iyi` do;
 `examples/json_api.iyi` keeps its store behind a `Mutex`.
 

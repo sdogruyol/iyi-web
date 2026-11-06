@@ -1,4 +1,4 @@
-# Observability and the life around requests: a `Store` every worker
+# Observability and the life around requests: a `HashStore` every worker
 # shares, Prometheus metrics at /metrics, a trace span per request sent to
 # an OpenTelemetry collector (or printed as JSON lines), work done in the
 # background after the response, and hooks that run once at start and
@@ -17,7 +17,7 @@ module examples/observability
 import std/json::{ToJSON, Builder}
 import std/time::{Span}
 import iyi_web/dsl::*
-import iyi_web/store::{Store}
+import iyi_web/store::{HashStore}
 import iyi_web/metrics::{MetricsHandler, METRICS}
 import iyi_web/tracing::{TraceHandler, OtlpHttpExporter, JsonLinesExporter, SpanExporter, current_span}
 
@@ -45,8 +45,8 @@ end
 impl ToJSON for Order
 end
 
-# Every worker reads and writes this one table; the `Store` holds the lock.
-ORDERS = Store.new { {} of Int32 => Order }
+# Every worker reads and writes this one table; the `HashStore` holds the lock.
+ORDERS = HashStore(Int32, Order).new
 
 ORDERS_CREATED = METRICS.counter("orders_created_total", "Orders taken, by item.", ["item"])
 RECEIPTS_SENT  = METRICS.counter("receipts_sent_total", "Receipts sent in the background.")

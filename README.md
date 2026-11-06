@@ -117,7 +117,8 @@ curl localhost:3000/openapi.json   # id, limit and tag, typed; Swagger UI at /do
   limiting
 - `on_start` and `on_stop` hooks, and background tasks that run after the
   response
-- `Store`: shared state every worker reads and changes, behind one lock
+- `Store`, `HashStore` and `ArrayStore`: shared state every worker reads and
+  changes, behind one lock
 - Prometheus metrics at `/metrics`, and W3C trace context tracing exported
   over OTLP/HTTP
 - An in-process test harness: requests sent to a router without a socket
@@ -228,7 +229,7 @@ iyi run examples/json_api.iyi -- -p 8080
 |---|---|
 | [`hello.iyi`](examples/hello.iyi) | The smallest application |
 | [`json_api.iyi`](examples/json_api.iyi) | A CRUD API over an in-memory store, every route typed, with its OpenAPI document |
-| [`typed_json.iyi`](examples/typed_json.iyi) | `body:`, `query:` and `path:` with `Validate` rules and `response:` types, the `400`/`415`/`422` answers, and notes kept in a `Store` |
+| [`typed_json.iyi`](examples/typed_json.iyi) | `body:`, `query:` and `path:` with `Validate` rules and `response:` types, the `400`/`415`/`422` answers, and notes kept in a `HashStore` |
 | [`openapi_auth.iyi`](examples/openapi_auth.iyi) | A notes API with users and roles: OAuth2's password flow issuing JWTs, user and admin providers, an API-key client, and the docs page whose "Authorize" signs in |
 | [`forms_and_uploads.iyi`](examples/forms_and_uploads.iyi) | Form fields, multipart uploads with limits, and `_method` override |
 | [`templates.iyi`](examples/templates.iyi) | Views in `examples/views/` with a layout, `content_for`, a partial and autoescape |
@@ -239,7 +240,7 @@ iyi run examples/json_api.iyi -- -p 8080
 | [`cookies_and_context.iyi`](examples/cookies_and_context.iyi) | Cookies, redirects and `env.set` / `env.get`, with a value of the application's own type |
 | [`sessions_and_csrf.iyi`](examples/sessions_and_csrf.iyi) | Sign-in and sign-out with an encrypted cookie session, and forms guarded by `CSRFHandler` |
 | [`security.iyi`](examples/security.iyi) | Basic auth on `/admin`, security headers, request ids and a per-address rate limit |
-| [`observability.iyi`](examples/observability.iyi) | A `Store`, Prometheus metrics, a trace span per request sent to a collector, a background task and start/stop hooks |
+| [`observability.iyi`](examples/observability.iyi) | A `HashStore`, Prometheus metrics, a trace span per request sent to a collector, a background task and start/stop hooks |
 | [`testing.iyi`](examples/testing.iyi) | Routes in their own module, tested in-process by `testing_test.iyi` |
 | [`postgres/`](examples/postgres/app.iyi) | A JSON API on PostgreSQL with a connection pool and migrations, a project of its own ([Databases](docs/database.md)) |
 

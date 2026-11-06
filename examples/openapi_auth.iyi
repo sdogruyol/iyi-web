@@ -36,7 +36,7 @@ import iyi_web/openapi::{SecurityScheme}
 import iyi_web/deps::{Dep}
 import iyi_web/auth::*
 import iyi_web/jwt::{JWT, Claims}
-import iyi_web/store::{Store}
+import iyi_web/store::{HashStore}
 
 # Signs and checks every token. Read it from the environment or a vault in
 # a real application: whoever knows it can mint a token for anyone.
@@ -90,7 +90,7 @@ def current_user(env : Context) : User | AuthError
   User.new(account.name, account.admin)
 end
 
-CURRENT_USER = Dep.new(security: TOKEN.security) { |env| current_user(env) }
+CURRENT_USER = Dep.new(User, security: TOKEN.security) { |env| current_user(env) }
 
 # Uses the provider above: its 401 stays a 401, and a user who is not an
 # admin is a 403.
@@ -99,7 +99,7 @@ def admin_user(env : Context) : User | AuthError
   user.admin ? user : AuthError.new(403, "admins only")
 end
 
-ADMIN = Dep.new(security: TOKEN.security) { |env| admin_user(env) }
+ADMIN = Dep.new(User, security: TOKEN.security) { |env| admin_user(env) }
 
 # A machine client's key, compared in constant time.
 STATS_KEY = api_key_auth("X-API-Key")
@@ -109,7 +109,7 @@ def stats_client(env : Context) : String | AuthError
   Subtle.constant_time_compare(key, "demo-stats-key") ? "stats" : AuthError.new(401, "unknown API key")
 end
 
-STATS_CLIENT = Dep.new(security: STATS_KEY.security) { |env| stats_client(env) }
+STATS_CLIENT = Dep.new(String, security: STATS_KEY.security) { |env| stats_client(env) }
 
 struct NoteInput
   getter title : String
@@ -171,9 +171,9 @@ struct Stats
   end
 end
 
-# Every worker reads and writes this one table; the `Store` holds the lock.
+# Every worker reads and writes this one table; the store holds the lock.
 # A `Note` is strings and a number, so one leaves the lock as it is.
-NOTES   = Store.new { {} of Int32 => Note }
+NOTES   = HashStore(Int32, Note).new
 LAST_ID = Atomic(Int32).new(0)
 
 # OAuth2's token endpoint: a form with `grant_type=password`, answered

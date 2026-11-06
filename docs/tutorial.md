@@ -66,7 +66,7 @@ block runs ([Typed routes](typed-routes.md)). This is `note_routes` in
 
 ```iyi
 pub def note_routes : Router
-  notes = Store.new { {} of Int32 => Note }
+  notes = HashStore(Int32, Note).new
   last_id = Atomic(Int32).new(0)
   router = Router.new
 
@@ -173,14 +173,16 @@ curl 'localhost:3000/notes?done=true'
 
 [Parameters](parameters.md#validation) lists every rule.
 
-## 4. State every core shares: `Store`
+## 4. State every core shares: `HashStore`
 
 The routes run on whichever core is free, so the notes are behind a lock,
 and the compiler refuses a route that touches a bare `Hash` ([Every
-core](every-core.md)). The scaffold keeps them in a [`Store`](state.md), a
-table behind a lock that hands out copies:
+core](every-core.md)). The scaffold keeps them in a
+[`HashStore(Int32, Note)`](state.md), a table behind a lock that hands out
+copies:
 
-- `notes.values` is a copy of every note, taken under the lock;
+- `notes.values` is a copy of every note, an `Array(Note)` taken under the
+  lock;
 - `notes[id]?` reads one entry;
 - `update` changes the table with the lock held and answers what its block
   answers: `nil` after a store, the removed note (or `nil`) after a
@@ -189,7 +191,7 @@ table behind a lock that hands out copies:
 Ids come from an `Atomic`, so no two requests get the same one. A
 `Mutex` from `std/mutex` would work too, but each call would need an
 `.or_panic` and a `List` copy before the values may leave the lock;
-`Store` does both.
+the store does both.
 
 ## 5. OpenAPI and the docs page
 
@@ -271,7 +273,7 @@ def current_user(env : Context) : String | AuthError
   claims.sub || AuthError.new(401, "the token names nobody")
 end
 
-pub CURRENT_USER = Dep.new(security: TOKEN.security) { |env| current_user(env) }
+pub CURRENT_USER = Dep.new(String, security: TOKEN.security) { |env| current_user(env) }
 
 pub def auth_routes : Router
   router = Router.new
@@ -492,7 +494,7 @@ import std/regex::{Regex}
 import web/iyi_web/router::{Router}
 import web/iyi_web/failure::{StatusError}
 import web/iyi_web/metrics::{METRICS}
-import web/iyi_web/store::{Store}
+import web/iyi_web/store::{HashStore}
 import web/iyi_web/validation::{Validate, Validator}
 import routes/auth::{CURRENT_USER}
 
@@ -540,7 +542,7 @@ end
 NOTES_WRITTEN = METRICS.counter("notes_written_total", "Notes written, by author.", ["author"])
 
 pub def note_routes : Router
-  notes = Store.new { {} of Int32 => Note }
+  notes = HashStore(Int32, Note).new
   last_id = Atomic(Int32).new(0)
   router = Router.new
 

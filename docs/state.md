@@ -7,12 +7,12 @@ and it asks three things of every caller: a `.or_panic` for the `Cancelled`
 a wait may answer, an answer that is `Share` because it leaves the lock, and
 so a `List.new(todos.values)` where the route wanted `todos.values`.
 
-`Store(T)` from `web/iyi_web/store` pays that once:
+The stores in `web/iyi_web/store` pay that once:
 
 ```iyi
 import std/json::{serializable}
 import web/iyi_web/dsl::*
-import web/iyi_web/store::{Store}
+import web/iyi_web/store::{HashStore}
 
 struct Todo
   getter id : Int32
@@ -24,7 +24,7 @@ struct Todo
   derive serializable
 end
 
-TODOS = Store.new { {} of Int32 => Todo }
+TODOS = HashStore(Int32, Todo).new
 
 get "/todos" do |env|
   env.json(TODOS.values)                # a copy, taken under the lock
@@ -44,36 +44,63 @@ end
 run
 ```
 
-It serves on every core: a `Store` is `Share` (a `Mutex` is its only field),
-so routes, handlers and background tasks capture one as it is.
+It serves on every core: a store is `Share` (a `Mutex` is all it holds), so
+routes, handlers and background tasks capture one as it is.
+
+## Three stores
+
+| Store | Holds | Made with |
+|---|---|---|
+| `HashStore(K, V)` | A `Hash(K, V)`, empty to begin with | `HashStore(Int32, Todo).new` |
+| `ArrayStore(E)` | An `Array(E)`, empty to begin with | `ArrayStore(String).new` |
+| `Store(T)` | Whatever the block makes: a number, a struct, a collection with entries in it | `Store.new { 0 }` |
+
+`HashStore` and `ArrayStore` are the two collections a store usually holds,
+with helpers that copy out the plain `Array` and `Hash` a route wants. A
+`Store(T)` holds any value, and answers what a block works out from it.
 
 ## Reading and changing
+
+Every store has these:
+
+| Call | What it does |
+|---|---|
+| `read { \|v\| ... }` | The block's answer, worked out with the lock held. |
+| `update { \|v\| ... }` | Changes a `Hash` or an `Array` in place with the lock held; answers the block's answer (an id handed out, a count, nil). |
+| `size` | How many entries or elements. |
+
+`HashStore(K, V)` and `ArrayStore(E)` copy out what a route wants:
+
+| Call | Store | What it answers |
+|---|---|---|
+| `values` | `HashStore` | The values, an `Array(V)` in insertion order. |
+| `keys` | `HashStore` | The keys, an `Array(K)` in insertion order. |
+| `to_h` | `HashStore` | A copy of the hash, a `Hash(K, V)`. |
+| `[]?(key)` | `HashStore` | The entry under *key*, or nil. |
+| `to_a` | `ArrayStore` | The elements, an `Array(E)`. |
+| `[]?(index)` | `ArrayStore` | The element at *index*, or nil. |
+
+`Store(T)` has three more, for a value that is `Share` as it is:
 
 | Call | What it does |
 |---|---|
 | `Store.new { value }` | Makes the value inside the store; nothing outside holds it. The block is checked as `Mutex.new`'s is. |
-| `read { \|v\| ... }` | The block's answer, worked out with the lock held. |
-| `update { \|v\| ... }` | Changes a `Hash` or an `Array` in place with the lock held; answers the block's answer (an id handed out, a count, nil). |
 | `replace { \|v\| new }` | Replaces the value with the block's answer: for a number or a struct, which a block cannot change in place. |
-| `get` / `set(value)` | The value itself, or a new one, for a `Share` value: `HITS.get`, `NAME.set("x")`. |
-| `values`, `keys` | A `Hash`'s values or keys, copied out as an `Array`, in insertion order. |
-| `to_a` | An `Array`'s elements, or a `Hash`'s key-value pairs, copied out. |
-| `to_h` | A copy of a `Hash`. |
-| `[]?(key)` | The entry under a key (or the element at an index), or nil. |
-| `size` | How many entries. |
+| `get` / `set(value)` | The value itself, or a new one: `HITS.get`, `NAME.set("x")`. |
 
 The copies are the caller's: nothing another worker does afterwards reaches
 them. What `read` and `update` answer still has to be `Share` - a number, a
 string, a struct of those, a `List`, a tuple of them - and a block that
 answers an `Array` or a `Hash` is refused where it is written, as `Mutex#get`
-refuses it. The snapshot helpers are there so that is rarely in the way.
+refuses it. The snapshot helpers are there so that is rarely in the way;
+they need the entries themselves to be `Share`.
 
 A value whose elements are not `Share` themselves - a struct holding an
 `Array(String)` - cannot leave the lock in any form. Work out the response
 inside the block instead:
 
 ```iyi
-NOTES = Store.new { [] of Note }        # Note has tags : Array(String)
+NOTES = ArrayStore(Note).new           # Note has tags : Array(String)
 
 get "/notes" do |env|
   env.json(NOTES.read { |notes| JSON.to_json(notes) })   # a String leaves the lock

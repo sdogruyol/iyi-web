@@ -39,7 +39,7 @@ def current_user(env : Context) : User | AuthError
   end
 end
 
-CURRENT_USER = Dep.new { |env| current_user(env) }
+CURRENT_USER = Dep.new(User) { |env| current_user(env) }
 
 # Uses the provider above: a 401 from it stays a 401, and a user who is
 # not an admin is a 403.
@@ -48,10 +48,10 @@ def admin(env : Context) : User | AuthError
   user.admin ? user : AuthError.new(403, "admins only")
 end
 
-ADMIN = Dep.new { |env| admin(env) }
+ADMIN = Dep.new(User) { |env| admin(env) }
 
 # A provider that cannot fail: its value is the whole answer.
-VERSION = Dep.new { |env| "v" + (env.request.headers["X-Version"]? || "1") }
+VERSION = Dep.new(String) { |env| "v" + (env.request.headers["X-Version"]? || "1") }
 
 def as_user(method : String, path : String, user : String?, body : String = "") : Request
   request = http_request(method, path, "", body, body.empty? ? "" : "application/json")

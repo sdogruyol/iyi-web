@@ -17,7 +17,7 @@
 #   Api    a JSON CRUD over an in-memory store, as typed routes: a
 #          `path: Int32` capture, a validated body (`body:` + `Validate`),
 #          `derive serializable` responses and a JSON 404, with the notes
-#          in a `Store` so it serves on every core
+#          in a `HashStore` so it serves on every core
 #   Full   HTML pages from views/ inside a layout, and public/ served as
 #          static files
 module cmd/scaffold
@@ -275,7 +275,7 @@ API_ROUTES = <<-'IYI'
   import std/json::{serializable}
   import web/iyi_web/router::{Router}
   import web/iyi_web/failure::{StatusError}
-  import web/iyi_web/store::{Store}
+  import web/iyi_web/store::{HashStore}
   import web/iyi_web/validation::{Validate, Validator}
 
   # What a client sends. A field with a default may be left out.
@@ -305,10 +305,10 @@ API_ROUTES = <<-'IYI'
   end
 
   # Every call builds a router with its own empty store. The routes run on
-  # every core at once, so the notes are in a `Store` (a table behind a
-  # lock) and the last id is an `Atomic`.
+  # every core at once, so the notes are in a `HashStore` (a table behind
+  # a lock) and the last id is an `Atomic`.
   pub def note_routes : Router
-    notes = Store.new { {} of Int32 => Note }
+    notes = HashStore(Int32, Note).new
     last_id = Atomic(Int32).new(0)
     router = Router.new
 

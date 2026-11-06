@@ -198,7 +198,7 @@ yazılmasın. Bir kere tanımla, istediğin yemeğe bağla.
       `password`, `otp` gibi parçalar mevcut).
 - [x] Bunlar OpenAPI'ye `securitySchemes` olarak yansır.
 
-**Durum:** tamam. `Dep.new { |env| ... }` ve `deps:`; `bearer_auth`,
+**Durum:** tamam. `Dep.new(User) { |env| ... }` ve `deps:`; `bearer_auth`,
 `api_key_auth`, `jwt_auth`, OAuth2 password flow (bkz.
 `docs/dependencies-and-auth.md`).
 

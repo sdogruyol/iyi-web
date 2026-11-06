@@ -11,7 +11,7 @@ import std/list::{List}
 import std/time::{Span, Time}
 import iyi_web/tracing::*
 import iyi_web/background::{Background}
-import iyi_web/store::{Store}
+import iyi_web/store::{Store, ArrayStore}
 import iyi_web/router::{Router}
 import iyi_web/server::{Server}
 import iyi_web/config::{Config}
@@ -335,7 +335,7 @@ end
 
 describe "JsonLinesExporter" do
   it "writes one JSON object per span per line" do
-    lines = Store.new { [] of String }
+    lines = ArrayStore(String).new
     exporter = JsonLinesExporter.to { |line| lines.update { |l| l << line; nil } }
     span = RequestSpan.server(parse_traceparent("00-#{TRACE}-#{PARENT}-01"), nil, "GET /x")
     span.set_attribute("http.response.status_code", 200)
@@ -383,7 +383,7 @@ end
 
 describe "OtlpHttpExporter" do
   it "posts a batch to a collector, and counts a refused post as failed" do
-    received = Store.new { [] of String }
+    received = ArrayStore(String).new
     collector = Router.new
     collector.post "/v1/traces" do |env|
       body = env.request.body

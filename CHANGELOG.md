@@ -44,10 +44,14 @@ and `iyi_web/intake` are gone, and std/http caps every request body at
   `description:`, `tags:` and security; and `/docs`, Swagger UI 5 loaded
   from the jsDelivr CDN (`iyi_web/openapi`). The document of
   `examples/openapi_auth.iyi` passes openapi-spec-validator.
-- Dependencies: `Dep.new { |env| ... }` providers whose error ends the
-  request with its status before the route runs, composed with
-  `resolve(env)!`, run once per request, and combined with `Dep.all(...)`
-  into a named tuple (`iyi_web/deps`).
+- Dependencies: `Dep.new(User) { |env| ... }` providers of the type they
+  name, whose block answers it or an error - anything else is refused
+  where it is written - and whose error ends the request with its status
+  before the route runs; composed with `resolve(env)!`, run once per
+  request, and combined with `Dep.all(user: A, db: B)` into a named tuple
+  (a macro that names the tuple's type for `Dep.combine(type, deps)`).
+  Every exported signature is written, so the module is an artifact
+  `iyi mod release` accepts (`iyi_web/deps`).
 - Auth providers: `bearer_auth`, `api_key_auth` (header, query or
   cookie), `jwt_auth` and `oauth2_password_bearer`, with `bearer_token`,
   `api_key`, `password_grant`, `token_response`, `AuthError` and
@@ -82,11 +86,13 @@ and `iyi_web/intake` are gone, and std/http caps every request body at
   once, isolated. `Background` is the runner as a value (`run`, `close`,
   `pending`, `panics`, `completed`, `running?`, `closing?`); `BACKGROUND`
   is the process's, started beside the listener by `run`.
-- `Store(T)` (`iyi_web/store`): shared state every worker may change
-  without the `Mutex` showing. `read`, `update` and `replace` run a block
-  under the lock; `values`, `keys`, `to_a`, `to_h`, `[]?`, `size`, `get`
-  and `set` copy out what a route wants. `Share`, so routes, handlers and
-  background tasks capture it on every core.
+- Stores (`iyi_web/store`): shared state every worker may change without
+  the `Mutex` showing. `HashStore(K, V)` and `ArrayStore(E)` start empty
+  and copy out what a route wants (`values`, `keys`, `to_h`, `to_a`,
+  `[]?`, `size`), as `Array(V)`, `Hash(K, V)` and so on; `Store(T)` holds
+  whatever its block makes, with `get`, `set` and `replace`. All run a
+  block under the lock with `read` and `update`, and are `Share`, so
+  routes, handlers and background tasks capture them on every core.
 - Prometheus metrics (`iyi_web/metrics`): `MetricsHandler` counts
   `http_requests_total{method,route,status}`, times
   `http_request_duration_seconds{method,route}` over Prometheus' default
@@ -104,7 +110,7 @@ and `iyi_web/intake` are gone, and std/http caps every request body at
   drained by a background task, flushed when the server stops, to a
   `SpanExporter`: `OtlpHttpExporter` posts OTLP/HTTP JSON to a collector,
   `JsonLinesExporter` writes one JSON line per span.
-- `examples/observability.iyi`: a `Store`, metrics, tracing to a collector
+- `examples/observability.iyi`: a `HashStore`, metrics, tracing to a collector
   or standard output, background work and start/stop hooks together.
 - Guides in `docs/`: `lifecycle-and-background.md`, `state.md`,
   `observability.md` and `plugins.md` (writing, testing and publishing a
@@ -121,7 +127,7 @@ and `iyi_web/intake` are gone, and std/http caps every request body at
     that builds and passes its own test: `iyi.mod` requiring iyi-web as
     `web`, `app.iyi`, routes in their own module, an in-process
     `app_test.iyi`, `.gitignore`; `--api` a validated JSON CRUD of typed
-    routes (`path: Int32`, `body:`, `response:`) over a `Store`, `--full`
+    routes (`path: Int32`, `body:`, `response:`) over a `HashStore`, `--full`
     views in a layout and `public/`. `--web-path` adds a `replace` line
     for a local checkout. A non-empty directory is refused before anything
     is written.
@@ -203,7 +209,7 @@ and `iyi_web/intake` are gone, and std/http caps every request body at
 - `.gitignore` ignores `.iyi-web/` (dev builds), the postgres example's
   binary, and bench/compare's builds, results and fetched dependencies.
 - `examples/typed_json.iyi` and `examples/openapi_auth.iyi` keep their notes
-  in a `Store` and serve on every core (`typed_json` no longer registers its
+  in a `HashStore` and serve on every core (`typed_json` no longer registers its
   routes with `workers: 1`); `examples/templates.iyi`,
   `examples/observability.iyi` and `examples/testing/notes.iyi` read their
   `:id` captures with `path: Int32`, so a word there is a `422`.
