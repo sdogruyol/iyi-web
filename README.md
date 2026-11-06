@@ -1,5 +1,12 @@
 # iyi-web
 
+[![CI](https://github.com/sdogruyol/iyi-web/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/sdogruyol/iyi-web/actions/workflows/ci.yml?query=branch%3Amaster)
+[![Release](https://img.shields.io/github/v/release/sdogruyol/iyi-web)](https://github.com/sdogruyol/iyi-web/releases/latest)
+[![iyi](https://img.shields.io/badge/iyi-%E2%89%A5%200.20.1-blue)](https://iyi-lang.com)
+[![Docs](https://img.shields.io/badge/docs-guide%20%26%20tutorial-informational)](docs/index.md)
+[![License: MIT](https://img.shields.io/github/license/sdogruyol/iyi-web)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/sdogruyol/iyi-web?style=social)](https://github.com/sdogruyol/iyi-web/stargazers)
+
 The web framework for [iyi](https://iyi-lang.com).
 
 ```iyi
