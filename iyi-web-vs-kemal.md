@@ -111,7 +111,7 @@ Not in Kemal's core, but seen in its examples:
 ## 5. Status
 
 iyi-web `master`, on iyi 0.20.1, the oldest it supports. `iyi test iyi_web`
-passes in all 45 test files and `iyi test examples` in its one. Every example
+passes in all 46 test files and `iyi test examples` in its one. Every example
 was built, run and exercised with curl; WebSockets with Node's client, and
 over TLS with Python's.
 

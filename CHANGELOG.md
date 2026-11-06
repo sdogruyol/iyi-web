@@ -30,8 +30,16 @@ Removed, and `docs/templates.md` for the migration).
 - `response: T` writes the block's answer as JSON and checks its type
   when the program is compiled; `status:` is the status a route answers
   with unless its block sets another, on plain routes too.
-- `Params#query_pairs` and `json_errors(root, T)` in `iyi_web/validation`,
-  used by the above.
+- OpenAPI 3.1: `openapi(title, version)` (and `Router#openapi`) serves
+  `/openapi.json`, made from every route, mount and namespace, with
+  parameters, request and response schemas derived from the types at
+  compile time (`required`, nested structs as `components.schemas`,
+  arrays, enums, nullable, `JSON::Field` keys and ignores), `summary:`,
+  `description:` and `tags:`; and `/docs`, Swagger UI 5 loaded from the
+  jsDelivr CDN (`iyi_web/openapi`). The document of
+  `examples/json_api.iyi` passes openapi-spec-validator.
+- `Params#query_pairs`, `json_errors(root, T)` and `enum_name` in
+  `iyi_web/validation`, used by the above.
 - `on_start do ... end` and `on_stop do ... end` in the DSL
   (`iyi_web/lifecycle`), FastAPI's `lifespan` as two hooks. Start hooks run
   in order before the server is bound; one that answers an `Error` or panics
@@ -68,15 +76,17 @@ Removed, and `docs/templates.md` for the migration).
   `iyi_web/templates/process.iyi`, instead of std/eiy's `eiy/process`; tags,
   `<%- -%>` trimming, comments and error positions are unchanged.
 - `examples/typed_json.iyi` and `examples/json_api.iyi` are typed routes:
-  no route parses a parameter or matches on `BodyError` by hand.
+  no route parses a parameter or matches on `BodyError` by hand, and
+  `json_api` serves its OpenAPI document.
 - Each route method of `Router` and the DSL is now a set of overloads, one
-  per combination of the typed options, and takes `response:` and
-  `status:`. `get "/" do |env| ... end` keeps working unchanged.
+  per combination of the typed options, and takes `response:`, `status:`,
+  `summary:`, `description:` and `tags:`. `get "/" do |env| ... end`
+  keeps working unchanged.
 - `run`, after the drain, runs the `on_stop` hooks before returning.
 - `examples/templates.iyi` and `examples/testing/notes.iyi` read their `:id`
   captures with `path: Int32`, so a word there is a `422`.
 - The README's install lines name `@v0.5.1`, the latest release, and
-  `iyi-web-vs-kemal.md`'s status names iyi 0.20.1, the 45 test files and
+  `iyi-web-vs-kemal.md`'s status names iyi 0.20.1, the 46 test files and
   the thirteen examples.
 
 ### Removed
