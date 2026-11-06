@@ -176,13 +176,17 @@ end
 **ELI5:** The customer sees what they can order from the menu without
 walking into the kitchen.
 
-- [ ] Route registrations + Phase 1's types → `/openapi.json`.
-- [ ] An embedded UI at `/docs` (one static HTML page is enough).
+- [x] Route registrations + Phase 1's types → `/openapi.json`.
+- [x] An embedded UI at `/docs` (one static HTML page is enough).
 - The document is generated at compile time; a card against FastAPI, which
   builds its schema at run time.
 
 **Done when:** `/openapi.json` passes an OpenAPI validator and a client
 generated from it (e.g. openapi-generator) can call the real API.
+
+**Status:** done. `openapi(...)` serves `/openapi.json` and `/docs` with
+Swagger UI; the document of `examples/json_api.iyi` passes
+openapi-spec-validator (see `docs/openapi.md`).
 
 ### Phase 3: Kitchen helpers (the `Depends` equivalent)
 
