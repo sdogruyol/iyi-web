@@ -14,9 +14,9 @@ end
 run
 ```
 
-iyi-web serves HTTP/1.1 and HTTPS from native iyi programs. Routes are blocks,
-middleware is a class, and settings live in a single `config` value. The type
-a route returns is checked when the program compiles.
+iyi-web serves HTTP/1.1, HTTP/2 and HTTPS from native iyi programs. Routes
+are blocks, middleware is a class, and settings live in a single `config`
+value. The type a route returns is checked when the program compiles.
 
 ## Features
 
@@ -30,7 +30,7 @@ a route returns is checked when the program compiles.
 - Bearer tokens, HS256 JWTs, API keys and OAuth2's password flow, each in
   the OpenAPI document as a security scheme
 - URL, query-string, form, JSON and `multipart/form-data` parameters, with
-  file uploads
+  file uploads streamed to disk as they arrive
 - JSON bodies read into your own types, with validation and `400`/`422`
   answers that name each bad field
 - Before and after filters for every route, a path pattern or a single method
@@ -51,8 +51,14 @@ a route returns is checked when the program compiles.
 - `on_start` and `on_stop` hooks
 - Templates with layouts and partials, compiled into the program, escaping
   every value they print unless it is marked as markup
-- Command-line flags for host, port and TLS
-- HTTPS and `wss://` with iyi's own TLS 1.3
+- HTTP/1.1 and HTTP/2 on the same port: h2c with prior knowledge in the
+  clear, h2 by ALPN over TLS, through iyi's `std/http`
+  ([Transport](docs/transport.md))
+- HTTPS and `wss://` with iyi's own TLS 1.3 and 1.2, mutual TLS with client
+  certificates, and certificates from Let's Encrypt (`config.autocert`)
+- Request bodies streamed to the route as they arrive (`stream_bodies`)
+- zstd or gzip responses, negotiated per client (`config.compress`)
+- Command-line flags for host, port, TLS versions and client CAs
 - Persistent connections, each served by its own fiber
 - Graceful shutdown on `INT` and `TERM`, and timeouts for slow and idle clients
 - IPv4, IPv6 and unix-socket listeners
@@ -254,7 +260,8 @@ end
 `url`, `query` and `body` are `Hash(String, String)` tables of percent-decoded
 values; `env.params["name"]?` searches them in that order. Indexing without
 `?` panics when the key is missing, so use `[]?` for optional values.
-`env.params.raw_body` is the body as it arrived.
+`env.params.raw_body` is the body as it arrived (empty for a
+`multipart/form-data` request, whose files [stream to disk](docs/transport.md#request-bodies)).
 
 These are strings. To read one as a number or a flag, with a `422` naming
 it when it is not one, use `env.params.int("id")`, `int64`, `float`, `bool`
@@ -1361,7 +1368,10 @@ config.max_request_body_size = 1024 * 1024
 | `write_timeout` | `60` | |
 | `idle_timeout` | `75` | |
 | `unix_socket` | `nil` | |
-| `ssl` | `nil` (plain HTTP) | `-s --ssl-key-file FILE --ssl-cert-file FILE` |
+| `ssl` | `nil` (plain HTTP) | `-s --ssl-key-file FILE --ssl-cert-file FILE`, `--ssl-min-version 1.2`, `--ssl-client-ca FILE` |
+| `autocert` | `nil` | |
+| `stream_bodies` | `false` | |
+| `compress` | `false` | |
 | `websocket_allowed_origins` | `[] of String` (same-origin) | |
 | `websocket_max_message_size` | `8 * 1024 * 1024` | |
 | `app_name` | `"iyi-web"` | |
@@ -1370,7 +1380,11 @@ config.max_request_body_size = 1024 * 1024
   it is closed.
 - A request whose body is larger than `max_request_body_size` bytes gets
   `413 Content Too Large`, as soon as its `Content-Length` is read, and its
-  connection is closed.
+  connection is closed. std/http refuses any body past 64 MiB whatever this
+  says, so a limit above that has no effect.
+- `autocert`, `stream_bodies` and `compress` (Let's Encrypt certificates,
+  bodies read as they arrive, zstd or gzip answers) are described in
+  [Transport](docs/transport.md).
 - A request line longer than 8 KiB gets `414 URI Too Long`, and header
   fields past 16 KiB `431 Request Header Fields Too Large`, the bounds
   Crystal's server holds Kemal to. Neither is a setting.
@@ -1455,8 +1469,11 @@ logger JSONLogger.new
 bracketed (`-b ::1`, `-b '[::1]'`); `::` takes IPv6 connections only. An
 unknown flag or an invalid port stops the program with the reason and the
 list of flags. `-s` (`--ssl`) serves HTTPS with the PEM files `--ssl-key-file`
-and `--ssl-cert-file` name; a missing or unreadable file, or a key TLS
-refuses, stops the program with the reason. `extra_options` adds your own:
+and `--ssl-cert-file` name; `--ssl-min-version 1.2` takes TLS 1.2 clients as
+well as 1.3's, and `--ssl-client-ca FILE` asks every client for a
+certificate those roots issued (mutual TLS). A missing or unreadable file,
+or a key TLS refuses, stops the program with the reason. `extra_options`
+adds your own:
 
 ```iyi
 extra_options do |parser|
@@ -1510,18 +1527,23 @@ import std/file::{File}
 import std/tls::{TlsServerConfig}
 
 tls = TlsServerConfig.from_pem(File.read("chain.pem"), File.read("key.pem")).or_panic
-tls.alpn = ["http/1.1"]
 config.ssl = tls
 ```
 
-TLS is `std/tls`, iyi's own, TLS 1.3 only. The certificate chain comes leaf
-first; the key is PKCS #8, Ed25519, P-256 or RSA of 2048 bits or more. Each
-connection's handshake runs in its own fiber within `read_timeout`, and one
-that fails closes that connection only. Streaming, server-sent events,
-WebSockets (`wss://`) and the unix socket listener work over TLS.
-`Server#bind_tls(host, port, tls)` does the same without the DSL. `std/tls`
-has not been audited yet; until it is, a reverse proxy remains the
-conservative choice in front of a public site.
+TLS is `std/tls`, iyi's own: TLS 1.3, and TLS 1.2 as well when
+`tls.min_version = TlsVersion::TLS12` (or `--ssl-min-version 1.2`). A
+config that names no ALPN protocol is offered `["h2", "http/1.1"]`, so
+browsers get HTTP/2; set `tls.alpn = ["http/1.1"]` to keep to HTTP/1.1.
+The certificate chain comes leaf first; the key is PKCS #8, Ed25519, P-256
+or RSA of 2048 bits or more. Each connection's handshake runs in its own
+fiber within `read_timeout`, and one that fails closes that connection
+only. Streaming, server-sent events, WebSockets (`wss://`) and the unix
+socket listener work over TLS. `Server#bind_tls(host, port, tls)` does the
+same without the DSL. Mutual TLS, TLS 1.2's requirements and certificates
+from Let's Encrypt (`config.autocert`) are in
+[Transport](docs/transport.md#tls-13-and-12-mutual-tls). `std/tls` has not been
+audited yet; until it is, a reverse proxy remains the conservative choice
+in front of a public site.
 
 ## Deployment
 
@@ -1530,11 +1552,19 @@ iyi build --release app.iyi -o app
 IYI_WEB_ENV=production ./app -p 8080
 ```
 
-- iyi-web serves HTTP/1.1, and HTTPS itself with `-s` (see [HTTPS](#https)).
-  Behind a reverse proxy such as nginx, Caddy or HAProxy, the proxy can reach
-  the server over a unix socket (`unix_socket`). Keep `idle_timeout` above the
-  proxy's own keep-alive timeout, so that the proxy is the one to close an
-  idle connection.
+- iyi-web serves HTTP/1.1 and HTTP/2, and HTTPS itself with `-s` (see
+  [HTTPS](#https)), with certificates from Let's Encrypt if you set
+  `config.autocert` ([Transport](docs/transport.md)). Behind a reverse
+  proxy such as nginx, Caddy or HAProxy, the proxy can reach the server over
+  a unix socket (`unix_socket`). Keep `idle_timeout` above the proxy's own
+  keep-alive timeout, so that the proxy is the one to close an idle
+  connection.
+- One process listens per port: `reuse_port` is not available (std/socket
+  sets `SO_REUSEADDR` only), so run several processes behind a proxy rather
+  than on one port.
+- Request bodies stop at 64 MiB whatever `max_request_body_size` says (a
+  std/http limit); larger uploads need another route in, such as direct
+  uploads to object storage.
 - A client that disconnects while its response is being written ends that
   request only; iyi's runtime reports it as a panic line on standard error.
 
@@ -1666,12 +1696,14 @@ bash bench/run.sh --help       # durations, connections, port, a filter
 
 - `bench/micro.iyi` times the paths every request takes with `std/benchmark`:
   route lookup in a tree of about a hundred static, parameter and wildcard
-  routes (`radix.*`, `router.*`), reading a request head off the wire
-  (`intake.*`), query, form and JSON parameters (`params.*`), the header table
-  (`headers.*`), and a whole in-process dispatch through `RouteHandler`
-  (`dispatch.*`) and through `handler_chain` (`chain.*`). Each case is checked
-  once before it is timed, so one that stops doing its job aborts rather than
-  reporting a fast nothing.
+  routes (`radix.*`, `router.*`), parsing a request off the wire with
+  std/http's parser as the server does (`wire.get`, `wire.post_form`; before
+  the move onto std/http these were `intake.*`), query, form and JSON
+  parameters (`params.*`), the header table (`headers.*`), and a whole
+  in-process dispatch through `RouteHandler` (`dispatch.*`) and through
+  `handler_chain` (`chain.*`). Each case is checked once before it is
+  timed, so one that stops doing its job aborts rather than reporting a
+  fast nothing.
 - `bench/load.iyi` is a load generator for Linux and Windows alike (no `wrk`):
   N tasks, one keep-alive connection each, request `bench/server.iyi`'s hello,
   JSON and parameter routes for a fixed time and report req/s, p50 and p99

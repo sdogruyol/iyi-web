@@ -23,7 +23,8 @@ module iyi_web/server_tls_test
 import std/socket::{IyiSocket}
 import std/file::{File}
 import std/time::{Time}
-import std/tls::{TlsClient, TlsConfig, TlsServerConfig}
+import std/http::{HTTP}
+import std/tls::{TlsClient, TlsConfig, TlsServerConfig, TlsIdentity, TlsError}
 import std/x509::{Certificate}
 import iyi_web/router::{Router, RouteHandler}
 import iyi_web/handler::{chain}
@@ -101,6 +102,10 @@ end
 router.get "/peer" do |env|
   (env.request.remote_address || "nil") + " tls=" + env.request.tls?.to_s
 end
+router.get "/who" do |env|
+  presented = env.request.peer_certificates
+  env.request.version + " " + (presented.empty? ? "anonymous" : presented[0].subject_name)
+end
 
 cfg = config
 cfg.logging = false
@@ -111,6 +116,21 @@ tls = TlsServerConfig.from_pem(File.read(__DIR__ + "/testdata/localhost.crt"), F
 tls.alpn = ["http/1.1"]
 server = Server.new(chain([RouteHandler.new(router, cfg)]), cfg)
 port = server.bind_tls("127.0.0.1", 0, tls)
+
+# Mutual TLS, and a config that offers no protocol by ALPN, which the
+# server fills in with HTTP/2 first. The client's certificate comes from
+# a root of its own, `client-ca.crt`, which signed `client.crt` for
+# `clientAuth` (made as ca.crt and localhost.crt above, with
+# `-subj "/CN=iyi-web test client"` and `extendedKeyUsage=clientAuth`;
+# the root's key thrown away too).
+mutual_tls = TlsServerConfig.from_pem(File.read(__DIR__ + "/testdata/localhost.crt"), File.read(__DIR__ + "/testdata/localhost.key")).or_panic
+mutual_tls.client_roots = Certificate.from_pem(File.read(__DIR__ + "/testdata/client-ca.crt")).or_panic
+mutual = Server.new(chain([RouteHandler.new(router, cfg)]), cfg)
+mutual_port = mutual.bind_tls("127.0.0.1", 0, mutual_tls)
+
+def client_identity : TlsIdentity
+  TlsIdentity.from_pem(File.read(__DIR__ + "/testdata/client.crt"), File.read(__DIR__ + "/testdata/client.key")).or_panic
+end
 
 group do |g|
   g.spawn do
@@ -247,14 +267,66 @@ group do |g|
           end
         end
       end
+
+      it "offers HTTP/2 by ALPN when the config names no protocol, and speaks it" do
+        offered = trusting
+        offered.alpn = ["h2", "http/1.1"]
+        offered.identity = client_identity
+        socket = IyiSocket.connect("127.0.0.1", mutual_port).or_panic
+        socket.read_timeout_ms = 5000
+        chosen = TlsClient.over(socket, "localhost", offered, 5000).or_panic
+        assert chosen.alpn_protocol == "h2"
+        chosen.close
+
+        HTTP.tls_config = offered
+        answer = HTTP.get("https://localhost:#{mutual_port}/who").or_panic
+        assert answer.status == 200
+        assert answer.body.starts_with?("HTTP/2 ")
+      end
+
+      it "asks for a client certificate under client_roots and hands its chain to the request" do
+        presenting = trusting
+        presenting.identity = client_identity
+        socket = IyiSocket.connect("127.0.0.1", mutual_port).or_panic
+        socket.read_timeout_ms = 5000
+        client = TlsClient.over(socket, "localhost", presenting, 5000).or_panic
+        client.write("GET /who HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").or_panic
+        who = read_to_close(client)
+        client.close
+        assert http_body(who).starts_with?("HTTP/1.1 ")
+        assert http_body(who).includes?("iyi-web test client")
+        # The same route on the server that asks for none.
+        assert http_body(fetch(port, "/who")) == "HTTP/1.1 anonymous"
+
+        # Without one the handshake is refused, and nothing is served.
+        bare = IyiSocket.connect("127.0.0.1", mutual_port).or_panic
+        bare.read_timeout_ms = 5000
+        served = false
+        case refused = TlsClient.over(bare, "localhost", trusting, 5000)
+        in TlsError
+        in TlsClient
+          refused.write("GET /who HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+          got = refused.read(16384)
+          served = got.is_a?(String) && got.starts_with?("HTTP/")
+          refused.close
+        end
+        bare.close
+        assert !served
+      end
     end
 
     server.close
+    mutual.close
     0
   end
 
   g.spawn do
     server.listen
+    0
+  end
+
+  g.spawn do
+    mutual.listen
     0
   end
 end
