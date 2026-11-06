@@ -1,0 +1,38 @@
+# An application whose second `on_start` hook answers an error: run by
+# iyi_web/lifecycle_test.iyi, which expects the start to stop there - the
+# third hook never runs, the server never says it is ready - and the exit
+# to name the hook's line and the error.
+module iyi_web/lifecycle_apps/failing_start
+
+import iyi_web/dsl::*
+
+struct DatabaseDown
+  def initialize
+  end
+end
+
+impl Error for DatabaseDown
+  def message : String
+    "database unreachable"
+  end
+end
+
+logging false
+
+on_start do
+  puts "hook one"
+end
+
+on_start do
+  (1 == 1 ? DatabaseDown.new : nil)
+end
+
+on_start do
+  puts "hook three"
+end
+
+get "/" do |env|
+  "never served"
+end
+
+run 0

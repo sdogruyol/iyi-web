@@ -1,0 +1,8 @@
+<% content_for "title" do %>Search<% end -%>
+<form action="/search"><input name="q" value="<%= query %>"><button>Search</button></form>
+<h1>Books matching <%= query %></h1>
+<ul>
+<% found.each do |book| -%>
+<%= render "_book.eiy" -%>
+<% end -%>
+</ul>

@@ -212,6 +212,15 @@ pub def decode_json(text : String, root : Any, type : T.class) : T | BodyError f
   value
 end
 
+# What `decode_json` would refuse in *root* read as *type*, by field path;
+# empty when the shape is right. The whole value's own refusal is under
+# `""`. `Validate` is not run: nothing has been read yet.
+pub def json_errors(root : Any, type : T.class) : Hash(String, String) forall T
+  errors = {} of String => String
+  check_value(root, type, "", errors)
+  errors
+end
+
 # The read, in a task of its own: a refusal the check let through is
 # caught as the task's `Panicked` rather than ending the route.
 private def read_isolated(text : String, type : T.class) : T | Panicked forall T

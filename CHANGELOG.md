@@ -6,6 +6,72 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
+Requires iyi 0.20.1 or later. Breaking: templates escape `<%= %>` output,
+a layout's `content` and `yield_content` are `SafeHTML`, and
+`iyi_web/templates` no longer re-exports `std/eiy` (see Changed and
+Removed, and `docs/templates.md` for the migration).
+
+### Added
+
+- Typed parameter lookups: `env.params.int("id")`, `int64`, `float`,
+  `bool` and `string` answer the value or a `ParamError` (422, naming the
+  parameter), with `from: :url | :query | :body` and `default:`. Reading
+  is strict: `"12abc"`, `" 12"` and `""` are not integers, `nan` and
+  `inf` are not numbers (`iyi_web/coerce`, `iyi_web/params`).
+- `json_errors(root, T)` in `iyi_web/validation`, used by the above.
+- `on_start do ... end` and `on_stop do ... end` in the DSL
+  (`iyi_web/lifecycle`), FastAPI's `lifespan` as two hooks. Start hooks run
+  in order before the server is bound; one that answers an `Error` or panics
+  stops the start, and the program exits 1 naming the hook's file and line
+  (`could not start: on_start (app.iyi:3) failed: ...`). Stop hooks run
+  after the drain, the last written first; one that fails is reported and
+  the rest still run. Blocks are checked like a route's; `workers: 1` keeps
+  one unchecked without putting the server on one thread. `Lifecycle`,
+  `lifecycle_hook` and `LIFECYCLE` run hooks as a value, for tests.
+- A guide in `docs/`: `lifecycle-and-background.md`, the start and stop
+  hooks.
+- `raw(value)` (in `iyi_web/dsl` and `iyi_web/templates`): `value.to_s` as
+  `SafeHTML`, printed by `<%= %>` without escaping.
+- `SafeHTML` and `HTMLBuffer` in `iyi_web/templates`.
+- `docs/templates.md`, with autoescape and the migration from 0.5.
+- `examples/templates.iyi` has a `/search` page that prints the visitor's
+  query in an attribute and a heading, and a `raw` rating.
+
+### Changed
+
+- **Breaking:** `<%= expr %>` in a template rendered with `render` prints
+  `expr.to_s` HTML-escaped (`&`, `<`, `>`, `"`, `'`, as `HTML.escape`). The
+  template's own text is printed as written. Migration: drop
+  `HTML.escape(...)` inside `<%= %>` (it would escape twice), and wrap every
+  `<%= %>` that prints markup on purpose in `raw(...)`: HTML the program
+  built, `csrf_tag(env)`, or a page a helper rendered in iyi code.
+- **Breaking:** a layout's `content` and `yield_content` answer `SafeHTML`
+  instead of `String`; `<%= content %>` and `<%= yield_content "key" %>`
+  print as before, String methods on them need `.to_s` first.
+- `render` written inside a template answers `SafeHTML`, so
+  `<%= render "_partial.eiy" %>` is not escaped a second time; written in iyi
+  code it still answers `String`.
+- Templates are translated by iyi-web's own compile-time program,
+  `iyi_web/templates/process.iyi`, instead of std/eiy's `eiy/process`; tags,
+  `<%- -%>` trimming, comments and error positions are unchanged.
+- `examples/templates.iyi` reads its `:id` capture with `env.params.int`, so
+  a word there is a `422`.
+- `run`, after the drain, runs the `on_stop` hooks before returning.
+- The README's install lines name `@v0.5.1`, the latest release, and
+  `iyi-web-vs-kemal.md`'s status names iyi 0.20.1, the 44 test files and
+  the thirteen examples.
+
+### Removed
+
+- **Breaking:** `iyi_web/templates` (and through it `iyi_web/dsl`) no longer
+  re-exports `std/eiy`; a program that names `Eiy` imports `std/eiy` itself.
+  `ContentBlocks#capture` yields an `HTMLBuffer`, not an `Eiy::Buffer`.
+
+### Security
+
+- Templates escape what `<%= %>` prints (see Changed): a value a request
+  sent can no longer inject markup or script into a page by default.
+
 ## [0.5.1] - 2026-11-04
 
 Requires iyi 0.20.1 or later.

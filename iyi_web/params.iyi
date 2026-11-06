@@ -16,9 +16,19 @@ module iyi_web/params
 
 import std/json::{Any, Parser}
 import iyi_web/validation::{BodyError, decode_json}
+import iyi_web/coerce::{ParamError, decode_param}
 import iyi_web/codec::*
 import iyi_web/request::{Request}
 import iyi_web/multipart::{FileUpload, Multipart, MultipartError, multipart_boundary, parse_multipart}
+
+# Where a typed lookup (`Params#int` and the rest) reads its parameter:
+# `Any` as `params[key]` does, url first, then query, then form body.
+pub enum ParamSource
+  Any
+  Url
+  Query
+  Body
+end
 
 pub class Params
   @url : Hash(String, String)
@@ -183,6 +193,67 @@ pub class Params
 
   pub def has_key?(key : String) : Bool
     !self[key]?.nil?
+  end
+
+  # The parameter *key* as a type, read strictly (`iyi_web/coerce`): a
+  # `ParamError` - 422, naming *key* - when it is missing and has no
+  # *default*, or when it is not of the type. `"12abc"` is not an
+  # integer, and nothing turns it into 0.
+  #
+  #     id = env.params.int("id")                          # url, query, body
+  #     next id if id.is_a?(ParamError)                    # answered 422
+  #     page = env.params.int("page", from: :query, default: 1)
+  #
+  # A route's block is kept and called later, so `!` cannot leave it:
+  # `next` the error, and the router answers it with its status. In a
+  # def, `env.params.int("id")!` does the same.
+  pub def string(key : String, from : ParamSource = ParamSource::Any, default : String? = nil) : String | ParamError
+    typed(key, from, String, default)
+  end
+
+  pub def int(key : String, from : ParamSource = ParamSource::Any, default : Int32? = nil) : Int32 | ParamError
+    typed(key, from, Int32, default)
+  end
+
+  pub def int64(key : String, from : ParamSource = ParamSource::Any, default : Int64? = nil) : Int64 | ParamError
+    typed(key, from, Int64, default)
+  end
+
+  pub def float(key : String, from : ParamSource = ParamSource::Any, default : Float64? = nil) : Float64 | ParamError
+    typed(key, from, Float64, default)
+  end
+
+  # `true`, `1`, `yes`, `on`, `false`, `0`, `no`, `off`, in any case.
+  pub def bool(key : String, from : ParamSource = ParamSource::Any, default : Bool? = nil) : Bool | ParamError
+    typed(key, from, Bool, default)
+  end
+
+  private def typed(key : String, from : ParamSource, type : T.class, default : T?) : T | ParamError forall T
+    text = raw(key, from)
+    source = source_name(from)
+    if text.nil?
+      return default unless default.nil?
+      return ParamError.invalid(source, {key => "is required"})
+    end
+    decode_param(text, T, key, source)
+  end
+
+  private def raw(key : String, from : ParamSource) : String?
+    case from
+    in ParamSource::Any   then self[key]?
+    in ParamSource::Url   then @url[key]?
+    in ParamSource::Query then @query[key]?
+    in ParamSource::Body  then body[key]?
+    end
+  end
+
+  private def source_name(from : ParamSource) : String
+    case from
+    in ParamSource::Any   then "request"
+    in ParamSource::Url   then "path"
+    in ParamSource::Query then "query"
+    in ParamSource::Body  then "form"
+    end
   end
 
   pub def update_url(url : Hash(String, String)) : Nil

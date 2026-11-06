@@ -23,7 +23,8 @@ a route returns is checked when the program compiles.
 - Routes for `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `HEAD` and
   `QUERY`, with named and wildcard path segments
 - URL, query-string, form, JSON and `multipart/form-data` parameters, with
-  file uploads
+  file uploads, and `env.params.int(...)` and friends, which answer `422`
+  for a value that is not of the type
 - JSON bodies read into your own types, with validation and `400`/`422`
   answers that name each bad field
 - Before and after filters for every route, a path pattern or a single method
@@ -41,7 +42,9 @@ a route returns is checked when the program compiles.
 - Response compression, CORS and HTML form method override
 - Basic authentication, security headers, request ids and per-client rate
   limiting
-- Templates with layouts, compiled into the program
+- `on_start` and `on_stop` hooks
+- Templates with layouts and partials, compiled into the program, escaping
+  every value they print unless it is marked as markup
 - Command-line flags for host, port and TLS
 - HTTPS and `wss://` with iyi's own TLS 1.3
 - Persistent connections, each served by its own fiber
@@ -69,7 +72,7 @@ This fetches the latest release, records it in `iyi.sum` and writes one line to
 `iyi.mod`:
 
 ```
-require github.com/sdogruyol/iyi-web v0.5.0
+require github.com/sdogruyol/iyi-web v0.5.1
 ```
 
 Files then name iyi-web's modules by their full path. One `import` line loads
@@ -92,7 +95,7 @@ iyi get github.com/sdogruyol/iyi-web --as web
 or add ` as web` to the `require` line by hand:
 
 ```
-require github.com/sdogruyol/iyi-web v0.5.0 as web
+require github.com/sdogruyol/iyi-web v0.5.1 as web
 ```
 
 `web/iyi_web/...` then means `github.com/sdogruyol/iyi-web/iyi_web/...`:
@@ -105,7 +108,7 @@ import web/iyi_web/router::{Router}
 ### Versions
 
 `iyi get -u` moves to the latest release and
-`iyi get github.com/sdogruyol/iyi-web@v0.5.0` to a given one; both keep the
+`iyi get github.com/sdogruyol/iyi-web@v0.5.1` to a given one; both keep the
 short name. `iyi get -u --check` says whether a newer release exists without
 changing anything.
 
@@ -234,6 +237,10 @@ values; `env.params["name"]?` searches them in that order. Indexing without
 `?` panics when the key is missing, so use `[]?` for optional values.
 `env.params.raw_body` is the body as it arrived.
 
+These are strings. To read one as a number or a flag, with a `422` naming
+it when it is not one, use `env.params.int("id")`, `int64`, `float`, `bool`
+or `string` (see [One parameter at a time](#one-parameter-at-a-time)).
+
 A name sent more than once keeps its last value in the tables.
 `env.params.query_all("tag")` and `env.params.body_all("tag")` return every
 value, in the order sent, and an empty array when there is none; `body_all`
@@ -252,6 +259,42 @@ a top-level array is under the key `"_json"`. A request that declares JSON
 and sends something that does not parse gets `400 Bad Request` before the
 route runs, with the line and column where the body stopped making sense
 (see [Typed JSON bodies](#typed-json-bodies)).
+
+### One parameter at a time
+
+`env.params` reads a single parameter as a type. Each answers the value or a
+`ParamError` (422, naming the parameter):
+
+```iyi
+import web/iyi_web/coerce::{ParamError}
+
+get "/notes/:id" do |env|
+  id = env.params.int("id")
+  next id if id.is_a?(ParamError)          # answered 422
+  page = env.params.int("page", from: :query, default: 1)
+  next page if page.is_a?(ParamError)
+  "note #{id}, page #{page}"
+end
+```
+
+| Method | Type | Accepts |
+|---|---|---|
+| `string(key)` | `String` | anything |
+| `int(key)` | `Int32` | decimal digits with an optional sign |
+| `int64(key)` | `Int64` | the same, in Int64's range |
+| `float(key)` | `Float64` | a finite decimal or exponent number |
+| `bool(key)` | `Bool` | `true`, `1`, `yes`, `on`, `false`, `0`, `no`, `off`, in any case |
+
+Each takes `from:` (`:any`, the default, which searches url, then query,
+then form body as `env.params["key"]?` does; or `:url`, `:query`, `:body`)
+and `default:`. The default is used only when the parameter is missing: one
+that was sent and is not the type is still a 422. Reading is strict: `" 12"`,
+`"12abc"`, `"0x1f"` and `""` are not integers, and `"nan"` and `"inf"` are not
+numbers, so nothing turns a client's mistake into a silent `0`.
+
+A route's block is kept and called later, so `!` cannot leave it (the
+compiler says so). `next` the error, as above, and the router answers it with
+its status. Inside a `def`, `env.params.int("id")!` does the same.
 
 ### Typed JSON bodies
 
@@ -1140,10 +1183,8 @@ end
 ## Templates
 
 ```iyi
-import std/html::{HTML}
-
-get "/profile/:name" do |env|
-  name = HTML.escape(env.params.url["name"])
+get "/profile" do |env|
+  name = env.params.query["name"]? || "stranger"
   render "views/profile.eiy", "views/layout.eiy"
 end
 ```
@@ -1165,6 +1206,18 @@ end
 </html>
 ```
 
+`curl -G localhost:3000/profile --data-urlencode 'name=<script>alert(1)</script>'`
+prints
+
+```html
+<!DOCTYPE html>
+<html>
+<head><title>Profile of &lt;script&gt;alert(1)&lt;/script&gt;</title></head>
+<body><h1>Hello, &lt;script&gt;alert(1)&lt;/script&gt;</h1>
+</body>
+</html>
+```
+
 Templates use iyi's `.eiy` format: `<%= expr %>` prints a value and
 `<% code %>` runs iyi code. They are compiled into the program, and see the
 local variables where `render` is written: a route block, or a method, as a
@@ -1177,8 +1230,14 @@ controller's `def show(name : String) : String` with `render` inside.
   nothing.
 - A template path is relative to the file that calls `render`, or, for a
   template rendered inside another template, to that template.
-- Output is not escaped automatically; escape untrusted text with
-  `HTML.escape`.
+- `<%= expr %>` prints `expr.to_s` HTML-escaped, as `HTML.escape` does, in
+  an element or an attribute alike. `raw(value)` prints markup the program
+  built or trusts as it is, as `<%= raw(csrf_tag(env)) %>`; a layout's
+  `content`, `yield_content` and a `render` inside a template are markup
+  already and are not escaped again.
+
+[docs/templates.md](docs/templates.md) has the details of autoescape and
+the migration from 0.5, where `<%= %>` printed values as they were.
 
 ## Every core
 
@@ -1398,6 +1457,25 @@ once. A server-sent-events stream is in flight for as long as it is open.
 With `shutdown_message` on, the stop prints
 `[production] storefront is going to take a rest!`. Code after `run` runs.
 
+### Start and stop hooks
+
+```iyi
+on_start do
+  DB.connect(Program.env("DATABASE_URL") || "postgres://localhost/app")
+end
+
+on_stop do
+  DB.close
+end
+```
+
+`on_start` hooks run in the order they were written before the server is
+bound; one whose block answers an `Error` or panics stops the start, and the
+program exits 1 naming the hook's file and line
+(`could not start: on_start (app.iyi:3) failed: ...`). `on_stop` hooks run
+after the drain, the last written first; one that fails is reported and the
+rest still run. See [docs/lifecycle-and-background.md](docs/lifecycle-and-background.md).
+
 ### HTTPS
 
 ```sh
@@ -1487,6 +1565,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/response` | `Response` |
 | `web/iyi_web/params` | `Params`, `json_as` |
 | `web/iyi_web/validation` | `BodyError`, `Validate`, `Validator`, `read_json`: typed JSON bodies and their checks |
+| `web/iyi_web/coerce` | `ParamError`, `decode_param`: parameters read as `Int32`, `Int64`, `Float64`, `Bool`, enums |
 | `web/iyi_web/multipart` | `FileUpload` and the `multipart/form-data` parser |
 | `web/iyi_web/cookies` | `CookieJar` |
 | `web/iyi_web/headers` | `Headers` |
@@ -1496,7 +1575,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/cli` | `CLIParser` |
 | `web/iyi_web/event_stream` | `EventStream` |
 | `web/iyi_web/websocket` | `WebSocket`, `Frame`, `FrameError` |
-| `web/iyi_web/templates` | `render`, `content_for`, `yield_content` |
+| `web/iyi_web/templates` | `render`, `content_for`, `yield_content`, `raw`, `SafeHTML` ([Templates](docs/templates.md)) |
 | `web/iyi_web/compress` | `CompressHandler` |
 | `web/iyi_web/content_coding` | `Accept-Encoding` negotiation, `Vary` and `ETag` helpers, `COMPRESS_MIN_SIZE` |
 | `web/iyi_web/failure` | `StatusError`, the built-in error pages |
@@ -1514,6 +1593,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/harness` | `http_request`, `form_request`, `dispatch`, `routes` |
 | `web/iyi_web/session` | `SessionHandler`, `Session`, `session`, `save_session` |
 | `web/iyi_web/csrf` | `CSRFHandler`, `csrf_token`, `csrf_tag` |
+| `web/iyi_web/lifecycle` | `Lifecycle`, `lifecycle_hook`: `on_start` and `on_stop` ([Lifecycle](docs/lifecycle-and-background.md)) |
 | `web/iyi_web/token` | `random_hex`, `random_bytes`, `encode_base64url`, `decode_base64url?`: random tokens nobody can guess, and base64url for carrying them |
 
 ## Examples
@@ -1534,7 +1614,7 @@ iyi run examples/json_api.iyi -- -p 8080
 | `json_api.iyi` | CRUD over an in-memory store with `env.json`, `env.params.json`, status codes and `404` via `halt` |
 | `typed_json.iyi` | JSON bodies read into a type with `json_as`, `Validate` rules, `400`/`415`/`422` answers, and responses written from `derive serializable` types |
 | `forms_and_uploads.iyi` | Form fields, multipart uploads with limits, and `_method` override |
-| `templates.iyi` | Views in `examples/views/` with a layout, `content_for` and a partial |
+| `templates.iyi` | Views in `examples/views/` with a layout, `content_for`, a partial and autoescape |
 | `routers.iyi` | `Router`, `mount`, `namespace`, router filters and error pages |
 | `middleware.iyi` | A custom `Handler` with `only` and `exclude`, CORS, gzip and static files from `examples/public/` |
 | `streaming_and_sse.iyi` | `flush`, chunked responses and server-sent events |

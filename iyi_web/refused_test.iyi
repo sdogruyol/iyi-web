@@ -108,6 +108,12 @@ describe "A block or handler that may not run on every worker" do
     assert frame.message.ends_with?("Keep its lines behind a `Mutex` (std/mutex), or give it with `logger value, workers: 1` so it stays on one thread (SPEC.md III.4.4)")
   end
 
+  it "is refused at an on_start hook's capture, naming a lock and workers: 1" do
+    frame = refusal("hook_capture.iyi")
+    assert at?(frame, "hook_capture.iyi", 10, 3)
+    assert_eq "the block Dsl.on_start keeps, which may run on other threads captures `names : Array(String)`, which is not Share: Array(String)'s field @size is assigned in `append`. Put it behind a lock, a `Mutex(Array(String))` (std/mutex), or pass `workers: 1` so the block runs on one thread (SPEC.md III.4.4)", frame.message
+  end
+
   it "compiles, with no warning, given workers: 1 on every registration" do
     result = check("serial.iyi")
     said = result[1].map { |frame| frame.file + ":" + frame.line.to_s + ": " + frame.message }

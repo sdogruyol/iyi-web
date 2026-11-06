@@ -1,0 +1,7 @@
+# A template whose `<%= %>` names nothing: refused at the template's own
+# line and column, not at the `render` (iyi_web/templates_test.iyi).
+module iyi_web/fixtures/refused_templates/undefined_template
+
+import iyi_web/templates::{render}
+
+print render("undefined.eiy")

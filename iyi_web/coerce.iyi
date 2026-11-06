@@ -1,0 +1,252 @@
+# Request parameters - path captures, query strings, headers, form fields -
+# read as the types an application declares instead of as strings.
+#
+# Every parameter arrives as text, and `"abc".to_i? || 0` turns a client's
+# mistake into a silent zero. Here a parameter is read strictly - digits
+# and an optional sign for an integer, no whitespace around it, a finite
+# number for a float, one of six words for a bool - and a value that is
+# not its type is a `ParamError`, a 422 naming the parameter, never a
+# guess.
+#
+# A struct of parameters (`decode_params`) is read the way a JSON body
+# is, so a field means the same thing in both places: each field the
+# struct's `derive serializable` reads is looked up under its name (or its
+# `JSON::Field` key), the text is checked against
+# the field's type and written into a JSON object, and that object is read
+# with `decode_json` (`iyi_web/validation`). A field with a default or a
+# nilable type may be left out, an enum takes a member's name, an
+# `Array(T)` takes every value of a repeated name, and a type implementing
+# `Validate` is checked once it is read. Every field that is wrong is
+# named, all of them in one error.
+module iyi_web/coerce
+
+import std/text
+import std/float
+import std/json::{JSON, Builder, Parser}
+import iyi_web/status::{HttpError}
+import iyi_web/validation::{BodyError, decode_json, read_json, json_errors}
+
+# A parameter that is missing or not of its type: 422, with a message per
+# parameter in `fields`, keyed by the name the client sent it under
+# (`page`, `X-Request-Id`, `tags[1]` for the second of a repeated query
+# key). Answered with the same JSON page as a `BodyError`.
+pub class ParamError
+  getter status : Int32
+  getter fields : Hash(String, String)
+  @message : String
+
+  def initialize(@status : Int32, @message : String, @fields : Hash(String, String) = {} of String => String)
+  end
+
+  # 422 for these per-parameter messages; *source* says where they were
+  # read from: `"query"`, `"path"`, `"header"`, `"form"`.
+  def self.invalid(source : String, fields : Hash(String, String)) : ParamError
+    parts = [] of String
+    fields.each { |field, message| parts << field + " " + message }
+    ParamError.new(422, "invalid " + source + " parameters: " + parts.join(", "), fields)
+  end
+end
+
+impl Error for ParamError
+  def message : String
+    @message
+  end
+end
+
+impl HttpError for ParamError
+  def status : Int32
+    @status
+  end
+
+  def fields : Hash(String, String)
+    @fields
+  end
+end
+
+# An `Int32` written as decimal digits with an optional sign, and nothing
+# else: no whitespace, no `0x`, no `1e3`.
+pub def parse_int32(text : String) : Int32?
+  return nil if padded?(text)
+  text.to_i?
+end
+
+pub def parse_int64(text : String) : Int64?
+  return nil if padded?(text)
+  text.to_i64?
+end
+
+# A decimal or exponent number that is finite: `nan` and `inf` are words,
+# and JSON, where the value is going next, has no way to hold them.
+pub def parse_float64(text : String) : Float64?
+  return nil if padded?(text)
+  value = text.to_f?
+  return nil unless value
+  value.finite? ? value : nil
+end
+
+# `true`, `1`, `yes`, `on` and `false`, `0`, `no`, `off`, in any case: what
+# a link, a form checkbox and a script each send for a flag.
+pub def parse_bool(text : String) : Bool?
+  case text.downcase
+  when "true", "1", "yes", "on"  then true
+  when "false", "0", "no", "off" then false
+  else                                nil
+  end
+end
+
+# *values* - every value sent for one name, in order - as the JSON a field
+# of *type* is read from, or nil after recording why it cannot be. A
+# scalar takes the last value, as `params.query` does.
+
+pub def param_json(values : Array(String), type : String.class, name : String, errors : Hash(String, String)) : String?
+  JSON.to_json(values.last)
+end
+
+pub def param_json(values : Array(String), type : Int32.class, name : String, errors : Hash(String, String)) : String?
+  if value = parse_int32(values.last)
+    return value.to_s
+  end
+  message = parse_int64(values.last) ? "must be an integer from -2147483648 to 2147483647" : "must be an integer"
+  reject(errors, name, message)
+end
+
+pub def param_json(values : Array(String), type : Int64.class, name : String, errors : Hash(String, String)) : String?
+  value = parse_int64(values.last)
+  value ? value.to_s : reject(errors, name, "must be an integer")
+end
+
+pub def param_json(values : Array(String), type : Float64.class, name : String, errors : Hash(String, String)) : String?
+  value = parse_float64(values.last)
+  value ? JSON.to_json(value) : reject(errors, name, "must be a number")
+end
+
+pub def param_json(values : Array(String), type : Bool.class, name : String, errors : Hash(String, String)) : String?
+  value = parse_bool(values.last)
+  value.nil? ? reject(errors, name, "must be true or false") : value.to_s
+end
+
+# Every value, each read as *E*: `?tag=a&tag=b`. A wrong one is named by
+# its place, `ids[1]`.
+pub def param_json(values : Array(String), type : Array(E).class, name : String, errors : Hash(String, String)) : String? forall E
+  items = [] of String
+  values.each_with_index do |value, index|
+    if item = param_json([value], E, name + "[" + index.to_s + "]", errors)
+      items << item
+    end
+  end
+  return nil unless items.size == values.size
+  "[" + items.join(",") + "]"
+end
+
+# A nilable field is its type when sent; an enum member is sent by name
+# and checked by the read, which names the members there are. A struct
+# or a hash has no one way to be spelled in a query string, so a field of
+# one is refused when the program is compiled.
+pub def param_json(values : Array(String), type : T.class, name : String, errors : Hash(String, String)) : String? forall T
+  {% if T.nilable? %}
+    param_json(values, typeof(nil.as(T) || raise("")), name, errors)
+  {% elsif T < ::Enum %}
+    JSON.to_json(values.last)
+  {% else %}
+    {% raise "a request parameter cannot be a #{T}: a parameter is a String, Int32, Int64, Float64, Bool, an enum, an Array of one of those, or a nilable one" %}
+  {% end %}
+end
+
+private def reject(errors : Hash(String, String), name : String, message : String) : String?
+  errors[name] = message unless errors.has_key?(name)
+  nil
+end
+
+private def padded?(text : String) : Bool
+  return true if text.empty?
+  first = text.to_unsafe[0]
+  last = text.to_unsafe[text.bytesize - 1]
+  space?(first) || space?(last)
+end
+
+private def space?(byte : UInt8) : Bool
+  byte == 32_u8 || (byte >= 9_u8 && byte <= 13_u8)
+end
+
+# One parameter, *text*, as *type*: the typed lookups on `Params`
+# (`env.params.int("id")`) read through this.
+pub def decode_param(text : String, type : T.class, name : String, source : String) : T | ParamError forall T
+  errors = {} of String => String
+  fragment = param_json([text], T, name, errors)
+  return ParamError.invalid(source, errors) unless fragment
+  json_errors(JSON.parse(fragment), T).each do |field, message|
+    errors[field.empty? ? name : name + field] = message
+  end
+  return ParamError.invalid(source, errors) unless errors.empty?
+  result = read_json(fragment, T)
+  return ParamError.new(422, "invalid " + source + " parameters: " + name + " " + result.message) if result.is_a?(BodyError)
+  result
+end
+
+# *pairs* - name and value, in the order sent - read into *type*, a struct
+# with `derive serializable`. *source* names where they came from, for the
+# message. With *headers*, a field's name is matched as a header's is:
+# `x_request_id` (or a `JSON::Field` key) is the header `x-request-id`, in
+# any case, and an error names the field the same way.
+pub def decode_params(pairs : Array(Tuple(String, String)), type : T.class, source : String, headers : Bool = false) : T | ParamError forall T
+  errors = {} of String => String
+  # A field's JSON key by the name it was looked up under, so a refusal
+  # the read makes names the parameter the client sent.
+  names = {} of String => String
+  text = JSON.build do |json|
+    json.object do
+      {% for ivar in T.instance_vars %}
+        {% ann = ivar.annotation(::Std::Json::JSON::Field) %}
+        {% unless ann && (ann[:ignore] || ann[:ignore_deserialize]) %}
+          {% key = ann && ann[:key] ? ann[:key] : ivar.name.stringify %}
+          name = headers ? header_name({{ key }}) : {{ key }}
+          names[{{ key }}] = name
+          values = values_named(pairs, name, headers)
+          unless values.empty?
+            if fragment = param_json(values, typeof(T.allocate.@{{ ivar.name }}), name, errors)
+              json.field({{ key }})
+              json.raw(fragment)
+            end
+          end
+        {% end %}
+      {% end %}
+    end
+  end
+  parser = Parser.new(text)
+  root = parser.parse
+  result = decode_json(text, root, T)
+  if result.is_a?(BodyError)
+    result.fields.each do |field, message|
+      named = display_name(field, names)
+      errors[named] = message unless errors.has_key?(named)
+    end
+    if errors.empty?
+      return ParamError.new(422, "invalid " + source + " parameters: " + result.message)
+    end
+  end
+  return ParamError.invalid(source, errors) unless errors.empty?
+  result.as(T)
+end
+
+# The header a field is read from: `x_request_id` is `x-request-id`.
+pub def header_name(key : String) : String
+  key.gsub('_', '-').downcase
+end
+
+private def values_named(pairs : Array(Tuple(String, String)), name : String, any_case : Bool) : Array(String)
+  values = [] of String
+  pairs.each do |pair|
+    matched = any_case ? pair[0].downcase == name : pair[0] == name
+    values << pair[1] if matched
+  end
+  values
+end
+
+# `tags[1]` keeps its index on the parameter's own name.
+private def display_name(field : String, names : Hash(String, String)) : String
+  bracket = field.index('[')
+  head = bracket ? field[0, bracket] : field
+  tail = bracket ? field[bracket, field.bytesize - bracket] : ""
+  found = names[head]?
+  found ? found + tail : field
+end
