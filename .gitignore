@@ -21,3 +21,13 @@
 /examples/postgres/app.exe
 /examples/postgres/app.pdb
 
+# bench/compare (run.sh): builds, results, fetched dependencies
+/bench/compare/.build/
+/bench/compare/results.json
+/bench/compare/results.md
+/bench/compare/kemal/lib/
+/bench/compare/kemal/app*
+/bench/compare/kemal/*.dll
+/bench/compare/express/node_modules/
+/bench/compare/express/package-lock.json
+/bench/compare/fastapi/__pycache__/

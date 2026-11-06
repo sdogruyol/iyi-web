@@ -281,12 +281,22 @@ site with `mkdocs.yml` and `docs/tutorial.md`, `Store(T)` (with
 **ELI5:** Saying "we're the fastest" isn't enough; you have to run on the
 same track and show the stopwatch.
 
-- [ ] The same 3 endpoints (hello, JSON, DB query) on the same machine for
+- [x] The same 3 endpoints (hello, JSON, DB query) on the same machine for
       iyi-web, FastAPI (uvicorn workers), Express, Kemal and Go net/http;
       the results and scripts live in the repo.
-- [ ] The hot spot to target, `intake.get` (~5 µs); to be measured again
-      after Phase 4.
-- [ ] A TechEmpower submission.
+- [x] The hot spot to target, `intake.get` (~5 µs); re-measured after
+      Phase 4: now `wire.get`, 5966 → 3397 ns.
+- [ ] A TechEmpower submission. Open, because it is an outside submission
+      to TechEmpower's own repository, not part of the work in this one.
+
+**Status:** `bench/compare/` measures five frameworks on one machine on
+four endpoints: hello, JSON, an endpoint with path and query parameters,
+and a DB query (`/db`: TechEmpower's single query, PostgreSQL 16 and a
+connection pool in every framework). The results are in
+`docs/benchmarks.md`; Express was skipped in that run because the machine
+has no `node`. After Phase 4 `wire.get` (formerly `intake.get`) went from
+5966 to 3397 ns; the before/after table is in `docs/benchmarks.md`. The
+TechEmpower submission is left for later.
 
 ## The simplicity line (how far to move from Kemal)
 

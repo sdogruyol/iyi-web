@@ -42,4 +42,5 @@ between threads are all checked when the program compiles.
 | Running it | [Transport](transport.md), [Configuration](configuration.md), [Testing](testing.md), [Deployment](deployment.md) |
 
 [Modules](modules.md) lists every module and what it provides, and
-[Benchmarks](benchmarks.md) times iyi-web against itself.
+[Benchmarks](benchmarks.md) compares iyi-web with FastAPI, Express, Kemal and
+Go.

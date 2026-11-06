@@ -315,7 +315,7 @@ with the database stopped under the running server, `/todos/2` and
 `/health` answered `503 {"error":"database unavailable"}`; and with the
 database up, `oha -z 5s -c 64` on `GET /todos/2` (`max_pool_size=16`)
 answered 124,800 requests, all `200`, at about 24,800 req/s on the
-12-core machine.
+12-core machine of [Benchmarks](benchmarks.md).
 
 ## MySQL
 
