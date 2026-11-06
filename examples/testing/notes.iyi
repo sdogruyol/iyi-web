@@ -18,8 +18,9 @@ pub def notes_routes : Router
     env.json(notes.get { |list| List.new(list) }.or_panic.to_a)
   end
 
-  router.get "/notes/:index" do |env|
-    index = env.params.url["index"].to_i? || -1
+  # `path: Int32` reads `:index` as a number; `/notes/first` is answered
+  # 422 before the block runs.
+  router.get "/notes/:index", path: Int32 do |env, index|
     note = notes.get { |list| index >= 0 && index < list.size ? list[index] : nil }.or_panic
     if note
       env.text(note)
