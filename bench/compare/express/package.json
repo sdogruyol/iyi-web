@@ -1,0 +1,10 @@
+{
+  "name": "bench-compare-express",
+  "private": true,
+  "description": "Express's side of iyi-web's bench/compare",
+  "main": "app.js",
+  "dependencies": {
+    "express": "^5.1.0",
+    "pg": "^8.16.0"
+  }
+}

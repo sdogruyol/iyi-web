@@ -1,0 +1,14 @@
+name: bench-kemal
+version: 0.1.0
+
+dependencies:
+  kemal:
+    github: kemalcr/kemal
+  pg:
+    github: will/crystal-pg
+
+targets:
+  app:
+    main: src/app.cr
+
+crystal: ">= 1.10.0"

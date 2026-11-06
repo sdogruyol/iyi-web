@@ -1,0 +1,781 @@
+# Runs the cross-framework benchmark: the same endpoints in iyi-web,
+# FastAPI, Express, Kemal and Go's net/http, each built for release,
+# started on this machine, checked, warmed up and loaded with `oha` for a
+# fixed time at a fixed number of connections. Writes the results as JSON
+# and as a Markdown table. `bash bench/compare/run.sh` builds and runs it.
+#
+#   GET /plaintext                     "Hello, World!" as text/plain
+#   GET /json                          {"message":"Hello, World!"}
+#   GET /users/42?fields=name,email    {"id":42,"name":"user-42","fields":"name,email"}
+#   GET /db                            {"id":N,"randomNumber":M}
+#
+# `/db` is TechEmpower's single query: one row of `world` (10,000 rows,
+# `id`, `randomnumber`) by a random id, through each framework's connection
+# pool, answered as JSON. The database is DATABASE_URL (or `--db URL`);
+# without one, a PostgreSQL of this machine's own is started from the
+# `pgserver` Python package's binaries, in .build/pgdata, and stopped at
+# the end. `world` is created and filled when it is not there. With no
+# database to be had - or `--no-db` - `/db` is left out, and the results
+# say why.
+#
+# Every server holds the same number of database connections:
+# POOL_PER_WORKER per worker. The threaded servers (iyi-web, Kemal, Go)
+# share one pool of POOL_PER_WORKER x workers; the process-per-core ones
+# (FastAPI, Express) open a pool of POOL_PER_WORKER in each process.
+#
+# A framework whose toolchain is not on this machine - no `node`, no
+# `crystal`, FastAPI not importable - is skipped with the reason, and the
+# reason is in the results: a table that leaves a row out says why. One
+# whose build fails, which does not come up, or which answers an endpoint
+# wrongly is reported failed, with what went wrong, and is not timed.
+#
+# Each server serves on every core, the way each is deployed to: iyi-web,
+# Kemal and Go with threads, FastAPI with one uvicorn worker process per
+# core, Express with one `node:cluster` worker per core. `oha` runs on the
+# same machine and takes cores too, as does PostgreSQL for `/db`; the
+# numbers compare the frameworks with one another on this machine, not
+# with a dedicated load generator's.
+module bench/compare/run
+
+import std/dir::{Dir}
+import std/file::{File}
+import std/file_utils::{FileUtils}
+import std/json::{JSON, Any, serializable}
+import std/process::{Process, ProcessResult, ProcessError, ChildProcess, Redirect}
+import std/socket::{IyiSocket, SocketError}
+import std/system::{System}
+import std/format::{sprintf}
+import std/time::{Time}
+import std/text
+import std/enumerable
+
+USAGE = <<-TEXT
+  usage: bash bench/compare/run.sh [options]
+    --duration S      measured seconds per endpoint (10)
+    --warmup S        warm-up seconds per endpoint, not measured (3)
+    --connections N   concurrent keep-alive connections oha keeps open (64)
+    --workers N       processes or threads per server (every core: #{System.cpu_count})
+    --only LIST       comma-separated: iyi-web,fastapi,express,kemal,go
+    --port P          the first server's port; each takes the next (3950)
+    --out DIR         where results.json and results.md go (bench/compare)
+    --db URL          PostgreSQL for /db (DATABASE_URL; else one started from pgserver)
+    --no-db           leave /db out
+  TEXT
+
+ROOT  = File.dirname(File.dirname(__DIR__))
+HERE  = __DIR__
+BUILD = File.join(__DIR__, ".build")
+EXE   = {{ flag?(:win32) }} ? ".exe" : ""
+
+ENDPOINTS = ["/plaintext", "/json", "/users/42?fields=name,email"]
+DB_ENDPOINT = "/db"
+
+# Database connections per worker; see the top of this file.
+POOL_PER_WORKER = 4
+
+# Where the PostgreSQL started from pgserver listens.
+PG_PORT = 5499
+
+class Options
+  property duration : Int32 = 10
+  property warmup : Int32 = 3
+  property connections : Int32 = 64
+  property workers : Int32 = System.cpu_count
+  property only : Array(String) = [] of String
+  property port : Int32 = 3950
+  property output_dir : String = HERE
+  property db : Bool = true
+  property database_url : String? = ENV["DATABASE_URL"]?
+
+  def initialize
+  end
+end
+
+# One endpoint's numbers.
+struct Measure
+  getter path : String
+  getter rps : Float64
+  getter p50_ms : Float64
+  getter p99_ms : Float64
+  getter requests : Int64
+  getter errors : Int64
+  derive serializable
+
+  def initialize(@path : String, @rps : Float64, @p50_ms : Float64, @p99_ms : Float64, @requests : Int64, @errors : Int64)
+  end
+end
+
+# One framework's run: measured, skipped (with the reason) or failed (with
+# what failed).
+class Outcome
+  property name : String
+  property version : String = ""
+  property status : String = "ok"
+  property reason : String = ""
+  property endpoints : Array(Measure) = [] of Measure
+  derive serializable
+
+  def initialize(@name : String)
+  end
+end
+
+struct Machine
+  getter os : String
+  getter cpu : String
+  getter cores : Int32
+  getter oha : String
+  getter duration_s : Int32
+  getter warmup_s : Int32
+  getter connections : Int32
+  getter workers : Int32
+  getter date : String
+  # The PostgreSQL `/db` ran against and the pool sizes, or why there was
+  # no `/db`.
+  getter database : String
+  derive serializable
+
+  def initialize(@os : String, @cpu : String, @cores : Int32, @oha : String, @duration_s : Int32, @warmup_s : Int32, @connections : Int32, @workers : Int32, @date : String, @database : String)
+  end
+end
+
+struct Results
+  getter machine : Machine
+  getter frameworks : Array(Outcome)
+  derive serializable
+
+  def initialize(@machine : Machine, @frameworks : Array(Outcome))
+  end
+end
+
+# How to build and start one framework's server.
+abstract class Framework
+  abstract def name : String
+  # Why this machine cannot run it, or nil when it can.
+  abstract def missing : String?
+  abstract def version : String
+  # The build's failure, or nil.
+  abstract def build(options : Options) : String?
+  abstract def start(port : Int32, options : Options) : ChildProcess | ProcessError
+end
+
+# Runs *command* to the end; its output when it succeeded, nil otherwise
+# (when it could not be started, too).
+def output_of(command : String, args : Array(String), chdir : String? = nil, env : Hash(String, String)? = nil) : String?
+  case result = Process.run(command, args, chdir: chdir, env: env)
+  in ProcessResult then result.success? ? (result.stdout + result.stderr).strip : nil
+  in ProcessError, Cancelled then nil
+  end
+end
+
+# Runs a build step with its output on this terminal; the failure, or nil.
+def step(what : String, command : String, args : Array(String), chdir : String, env : Hash(String, String)? = nil) : String?
+  say "  " + what + ": " + command + " " + args.join(" ")
+  case result = Process.run(command, args, chdir: chdir, capture: false, env: env)
+  in ProcessResult then result.success? ? nil : what + " failed (exit " + result.exit_code.to_s + ")"
+  in ProcessError  then what + ": could not run " + command + ": " + result.reason
+  in Cancelled     then what + ": cancelled"
+  end
+end
+
+def found?(command : String, args : Array(String) = ["--version"]) : Bool
+  !output_of(command, args).nil?
+end
+
+def first_line(text : String?) : String
+  return "" unless text
+  text.lines.first? || ""
+end
+
+# *env* with DATABASE_URL and DB_POOL_SIZE when `/db` is on: *pool_size*
+# connections in each of the server's pools. When it is off, a
+# DATABASE_URL this program was started with is taken out of the server's
+# environment, so no server opens a pool it will not be asked to use.
+def with_db(env : Hash(String, String), options : Options, pool_size : Int32) : Hash(String, String?)
+  result = {} of String => String?
+  env.each { |name, value| result[name] = value }
+  result["DATABASE_URL"] = options.database_url
+  result["DB_POOL_SIZE"] = options.database_url ? pool_size.to_s : nil
+  result
+end
+
+class IyiWeb < Framework
+  def name : String
+    "iyi-web"
+  end
+
+  def missing : String?
+    found?("iyi", ["version"]) ? nil : "iyi not found on PATH"
+  end
+
+  def version : String
+    "iyi-web (this checkout) on " + first_line(output_of("iyi", ["version"]))
+  end
+
+  # A project of its own (iyiweb/iyi.mod), for the database packages, so it
+  # is built from its directory.
+  def build(options : Options) : String?
+    step("build", "iyi", ["build", "--release", "app.iyi", "-o", File.join(BUILD, "iyiweb")], File.join(HERE, "iyiweb"))
+  end
+
+  def start(port : Int32, options : Options) : ChildProcess | ProcessError
+    env = with_db({"IYI_WEB_ENV" => "production"}, options, POOL_PER_WORKER * options.workers)
+    Process.spawn(File.join(BUILD, "iyiweb" + EXE), ["-p", port.to_s], output: Redirect::Null, env: env)
+  end
+end
+
+class FastAPI < Framework
+  @python : String = {{ flag?(:win32) }} ? "python" : "python3"
+
+  def name : String
+    "fastapi"
+  end
+
+  def missing : String?
+    return @python + " not found on PATH" unless found?(@python)
+    found?(@python, ["-c", "import fastapi, uvicorn, asyncpg"]) ? nil : "fastapi, uvicorn or asyncpg not importable: pip install -r bench/compare/fastapi/requirements.txt"
+  end
+
+  def version : String
+    first_line(output_of(@python, ["-c", "import sys, fastapi, uvicorn; print('FastAPI ' + fastapi.__version__ + ', uvicorn ' + uvicorn.__version__ + ', Python ' + sys.version.split()[0])"]))
+  end
+
+  def build(options : Options) : String?
+    nil
+  end
+
+  def start(port : Int32, options : Options) : ChildProcess | ProcessError
+    args = ["-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", port.to_s, "--workers", options.workers.to_s, "--no-access-log", "--log-level", "warning"]
+    args = args + ["--http", "httptools"] if found?(@python, ["-c", "import httptools"])
+    Process.spawn(@python, args, chdir: File.join(HERE, "fastapi"), output: Redirect::Null, env: with_db({} of String => String, options, POOL_PER_WORKER))
+  end
+end
+
+class Express < Framework
+  def name : String
+    "express"
+  end
+
+  def missing : String?
+    found?("node") ? nil : "node not found on PATH (install Node.js 20+ to include Express)"
+  end
+
+  def version : String
+    express = output_of("node", ["-p", "require('express/package.json').version"], File.join(HERE, "express")) || "?"
+    "Express " + express + ", Node " + first_line(output_of("node", ["--version"]))
+  end
+
+  # npm is a script (npm.cmd on Windows, which Process refuses to run as a
+  # program), so it goes through bash, which every platform this runs on
+  # has: run.sh is bash.
+  def build(options : Options) : String?
+    return nil if File.directory?(File.join([HERE, "express", "node_modules", "express"])) && File.directory?(File.join([HERE, "express", "node_modules", "pg"]))
+    step("npm install", "bash", ["-c", "npm install --no-audit --no-fund"], File.join(HERE, "express"))
+  end
+
+  def start(port : Int32, options : Options) : ChildProcess | ProcessError
+    env = with_db({"PORT" => port.to_s, "WORKERS" => options.workers.to_s, "NODE_ENV" => "production"}, options, POOL_PER_WORKER)
+    Process.spawn("node", ["app.js"], chdir: File.join(HERE, "express"), output: Redirect::Null, env: env)
+  end
+end
+
+# The shards Kemal needs, at the versions `shards install` resolves today:
+# cloned straight into lib/ when shards cannot run. Shards on Windows needs
+# symlinks, which need Developer Mode or an elevated shell; without either
+# it refuses, and the same commits checked out by git are what it would
+# have installed.
+KEMAL_SHARDS = [
+  {"kemal", "kemalcr/kemal", "v1.15.0"},
+  {"radix", "luislavena/radix", "v0.4.1"},
+  {"exception_page", "crystal-loot/exception_page", "v0.5.0"},
+  {"backtracer", "Sija/backtracer.cr", "v1.2.4"},
+  {"pg", "will/crystal-pg", "v0.31.0"},
+  {"db", "crystal-lang/crystal-db", "v0.15.0"},
+]
+
+class Kemal < Framework
+  def name : String
+    "kemal"
+  end
+
+  def missing : String?
+    found?("crystal") ? nil : "crystal not found on PATH"
+  end
+
+  def version : String
+    manifest = File.join([HERE, "kemal", "lib", "kemal", "shard.yml"])
+    kemal = File.file?(manifest) ? (File.read_lines(manifest).find(&.starts_with?("version:")) || "version: ?").sub("version:", "").strip : "?"
+    "Kemal " + kemal + ", " + first_line(output_of("crystal", ["--version"]))
+  end
+
+  def build(options : Options) : String?
+    dir = File.join(HERE, "kemal")
+    unless KEMAL_SHARDS.all? { |shard| File.directory?(File.join([dir, "lib", shard[0]])) }
+      if failed = step("shards install", "shards", ["install"], dir)
+        say "  shards could not install (" + failed + "); cloning the same versions into lib/"
+        KEMAL_SHARDS.each do |shard|
+          lib_name, repo, tag = shard
+          target = File.join(dir, "lib", lib_name)
+          next if File.directory?(target)
+          if cloned = step("clone " + repo, "git", ["-c", "advice.detachedHead=false", "clone", "-q", "--depth", "1", "--branch", tag, "https://github.com/" + repo + ".git", target], dir)
+            return cloned
+          end
+        end
+      end
+    end
+    step("build", "crystal", ["build", "--release", "src/app.cr", "-o", File.join(BUILD, "kemal")], dir)
+  end
+
+  def start(port : Int32, options : Options) : ChildProcess | ProcessError
+    env = with_db({"PORT" => port.to_s, "CRYSTAL_WORKERS" => options.workers.to_s, "KEMAL_ENV" => "production"}, options, POOL_PER_WORKER * options.workers)
+    Process.spawn(File.join(BUILD, "kemal" + EXE), [] of String, chdir: BUILD, output: Redirect::Null, env: env)
+  end
+end
+
+class GoNetHttp < Framework
+  def name : String
+    "go"
+  end
+
+  def missing : String?
+    found?("go", ["version"]) ? nil : "go not found on PATH"
+  end
+
+  def version : String
+    first_line(output_of("go", ["version"])).sub("go version ", "net/http, ")
+  end
+
+  def build(options : Options) : String?
+    step("build", "go", ["build", "-o", File.join(BUILD, "go" + EXE), "."], File.join(HERE, "go"))
+  end
+
+  def start(port : Int32, options : Options) : ChildProcess | ProcessError
+    env = with_db({"PORT" => port.to_s, "GOMAXPROCS" => options.workers.to_s}, options, POOL_PER_WORKER * options.workers)
+    Process.spawn(File.join(BUILD, "go" + EXE), [] of String, output: Redirect::Null, env: env)
+  end
+end
+
+def say(message : String) : Nil
+  STDOUT.puts message
+  STDOUT.flush
+end
+
+# One GET over a fresh connection: the status, the Content-Type and the
+# body, or nil while nothing answers.
+def fetch(port : Int32, path : String) : {Int32, String, String}?
+  client = IyiSocket.connect("127.0.0.1", port, 1000)
+  return nil unless client.is_a?(IyiSocket)
+  sent = client.write("GET " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+  raw = ""
+  unless sent.is_a?(SocketError) || sent.is_a?(Cancelled)
+    loop do
+      chunk = client.read(65536)
+      break unless chunk.is_a?(String)
+      break if chunk.empty?
+      raw = raw + chunk
+    end
+  end
+  client.close
+  split = raw.index("\r\n\r\n")
+  return nil unless split && raw.starts_with?("HTTP/1.1 ")
+  head = raw[0, split]
+  body = raw[split + 4, raw.size - split - 4]
+  status = raw[9, 3].to_i? || 0
+  type = ""
+  head.split("\r\n").each do |line|
+    colon = line.index(":")
+    if colon && line[0, colon].downcase == "content-type"
+      type = line[colon + 1, line.size - colon - 1].strip
+    end
+  end
+  if head.downcase.includes?("transfer-encoding: chunked")
+    body = dechunk(body)
+  end
+  {status, type, body}
+end
+
+private def dechunk(body : String) : String
+  decoded = ""
+  rest = body
+  loop do
+    line_end = rest.index("\r\n")
+    break unless line_end
+    size = rest[0, line_end].strip.to_i?(16) || 0
+    break if size == 0
+    decoded = decoded + rest[line_end + 2, size]
+    rest = rest[line_end + 2 + size + 2, rest.size - (line_end + 2 + size + 2)]
+  end
+  decoded
+end
+
+# What every server must answer, checked before it is timed: a framework
+# that does less work than the others would win for the wrong reason.
+def check(port : Int32) : String?
+  expected = [
+    {"/plaintext", "text/plain", "Hello, World!"},
+    {"/json", "application/json", %({"message":"Hello, World!"})},
+    {"/users/42?fields=name,email", "application/json", %({"id":42,"name":"user-42","fields":"name,email"})},
+  ]
+  expected.each do |case_|
+    path, type, body = case_
+    answer = fetch(port, path)
+    return path + ": no answer" unless answer
+    status, got_type, got_body = answer
+    return path + ": status " + status.to_s unless status == 200
+    return path + ": Content-Type " + got_type unless got_type.starts_with?(type)
+    # JSON is compared as values: Go's encoder ends with a newline, and
+    # that is not a difference.
+    same = type == "text/plain" ? got_body == body : JSON.parse?(got_body) == JSON.parse(body)
+    return path + ": body " + got_body unless same
+  end
+  # A non-number id is refused, each framework its own way: 404 from the
+  # routers that check it by hand, 422 from FastAPI's `id: int`.
+  answer = fetch(port, "/users/abc")
+  refused = answer && answer[0] >= 400 && answer[0] < 500
+  return "/users/abc: status " + (answer ? answer[0].to_s : "none") + ", not a 4xx" unless refused
+  nil
+end
+
+# `/db`, asked a few times: 200, JSON, exactly `id` and `randomNumber`,
+# both whole numbers from 1 to 10,000 as `world` holds them, and not the
+# same row every time - the id is drawn per request.
+def check_db(port : Int32) : String?
+  ids = [] of Int64
+  8.times do
+    answer = fetch(port, DB_ENDPOINT)
+    return DB_ENDPOINT + ": no answer" unless answer
+    status, got_type, got_body = answer
+    return DB_ENDPOINT + ": status " + status.to_s + " " + got_body unless status == 200
+    return DB_ENDPOINT + ": Content-Type " + got_type unless got_type.starts_with?("application/json")
+    parsed = JSON.parse?(got_body)
+    row = parsed ? parsed.as_h? : nil
+    return DB_ENDPOINT + ": body " + got_body + ", not a JSON object" unless row
+    return DB_ENDPOINT + ": body " + got_body + ", keys are not id and randomNumber" unless row.keys.sorted == ["id", "randomNumber"]
+    id = row["id"].as_i64?
+    random_number = row["randomNumber"].as_i64?
+    in_range = id && random_number && id >= 1 && id <= 10000 && random_number >= 1 && random_number <= 10000
+    return DB_ENDPOINT + ": body " + got_body + ", not numbers from 1 to 10000" unless in_range && id
+    ids << id
+  end
+  return DB_ENDPOINT + ": the same id " + ids.first.to_s + " every time, not a random one" if ids.uniq.size == 1
+  nil
+end
+
+def oha(url : String, seconds : Int32, options : Options) : Any?
+  text = output_of("oha", ["-z", seconds.to_s + "s", "-c", options.connections.to_s, "--no-tui", "--output-format", "json", url])
+  text ? JSON.parse?(text) : nil
+end
+
+def number(value : Any?) : Float64
+  return 0.0 unless value
+  value.as_f? || (value.as_i64? || 0_i64).to_f
+end
+
+# Requests per second that got a 200, and the latency percentiles of all.
+def measure(path : String, port : Int32, options : Options) : Measure | String
+  url = "http://127.0.0.1:" + port.to_s + path
+  report = oha(url, options.duration, options)
+  return path + ": oha gave no report" unless report
+  ok = 0_i64
+  errors = 0_i64
+  codes = report["statusCodeDistribution"]?
+  if table = codes ? codes.as_h? : nil
+    table.each do |code, count|
+      if code == "200"
+        ok += count.as_i64? || 0_i64
+      else
+        errors += count.as_i64? || 0_i64
+      end
+    end
+  end
+  # `-z` ends the run with requests still in flight on each connection;
+  # oha reports them as "aborted due to deadline", which is the clock and
+  # not the server.
+  failures = report["errorDistribution"]?
+  if table = failures ? failures.as_h? : nil
+    table.each do |reason, count|
+      errors += count.as_i64? || 0_i64 unless reason == "aborted due to deadline"
+    end
+  end
+  total = number(report.dig?("summary", "total"))
+  rps = total > 0 ? ok / total : 0.0
+  p50 = number(report.dig?("latencyPercentiles", "p50")) * 1000
+  p99 = number(report.dig?("latencyPercentiles", "p99")) * 1000
+  Measure.new(path, rps, p50, p99, ok, errors)
+end
+
+def wait_until_up(port : Int32, child : ChildProcess) : Bool
+  600.times do
+    return false if child.ended?
+    answer = fetch(port, "/plaintext")
+    return true if answer && answer[0] == 200
+    sleep(100)
+  end
+  false
+end
+
+def run_one(framework : Framework, port : Int32, options : Options) : Outcome
+  outcome = Outcome.new(framework.name)
+  say ""
+  say "== " + framework.name
+  if reason = framework.missing
+    say "  skipped: " + reason
+    outcome.status = "skipped"
+    outcome.reason = reason
+    return outcome
+  end
+  if failed = framework.build(options)
+    outcome.status = "failed"
+    outcome.reason = failed
+    return outcome
+  end
+  outcome.version = framework.version
+  say "  " + outcome.version
+  case child = framework.start(port, options)
+  in ProcessError
+    outcome.status = "failed"
+    outcome.reason = "could not start: " + child.reason
+  in ChildProcess
+    if !wait_until_up(port, child)
+      outcome.status = "failed"
+      outcome.reason = "did not answer on port " + port.to_s + " within 60 s"
+    elsif wrong = check(port)
+      outcome.status = "failed"
+      outcome.reason = "wrong answer: " + wrong
+    elsif wrong = (options.database_url ? check_db(port) : nil)
+      outcome.status = "failed"
+      outcome.reason = "wrong answer: " + wrong
+    else
+      endpoints(options).each do |path|
+        oha("http://127.0.0.1:" + port.to_s + path, options.warmup, options) if options.warmup > 0
+        case result = measure(path, port, options)
+        in Measure
+          outcome.endpoints << result
+          say sprintf("  %-30s %10.0f req/s   p50 %7.3f ms   p99 %7.3f ms   errors %d", path, result.rps, result.p50_ms, result.p99_ms, result.errors)
+        in String
+          outcome.status = "failed"
+          outcome.reason = result
+        end
+      end
+    end
+    # On Windows this ends the program and every process it started:
+    # uvicorn's and node's workers with their parent.
+    child.terminate
+    child.wait
+  end
+  say "  " + outcome.status + ": " + outcome.reason unless outcome.status == "ok"
+  outcome
+end
+
+def parse_options(args : Array(String)) : Options
+  options = Options.new
+  index = 0
+  while index < args.size
+    flag = args[index]
+    value = args[index + 1]? || ""
+    case flag
+    when "--duration"    then options.duration = value.to_i? || abort_usage(flag)
+    when "--warmup"      then options.warmup = value.to_i? || abort_usage(flag)
+    when "--connections" then options.connections = value.to_i? || abort_usage(flag)
+    when "--workers"     then options.workers = value.to_i? || abort_usage(flag)
+    when "--port"        then options.port = value.to_i? || abort_usage(flag)
+    when "--only"        then options.only = value.split(",").map(&.strip)
+    when "--out"         then options.output_dir = File.expand_path(value)
+    when "--db"
+      abort_usage(flag) if value.empty?
+      options.database_url = value
+    when "--no-db"
+      options.db = false
+      index -= 1
+    when "--help", "-h"
+      print USAGE
+      exit 0
+    else
+      abort_usage(flag)
+    end
+    index += 2
+  end
+  options.database_url = nil unless options.db
+  options
+end
+
+# The paths timed, in order: `/db` last, when there is a database.
+def endpoints(options : Options) : Array(String)
+  options.database_url ? ENDPOINTS + [DB_ENDPOINT] : ENDPOINTS
+end
+
+def abort_usage(flag : String) : Int32
+  STDERR.puts "run: bad option " + flag
+  STDERR.print USAGE
+  exit 2
+end
+
+def os_name : String
+  {% if flag?(:win32) %}
+    first_line(output_of("cmd", ["/c", "ver"])).strip
+  {% else %}
+    first_line(output_of("uname", ["-srm"]))
+  {% end %}
+end
+
+def cpu_name : String
+  {% if flag?(:win32) %}
+    name = output_of("powershell", ["-NoProfile", "-Command", "(Get-CimInstance Win32_Processor).Name"])
+    first_line(name || ENV["PROCESSOR_IDENTIFIER"]?).strip
+  {% else %}
+    info = File.file?("/proc/cpuinfo") ? File.read("/proc/cpuinfo") : (output_of("sysctl", ["-n", "machdep.cpu.brand_string"]) || "")
+    line = info.lines.find(&.starts_with?("model name")) || info
+    first_line(line.sub(/^model name\s*:\s*/, "")).strip
+  {% end %}
+end
+
+# The `world` table of TechEmpower's database tests, created and filled
+# when it is not there: 10,000 rows, each `randomnumber` from 1 to 10,000.
+SEED_SQL = "CREATE TABLE IF NOT EXISTS world (id integer PRIMARY KEY, randomnumber integer NOT NULL); " +
+           "INSERT INTO world (id, randomnumber) SELECT g, 1 + floor(random() * 10000)::integer FROM generate_series(1, 10000) AS g ON CONFLICT (id) DO NOTHING;"
+
+PG_DATA = File.join(BUILD, "pgdata")
+
+# The bin directory of the PostgreSQL the `pgserver` Python package ships,
+# or nil without it.
+def pgserver_bin : String?
+  python = {{ flag?(:win32) }} ? "python" : "python3"
+  dir = output_of(python, ["-c", "import os, pgserver; print(os.path.join(os.path.dirname(pgserver.__file__), 'pginstall', 'bin'))"])
+  dir && File.directory?(dir) ? dir : nil
+end
+
+# Starts PostgreSQL from *bin* on PG_PORT with its data in PG_DATA, made
+# the first time: trust authentication for 127.0.0.1 and nothing else
+# listening. The failure, or nil.
+def start_local_postgres(bin : String, options : Options) : String?
+  pg_ctl = File.join(bin, "pg_ctl" + EXE)
+  unless File.file?(File.join(PG_DATA, "PG_VERSION"))
+    if failed = step("initdb", File.join(bin, "initdb" + EXE), ["-D", PG_DATA, "-U", "postgres", "--auth=trust", "-E", "UTF8", "--locale=C"], BUILD)
+      return failed
+    end
+  end
+  return nil if output_of(pg_ctl, ["status", "-D", PG_DATA])
+  max_connections = [100, POOL_PER_WORKER * options.workers + 20].max
+  step("start PostgreSQL", pg_ctl, ["start", "-D", PG_DATA, "-l", File.join(BUILD, "pg.log"), "-w",
+    "-o", "-p " + PG_PORT.to_s + " -h 127.0.0.1 -c max_connections=" + max_connections.to_s], BUILD)
+end
+
+# Gets `/db` its database: DATABASE_URL or `--db` as given, else a
+# PostgreSQL started here; then makes sure `world` is there and full.
+# Sets `options.database_url` to the database, or to nil when there is
+# none, and answers what the results say about it, with the pg_ctl that
+# stops a server this run started.
+def prepare_database(options : Options) : {String, String?}
+  return {"none: --no-db", nil} unless options.db
+  bin = pgserver_bin
+  stop_with = nil
+  where = "given by DATABASE_URL"
+  unless options.database_url
+    unless bin
+      options.database_url = nil
+      return {"none: no DATABASE_URL and the pgserver Python package is not installed (pip install pgserver)", nil}
+    end
+    if failed = start_local_postgres(bin, options)
+      options.database_url = nil
+      return {"none: the local PostgreSQL did not start: " + failed + " (see " + File.join(BUILD, "pg.log") + ")", nil}
+    end
+    options.database_url = "postgres://postgres@127.0.0.1:" + PG_PORT.to_s + "/postgres"
+    stop_with = File.join(bin, "pg_ctl" + EXE)
+    where = "on this machine, from the pgserver Python package"
+  end
+  url = options.database_url || ""
+  psql = bin ? File.join(bin, "psql" + EXE) : "psql"
+  unless output_of(psql, ["-v", "ON_ERROR_STOP=1", "-q", "-c", SEED_SQL, url])
+    options.database_url = nil
+    return {"none: could not create and fill world with " + psql + " at " + url, stop_with}
+  end
+  count = output_of(psql, ["-tAq", "-c", "SELECT count(*) FROM world WHERE id BETWEEN 1 AND 10000", url])
+  unless count == "10000"
+    options.database_url = nil
+    return {"none: world at " + url + " has " + (count || "?") + " of its 10000 rows", stop_with}
+  end
+  version = output_of(psql, ["-tAq", "-c", "SHOW server_version", url]) || "?"
+  per_server = POOL_PER_WORKER * options.workers
+  {sprintf("PostgreSQL %s %s; %d connections per server: one pool of %d in iyi-web, Kemal and Go, %d in each of the %d FastAPI and Express worker processes",
+    version, where, per_server, per_server, POOL_PER_WORKER, options.workers), stop_with}
+end
+
+def markdown(results : Results, paths : Array(String)) : String
+  m = results.machine
+  lines = [] of String
+  lines << "| Framework | " + paths.map { |path| "`" + path.split("?").first + "` req/s" }.join(" | ") + " |"
+  lines << "|---|" + paths.map { |_| "---:" }.join("|") + "|"
+  results.frameworks.each do |outcome|
+    if outcome.status == "ok"
+      lines << "| " + outcome.name + " | " + outcome.endpoints.map { |e| sprintf("%.0f", e.rps) }.join(" | ") + " |"
+    else
+      lines << "| " + outcome.name + " | " + outcome.status + ": " + outcome.reason.gsub("|", "\\|") + paths[1..].map { |_| " |" }.join + " |"
+    end
+  end
+  lines << ""
+  lines << "| Framework | Endpoint | req/s | p50 ms | p99 ms | non-200 / errors |"
+  lines << "|---|---|---:|---:|---:|---:|"
+  results.frameworks.each do |outcome|
+    outcome.endpoints.each do |e|
+      lines << sprintf("| %s | `%s` | %.0f | %.3f | %.3f | %d |", outcome.name, e.path, e.rps, e.p50_ms, e.p99_ms, e.errors)
+    end
+  end
+  lines << ""
+  lines << "Versions:"
+  lines << ""
+  results.frameworks.each do |outcome|
+    lines << "- " + outcome.name + ": " + (outcome.version.empty? ? outcome.status : outcome.version)
+  end
+  lines << ""
+  lines << sprintf("%s; %s, %d logical cores; oha %s, %d connections, %d s per endpoint after %d s of warm-up; %d workers per server; %s.",
+    m.os, m.cpu, m.cores, m.oha, m.connections, m.duration_s, m.warmup_s, m.workers, m.date)
+  lines << ""
+  lines << "Database for `/db`: " + m.database + "."
+  lines.join("\n") + "\n"
+end
+
+options = parse_options(Program.args)
+unless found?("oha")
+  STDERR.puts "run: oha not found on PATH (cargo install oha, or a release from github.com/hatoo/oha)"
+  exit 1
+end
+Dir.mkdir_p(BUILD)
+Dir.mkdir_p(options.output_dir)
+
+frameworks = [IyiWeb.new, FastAPI.new, Express.new, Kemal.new, GoNetHttp.new] of Framework
+unless options.only.empty?
+  unknown = options.only - frameworks.map(&.name)
+  abort_usage("--only " + unknown.join(",")) unless unknown.empty?
+  frameworks = frameworks.select { |f| options.only.includes?(f.name) }
+end
+
+database, stop_postgres = prepare_database(options)
+say ""
+if options.database_url
+  say "/db: " + database
+else
+  say "/db: skipped - " + database.sub("none: ", "")
+end
+
+machine = Machine.new(os_name, cpu_name, System.cpu_count, first_line(output_of("oha", ["--version"])).sub("oha ", ""),
+  options.duration, options.warmup, options.connections, options.workers, Time.utc.to_s("%Y-%m-%d"), database)
+say "bench/compare: " + machine.os + ", " + machine.cpu + ", " + machine.cores.to_s + " cores"
+
+outcomes = [] of Outcome
+frameworks.each_with_index do |framework, index|
+  outcomes << run_one(framework, options.port + index, options)
+end
+
+if pg_ctl = stop_postgres
+  say ""
+  step("stop PostgreSQL", pg_ctl, ["stop", "-D", PG_DATA, "-m", "fast"], BUILD)
+end
+
+results = Results.new(machine, outcomes)
+json_path = File.join(options.output_dir, "results.json")
+md_path = File.join(options.output_dir, "results.md")
+File.write(json_path, JSON.parse(results.to_json).to_pretty_json + "\n")
+File.write(md_path, markdown(results, endpoints(options)))
+say ""
+print File.read(md_path)
+say ""
+say "wrote " + json_path + " and " + md_path
