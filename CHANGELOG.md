@@ -142,6 +142,13 @@ and `iyi_web/intake` are gone, and std/http caps every request body at
   with a pool from `DATABASE_URL`, migrations applied at start under an
   advisory lock, a JSON CRUD with validated bodies, `DBError` answered as
   `503`, and `smoke.sh`.
+- `bench/compare/`: the same four endpoints (plain text, JSON, a path and
+  query parameter route, and a PostgreSQL query through a connection pool)
+  in iyi-web, FastAPI, Express, Kemal and Go `net/http`, and a runner
+  (`bash bench/compare/run.sh`) that builds, checks, warms up and measures
+  each with oha, starts a portable PostgreSQL when no `DATABASE_URL` is
+  given, skips missing toolchains with the reason, and writes
+  `results.json` and `results.md`.
 - Docs: `docs/cli.md`, `docs/database.md`, `docs/benchmarks.md`,
   `docs/transport.md`.
 - A documentation site: `mkdocs.yml` builds `docs/` with mkdocs-material
@@ -202,8 +209,8 @@ and `iyi_web/intake` are gone, and std/http caps every request body at
   output share the request log's lock.
 - `run` runs the background runner beside the listener and, after the
   drain, closes it and runs the `on_stop` hooks before returning.
-- `.gitignore` ignores `.iyi-web/` (dev builds) and the postgres
-  example's binary.
+- `.gitignore` ignores `.iyi-web/` (dev builds), the postgres example's
+  binary, and bench/compare's builds, results and fetched dependencies.
 - `examples/typed_json.iyi` and `examples/openapi_auth.iyi` keep their notes
   in a `HashStore` and serve on every core (`typed_json` no longer registers its
   routes with `workers: 1`); `examples/templates.iyi`,
