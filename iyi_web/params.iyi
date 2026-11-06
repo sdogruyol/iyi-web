@@ -18,7 +18,7 @@ import std/json::{Any, Parser}
 import iyi_web/validation::{BodyError, decode_json}
 import iyi_web/coerce::{ParamError, decode_param}
 import iyi_web/codec::*
-import iyi_web/request::{Request}
+import iyi_web/request::{Request, RequestBody}
 import iyi_web/multipart::{FileUpload, Multipart, MultipartError, multipart_boundary, parse_multipart}
 
 # Where a typed lookup (`Params#int` and the rest) reads its parameter:
@@ -49,6 +49,10 @@ pub class Params
   @body_state : Int32
   @max_files : Int32
   @max_field_size : Int32
+  # The request the body comes from, read from it when it is first
+  # wanted: a body still on the connection is never read for a route that
+  # does not ask for it, and a multipart one streams to its files.
+  @request : Request?
 
   # *query_pairs* and *body_pairs* are every value in the order sent; left
   # out, each is the table's one value per key.
@@ -65,6 +69,7 @@ pub class Params
     @body_state = 0
     @max_files = 128
     @max_field_size = 8 * 1024 * 1024
+    @request = nil
   end
 
   def self.empty : Params
@@ -74,7 +79,13 @@ pub class Params
   def self.from(request : Request, url : Hash(String, String)) : Params
     query = parse_query_pairs(request.query_string)
     body = parse_body(request)
-    Params.new(url, table_of(query), table_of(body), request.body, request.content_type.downcase, request.headers["content-type"]? || "", query, body)
+    params = Params.new(url, table_of(query), table_of(body), "", request.content_type.downcase, request.headers["content-type"]? || "", query, body)
+    params.reads(request)
+    params
+  end
+
+  protected def reads(request : Request) : Nil
+    @request = request
   end
 
   pub def url : Hash(String, String)
@@ -111,9 +122,12 @@ pub class Params
     values_of(@body_pairs, key)
   end
 
-  # The request body as it arrived, whatever its type.
+  # The request body as it arrived, whatever its type, read whole the
+  # first time it is asked for when it was still on the connection. A
+  # `multipart/form-data` body streams to its files instead, and once it
+  # has, nothing of it is left to read here.
   pub def raw_body : String
-    @raw_body
+    (request = @request) ? request.body : @raw_body
   end
 
   # A JSON object body's members. A top-level array is under `"_json"`; a
@@ -153,7 +167,7 @@ pub class Params
     end
     root = @json_root
     return BodyError.new(400, "malformed JSON: the body is empty") unless root
-    decode_json(@raw_body, root, type)
+    decode_json(raw_body, root, type)
   end
 
   # Uploaded files by field name. A later file under the same name
@@ -169,11 +183,20 @@ pub class Params
     @all_files
   end
 
-  # The status a multipart body that could not be read earns: 400 when it
-  # is malformed, 413 when it breaks an upload limit. Nil otherwise.
+  # The status a body that could not be read earns: for a multipart body
+  # 400 when it is malformed, 413 when it breaks an upload limit; for any
+  # body read from the connection, 413 past `max_request_body_size`, 408
+  # when it stopped arriving in time, 400 when it broke off. Nil
+  # otherwise.
   pub def body_error : Int32?
     parse_multipart_body
-    @body_state > 1 ? @body_state : nil
+    return @body_state if @body_state > 1
+    if request = @request
+      if failed = request.body_failure
+        return failed.status
+      end
+    end
+    nil
   end
 
   # Most file parts, and largest text field in bytes, a multipart body may
@@ -269,8 +292,9 @@ pub class Params
     return unless @json_state == 0
     @json_state = 1
     return unless json_media_type?(@media_type)
-    return if @raw_body.empty?
-    parser = Parser.new(@raw_body)
+    text = raw_body
+    return if text.empty?
+    parser = Parser.new(text)
     parsed = parser.parse
     if failure = parser.error
       @json_error = failure
@@ -296,7 +320,10 @@ pub class Params
       @body_state = 400
       return
     end
-    case result = parse_multipart(@raw_body, boundary, @max_files, @max_field_size)
+    # Read as it arrives: from the connection when the body is still on
+    # it, each file part straight to its temporary file.
+    source = (request = @request) ? request.body_io : RequestBody.text(@raw_body)
+    case result = parse_multipart(source, boundary, @max_files, @max_field_size)
     in MultipartError
       @body_state = result.status
     in Multipart
@@ -328,15 +355,14 @@ private def json_media_type?(type : String) : Bool
   type.starts_with?("application/") && type.ends_with?("+json")
 end
 
+# A form body's pairs. Only an `application/x-www-form-urlencoded` body
+# is read for them, so a body of any other type that is still on the
+# connection stays there until something asks for it.
 private def parse_body(request : Request) : Array(Tuple(String, String))
-  return [] of Tuple(String, String) if request.body.empty?
-
-  type = request.content_type.downcase
-  if type == "application/x-www-form-urlencoded"
-    parse_query_pairs(request.body)
-  else
-    [] of Tuple(String, String)
-  end
+  return [] of Tuple(String, String) unless request.content_type.downcase == "application/x-www-form-urlencoded"
+  body = request.body
+  return [] of Tuple(String, String) if body.empty?
+  parse_query_pairs(body)
 end
 
 # Last wins, as in `parse_query`.

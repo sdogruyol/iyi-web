@@ -7,7 +7,9 @@ module iyi_web/server_test
 import std/list::{List}
 import std/mutex::{Mutex}
 import std/socket::{IyiSocket}
-import std/http::{HTTP}
+import std/http::{HTTP, HTTPClient}
+import std/zstd::{Zstd}
+import std/compress::{Gzip}
 import iyi_web/router::{Router, RouteHandler}
 import iyi_web/handler::{Handler, chain}
 import iyi_web/context::{Context}
@@ -136,6 +138,9 @@ end
 router.get "/peer" do |env|
   (env.request.remote_address || "nil") + " tls=" + env.request.tls?.to_s
 end
+router.get "/version" do |env|
+  env.request.version
+end
 router.error 500 do |env, err|
   raise "page failed" if env.request.path == "/boom-twice"
   if env.request.path == "/boom-json"
@@ -201,6 +206,55 @@ raw_guard = Guard.new
 raw_guard.exclude ["/hooks/*"], "*"
 raw_server = Server.new(chain([raw_guard, RouteHandler.new(raw, raw_cfg)] of Handler), raw_cfg)
 raw_port = raw_server.bind("127.0.0.1", 0)
+
+# Bodies left on the connection (`stream_bodies`) and answers compressed
+# by std/http (`compress`), under a limit small enough to pass.
+streaming = Router.new
+streaming.post "/count" do |env|
+  body = env.request.body_io
+  total = 0
+  pieces = 0
+  while true
+    piece = body.read
+    break unless piece.is_a?(String)
+    break if piece.empty?
+    total = total + piece.bytesize
+    pieces = pieces + 1
+  end
+  failed = env.request.body_failure
+  failed ? "failed #{failed.status}" : "read #{total} in #{pieces > 1 ? "pieces" : "one"}"
+end
+streaming.post "/ignore" do |env|
+  "ignored"
+end
+streaming.post "/json" do |env|
+  env.params.json["a"]?.to_s
+end
+streaming.get "/text" do |env|
+  env.response.content_type = "text/plain; charset=utf-8"
+  "compressible " * 400
+end
+stream_cfg = Config.new
+stream_cfg.logging = false
+stream_cfg.serve_static = false
+stream_cfg.stream_bodies = true
+stream_cfg.compress = true
+stream_cfg.max_request_body_size = 1000000
+stream_server = Server.new(chain([RouteHandler.new(streaming, stream_cfg)]), stream_cfg)
+stream_port = stream_server.bind("127.0.0.1", 0)
+
+# *size* bytes of body as chunks of *each*, then the last chunk.
+def chunked_body(size : Int32, each : Int32) : String
+  builder = String::Builder.new
+  left = size
+  while left > 0
+    piece = left < each ? left : each
+    builder << piece.to_s(16) << "\r\n" << "z" * piece << "\r\n"
+    left = left - piece
+  end
+  builder << "0\r\n\r\n"
+  builder.to_s
+end
 
 group do |g|
   g.spawn do
@@ -487,11 +541,110 @@ group do |g|
         hook = exchange(raw_port, close_request("POST", "/hooks/x", "Content-Length: 0\r\n"))
         assert http_body(hook) == "hook x"
       end
+
+      it "speaks HTTP/2 to a client with prior knowledge, beside HTTP/1.1 on the same port" do
+        client = HTTPClient.new(prior_knowledge: true)
+        version = client.get("http://127.0.0.1:#{port}/version").or_panic
+        assert version.status == 200
+        assert version.body == "HTTP/2"
+        echoed = client.post("http://127.0.0.1:#{port}/echo", "over h2").or_panic
+        assert echoed.body == "over h2"
+        missing = client.get("http://127.0.0.1:#{port}/nope").or_panic
+        assert missing.status == 404
+        assert missing.body == "nope"
+        client.close
+        assert http_body(exchange(port, close_request("GET", "/version"))) == "HTTP/1.1"
+      end
+
+      it "sends a flushed body to an HTTP/1.0 client unchunked, up to the close" do
+        old = exchange(port, "GET /stream HTTP/1.0\r\n\r\n")
+        assert status_line(old).ends_with?(" 200 OK")
+        assert http_header(old, "Transfer-Encoding").nil?
+        assert http_header(old, "Connection") == "close"
+        assert http_body(old) == "onetwo"
+      end
+
+      it "holds the request line to 8 KiB with 414 and the fields to 16 KiB with 431" do
+        long = exchange(port, close_request("GET", "/" + "a" * 8200))
+        assert status_line(long) == "HTTP/1.1 414 URI Too Long"
+        assert http_header(long, "Connection") == "close"
+        within = exchange(port, close_request("GET", "/" + "a" * 8000))
+        assert status_line(within) == "HTTP/1.1 404 Not Found"
+
+        fat = exchange(port, close_request("GET", "/", "X-Fat: " + "b" * 16400 + "\r\n"))
+        assert status_line(fat) == "HTTP/1.1 431 Request Header Fields Too Large"
+        many = ""
+        200.times { |index| many = many + "X-Field-#{index}: " + "c" * 80 + "\r\n" }
+        assert status_line(exchange(port, close_request("GET", "/", many))) == "HTTP/1.1 431 Request Header Fields Too Large"
+        slim = exchange(port, close_request("GET", "/", "X-Fat: " + "b" * 16000 + "\r\n"))
+        assert status_line(slim) == "HTTP/1.1 200 OK"
+      end
+
+      it "refuses a chunked body past the cap with 413" do
+        cfg.max_request_body_size = 8
+        chunked = exchange(port, close_request("POST", "/echo", "Transfer-Encoding: chunked\r\n") + "5\r\nabcde\r\n5\r\nfghij\r\n0\r\n\r\n")
+        assert status_line(chunked) == "HTTP/1.1 413 Content Too Large"
+        assert http_header(chunked, "Connection") == "close"
+        within = exchange(port, close_request("POST", "/echo", "Transfer-Encoding: chunked\r\n") + "4\r\nabcd\r\n4\r\nefgh\r\n0\r\n\r\n")
+        assert http_body(within) == "abcdefgh"
+        cfg.max_request_body_size = 8 * 1024 * 1024
+      end
+
+      it "lets a route read its body as it arrives under stream_bodies" do
+        counted = exchange(stream_port, close_request("POST", "/count", "Transfer-Encoding: chunked\r\n") + chunked_body(900000, 70000))
+        assert http_body(counted) == "read 900000 in pieces"
+        sized = exchange(stream_port, close_request("POST", "/count", "Content-Length: 5\r\n") + "hello")
+        assert http_body(sized) == "read 5 in one"
+      end
+
+      it "stops a streamed body at max_request_body_size with 413 as its failure" do
+        counted = exchange(stream_port, close_request("POST", "/count", "Transfer-Encoding: chunked\r\n") + chunked_body(1200000, 100000))
+        assert http_body(counted) == "failed 413"
+        # The JSON body a pre-route check reads is refused before the route.
+        json = exchange(stream_port, close_request("POST", "/json", "Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n") + chunked_body(1200000, 100000))
+        assert status_line(json) == "HTTP/1.1 413 Content Too Large"
+        small = exchange(stream_port, close_request("POST", "/json", "Content-Type: application/json\r\nContent-Length: 7\r\n") + "{\"a\":1}")
+        assert http_body(small) == "1"
+      end
+
+      it "reads past a body no route read, and serves the next request on the connection" do
+        alive = IyiSocket.connect("127.0.0.1", stream_port).or_panic
+        alive.write("POST /ignore HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\n0123456789").or_panic
+        first = read_frame(alive)
+        assert http_body(first) == "ignored"
+        assert http_header(first, "Connection") == "keep-alive"
+        alive.write(close_request("POST", "/count", "Content-Length: 3\r\n") + "abc").or_panic
+        second = read_frame(alive)
+        alive.close
+        assert http_body(second) == "read 3 in one"
+      end
+
+      it "compresses an answer zstd or gzip, as the client takes them, under compress" do
+        text = "compressible " * 400
+        zstd = exchange(stream_port, close_request("GET", "/text", "Accept-Encoding: zstd, gzip\r\n"))
+        assert http_header(zstd, "Content-Encoding") == "zstd"
+        assert http_header(zstd, "Vary") == "Accept-Encoding"
+        assert Zstd.decompress(http_body(zstd)) == text
+        gzip = exchange(stream_port, close_request("GET", "/text", "Accept-Encoding: gzip\r\n"))
+        assert http_header(gzip, "Content-Encoding") == "gzip"
+        assert Gzip.decompress(http_body(gzip)) == text
+        plain = exchange(stream_port, close_request("GET", "/text"))
+        assert http_header(plain, "Content-Encoding").nil?
+        assert http_body(plain) == text
+        # Off, the default: the same client gets the body as it is.
+        assert http_header(exchange(port, close_request("GET", "/", "Accept-Encoding: zstd, gzip\r\n")), "Content-Encoding").nil?
+      end
     end
 
     server.close
     typed_server.close
     raw_server.close
+    stream_server.close
+    0
+  end
+
+  g.spawn do
+    stream_server.listen
     0
   end
 

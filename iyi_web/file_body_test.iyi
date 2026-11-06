@@ -62,9 +62,11 @@ def read_to_close(client : IyiSocket) : String
   buffer
 end
 
+# A response whose flushes land in *writes*, a piece each, the first ""
+# when the headers go out alone.
 def attached(writes : Array(String)) : Response
   response = Response.new
-  response.attach(->(bytes : String) { writes << bytes; nil }, "HTTP/1.1", true, false)
+  response.attach(->(bytes : String) { writes << bytes; nil }, false)
   response
 end
 
@@ -96,9 +98,10 @@ group do |g|
         writes = [] of String
         response = attached(writes)
         respond_file(response, path, size, nil, binary, false)
-        assert writes[0].starts_with?("HTTP/1.1 200 OK\r\n")
-        assert writes[0].includes?("Content-Length: " + size.to_s + "\r\n")
-        assert !writes[0].includes?("Transfer-Encoding")
+        assert response.headers_sent?
+        assert writes[0] == ""
+        assert response.headers["Content-Length"] == size.to_s
+        assert !response.headers.has_key?("Transfer-Encoding")
         body = ""
         index = 1
         while index < writes.size
@@ -110,7 +113,6 @@ group do |g|
         sent = writes.size
         response.finish
         assert writes.size == sent
-        assert response.reusable?
       end
 
       it "buffers a body of one chunk or less and streams one byte more" do
@@ -132,30 +134,26 @@ group do |g|
         end
       end
 
-      it "compresses a file larger than one chunk as it reads it, chunked" do
+      it "compresses a file larger than one chunk as it reads it, with no length" do
         writes = [] of String
         response = attached(writes)
         respond_file_encoded(response, path, size, "text/plain", "gzip", false)
-        assert writes[0].starts_with?("HTTP/1.1 200 OK\r\n")
-        assert writes[0].includes?("Content-Encoding: gzip\r\n")
-        assert writes[0].includes?("Transfer-Encoding: chunked\r\n")
-        assert !writes[0].includes?("Content-Length")
-        # One flush per chunk read, each a chunk of the gzip stream.
+        assert writes[0] == ""
+        assert response.headers["Content-Encoding"] == "gzip"
+        assert !response.headers.has_key?("Content-Length")
+        # One flush per chunk read, each a piece of the gzip stream.
         assert writes.size >= 5
         stream = ""
         index = 1
         while index < writes.size
-          frame = writes[index]
-          head = frame.partition("\r\n")
-          length = head[0].to_i(16)
-          assert length <= FILE_CHUNK_SIZE + 64
-          stream = stream + head[2][0, length]
+          assert writes[index].bytesize <= FILE_CHUNK_SIZE + 64
+          stream = stream + writes[index]
           index = index + 1
         end
         assert Gzip.decompress(stream) == content
+        sent = writes.size
         response.finish
-        assert writes[writes.size - 1] == "0\r\n\r\n"
-        assert response.reusable?
+        assert writes.size == sent
       end
 
       it "buffers an encoded file of one chunk or less with its length, and a HEAD of it too" do

@@ -3,6 +3,7 @@
 # own flags run.
 module iyi_web/cli_test
 
+import std/tls::{TlsVersion}
 import iyi_web/cli::{CLIParser, cli_parser}
 import iyi_web/config::{Config}
 import iyi_web/spec::*
@@ -34,8 +35,11 @@ describe "cli_parser" do
     cfg = Config.new
     assert cli_parser(cfg).parse(["-s", "--ssl-key-file", key, "--ssl-cert-file=" + cert]).nil?
     if tls = cfg.ssl
-      assert tls.alpn == ["http/1.1"]
+      # HTTP/2 first: the server speaks it over TLS to a client that asks.
+      assert tls.alpn == ["h2", "http/1.1"]
       assert tls.leaf.matches_host?("localhost")
+      assert tls.min_version == TlsVersion::TLS13
+      assert tls.client_roots.nil?
     else
       assert false
     end
@@ -62,6 +66,34 @@ describe "cli_parser" do
     else
       assert false
     end
+  end
+
+  it "asks for client certificates under --ssl-client-ca and takes TLS 1.2 under --ssl-min-version" do
+    key = __DIR__ + "/testdata/localhost.key"
+    cert = __DIR__ + "/testdata/localhost.crt"
+    roots = __DIR__ + "/testdata/client-ca.crt"
+    cfg = Config.new
+    assert cli_parser(cfg).parse(["-s", "--ssl-key-file", key, "--ssl-cert-file", cert, "--ssl-client-ca", roots, "--ssl-min-version", "1.2"]).nil?
+    if tls = cfg.ssl
+      assert tls.min_version == TlsVersion::TLS12
+      if presented = tls.client_roots
+        assert presented.size == 1
+        assert presented[0].subject_name.includes?("iyi-web test client root")
+      else
+        assert false
+      end
+    else
+      assert false
+    end
+    assert cli_parser(Config.new).parse(["--ssl-min-version", "1.1"]) == "Invalid TLS version \"1.1\": must be 1.2 or 1.3."
+    missing = __DIR__ + "/testdata/no-such.pem"
+    assert cli_parser(Config.new).parse(["-s", "--ssl-key-file", key, "--ssl-cert-file", cert, "--ssl-client-ca", missing]) == "SSL configuration error: cannot read the SSL client CA file " + missing + "."
+    not_pem = cli_parser(Config.new).parse(["-s", "--ssl-key-file", key, "--ssl-cert-file", cert, "--ssl-client-ca", key])
+    assert (not_pem || "").starts_with?("SSL configuration error: the SSL client CA file " + key + ": ")
+    # Without -s, as the other file flags.
+    plain = Config.new
+    assert cli_parser(plain).parse(["--ssl-client-ca", roots]).nil?
+    assert plain.ssl.nil?
   end
 
   it "notices help and leaves plain arguments and everything after -- alone" do

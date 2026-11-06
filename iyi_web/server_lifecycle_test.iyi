@@ -32,6 +32,17 @@ end
 router.get "/peer" do |env|
   (env.request.remote_address || "nil") + " tls=" + env.request.tls?.to_s
 end
+router.post "/echo" do |env|
+  env.request.body
+end
+router.get "/ticks" do |env|
+  20.times do
+    env.response.print("tick\n")
+    env.response.flush
+    sleep(100)
+  end
+  ""
+end
 
 # The connection's bytes until the server closes it.
 def read_all(client : IyiSocket) : String
@@ -195,6 +206,27 @@ describe "Server shutdown" do
       client.close
     end
   end
+
+  it "cuts a streaming response off at the deadline, without the end of its body" do
+    serving(router, quiet_config) do |server|
+      client = connect(server)
+      client.write("GET /ticks HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+      assert wait_for { server.in_flight == 1 }
+      started = Time.monotonic
+      server.shutdown(1)
+      took = since(started)
+      answer = read_all(client)
+      client.close
+      assert status_line(answer) == "HTTP/1.1 200 OK"
+      assert http_header(answer, "Transfer-Encoding") == "chunked"
+      assert answer.includes?("tick\n")
+      # Cut short: no last chunk, so no client takes it for the whole body.
+      assert !answer.ends_with?("0\r\n\r\n")
+      assert took >= Span.milliseconds(900)
+      assert took < Span.seconds(3)
+      assert server.in_flight == 0
+    end
+  end
 end
 
 describe "Server timeouts" do
@@ -222,6 +254,23 @@ describe "Server timeouts" do
           0
         end
       end
+      took = since(started)
+      client.close
+      assert status_line(answer) == "HTTP/1.1 408 Request Timeout"
+      assert http_header(answer, "Connection") == "close"
+      assert took >= Span.milliseconds(900)
+      assert took < Span.milliseconds(1800)
+    end
+  end
+
+  it "answers 408 to a body that stops arriving within read_timeout" do
+    cfg = quiet_config
+    cfg.read_timeout = 1
+    serving(router, cfg) do |server|
+      client = connect(server)
+      started = Time.monotonic
+      client.write("POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\n12345").or_panic
+      answer = read_all(client)
       took = since(started)
       client.close
       assert status_line(answer) == "HTTP/1.1 408 Request Timeout"
@@ -300,6 +349,37 @@ describe "Server timeouts" do
       answer = read_all(client)
       client.close
       assert http_body(answer) == "home"
+    end
+  end
+end
+
+describe "Server keep-alive" do
+  it "carries max_keepalive_requests on a connection and closes after the last" do
+    cfg = quiet_config
+    cfg.max_keepalive_requests = 2
+    serving(router, cfg) do |server|
+      client = connect(server)
+      client.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+      first = read_frame(client)
+      assert http_header(first, "Connection") == "keep-alive"
+      client.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+      second = read_all(client)
+      client.close
+      assert http_body(second) == "home"
+      assert http_header(second, "Connection") == "close"
+    end
+  end
+
+  it "closes after every answer with keepalive off" do
+    cfg = quiet_config
+    cfg.keepalive = false
+    serving(router, cfg) do |server|
+      client = connect(server)
+      client.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+      only = read_all(client)
+      client.close
+      assert http_body(only) == "home"
+      assert http_header(only, "Connection") == "close"
     end
   end
 end
