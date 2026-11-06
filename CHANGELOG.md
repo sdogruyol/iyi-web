@@ -8,254 +8,232 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [0.6.0] - 2026-11-06
 
-Requires iyi 0.20.1 or later. Breaking: templates escape `<%= %>` output,
-a layout's `content` and `yield_content` are `SafeHTML`, and
-`iyi_web/templates` no longer re-exports `std/eiy` (see Changed and
-Removed, and `docs/templates.md` for the migration). The transport is
-std/http's: `Response#attach` takes `(sink, head)`, `Response#reusable?`
-and `iyi_web/intake` are gone, and std/http caps every request body at
-64 MiB (see Changed and Removed, and `docs/transport.md`).
+Requires iyi 0.20.1 or later.
+
+The release that turns the roadmap (`ROADMAP.md`) into code. A route can
+name the types it reads and answers, and the framework reads, validates
+and documents them: typed routes, an OpenAPI 3.1 document with Swagger UI,
+dependencies and auth providers with HS256 JWTs. Every connection is
+served through std/http, which brings HTTP/2, TLS 1.2 beside 1.3, mutual
+TLS, Let's Encrypt and streamed request bodies. Templates escape by
+default. Around the framework: an `iyi-web` command that scaffolds a
+project and rebuilds it on save, shared-state stores, background tasks,
+Prometheus metrics, OpenTelemetry tracing, a PostgreSQL example, a docs
+site with a tutorial, and a benchmark against FastAPI, Express, Kemal and
+Go. `get "/" do |env| ... end` works exactly as before; everything new is
+opt-in.
+
+### Upgrading from 0.5
+
+- **Templates escape `<%= %>`.** Drop `HTML.escape(...)` inside `<%= %>`
+  (it would escape twice), and wrap every `<%= %>` that prints markup on
+  purpose in `raw(...)`: HTML the program built, `csrf_tag(env)`, or a
+  page a helper rendered in iyi code. A layout's `content` and
+  `yield_content` are `SafeHTML` now; String methods on them need `.to_s`
+  first. See `docs/templates.md`.
+- **`std/eiy` is no longer re-exported** by `iyi_web/templates` or
+  `iyi_web/dsl`: a program that names `Eiy` imports `std/eiy` itself.
+- **Request bodies stop at 64 MiB.** std/http refuses anything larger,
+  whatever `max_request_body_size` says (the default stays 8 MiB).
+- **Only code that touched the transport** needs changes beyond these:
+  `Response#attach(sink, head)` replaces the four-argument form,
+  `Response#reusable?` and `iyi_web/intake` are gone, and
+  `params.raw_body` is empty for multipart requests (the files are in
+  `params.files`).
 
 ### Added
 
-- Typed parameter lookups: `env.params.int("id")`, `int64`, `float`,
-  `bool` and `string` answer the value or a `ParamError` (422, naming the
-  parameter), with `from: :url | :query | :body` and `default:`. Reading
-  is strict: `"12abc"`, `" 12"` and `""` are not integers, `nan` and
-  `inf` are not numbers (`iyi_web/coerce`, `iyi_web/params`).
-- Typed routes: `path:`, `query:`, `headers:`, `body:` and `deps:` on
-  every route method, in the DSL and on `Router`. The block gets each
-  value after `env`, typed from the options given; what cannot be read is
-  answered before the block runs - a `ParamError` (422) naming every wrong
-  parameter, or the body's `BodyError` (400, 415, 422). Parameter structs
-  use `derive serializable`: defaults and nilable fields are optional,
-  enums take their names, `Array(T)` takes a repeated query key, and
-  `Validate` runs once they read. `path: Int32` reads a route's one
-  capture (`iyi_web/typed`, `iyi_web/router`, `iyi_web/dsl`).
+**Typed routes**
+
+- `path:`, `query:`, `headers:` and `body:` on every route method, in
+  the DSL and on `Router`. The block gets each value after `env`, typed;
+  what cannot be read is answered before the block runs, with a
+  `ParamError` (422) naming every wrong parameter or the body's
+  `BodyError` (400, 415, 422). Parameter structs use
+  `derive serializable`: defaults and nilable fields are optional, enums
+  take their names, `Array(T)` takes a repeated query key, `JSON::Field`
+  keys rename, and `Validate` runs once they are read. `path: Int32`
+  reads a route's one capture (`iyi_web/typed`).
 - `response: T` writes the block's answer as JSON and checks its type
-  when the program is compiled; `status:` is the status a route answers
-  with unless its block sets another, on plain routes too.
-- OpenAPI 3.1: `openapi(title, version)` (and `Router#openapi`) serves
-  `/openapi.json`, made from every route, mount and namespace, with
-  parameters, request and response schemas derived from the types at
-  compile time (`required`, nested structs as `components.schemas`,
-  arrays, enums, nullable, `JSON::Field` keys and ignores), `summary:`,
-  `description:`, `tags:` and security; and `/docs`, Swagger UI 5 loaded
-  from the jsDelivr CDN (`iyi_web/openapi`). The document of
-  `examples/openapi_auth.iyi` passes openapi-spec-validator.
-- Dependencies: `Dep.new(User) { |env| ... }` providers of the type they
-  name, whose block answers it or an error - anything else is refused
-  where it is written - and whose error ends the request with its status
-  before the route runs; composed with `resolve(env)!`, run once per
-  request, and combined with `Dep.all(user: A, db: B)` into a named tuple
-  (a macro that names the tuple's type for `Dep.combine(type, deps)`).
-  Every exported signature is written, so the module is an artifact
-  `iyi mod release` accepts (`iyi_web/deps`).
-- Auth providers: `bearer_auth`, `api_key_auth` (header, query or
-  cookie), `jwt_auth` and `oauth2_password_bearer`, with `bearer_token`,
-  `api_key`, `password_grant`, `token_response`, `AuthError` and
-  `OAuthError`; each provider's scheme is listed under
+  when the program compiles; `status:` sets the status a route answers
+  with, on plain routes too.
+- One parameter at a time: `env.params.int("id")`, `int64`, `float`,
+  `bool` and `string` answer the value or a `ParamError`, with
+  `from: :url | :query | :body` and `default:`. Reading is strict:
+  `"12abc"`, `" 12"` and `""` are not integers, `nan` and `inf` are not
+  numbers (`iyi_web/coerce`).
+- `Params#query_pairs`, and `json_errors` and `enum_name` in
+  `iyi_web/validation`.
+
+**OpenAPI**
+
+- `openapi(title, version)` (and `Router#openapi`) serves
+  `/openapi.json`, an OpenAPI 3.1 document of every route, mount and
+  namespace, and `/docs`, Swagger UI. Schemas are derived from the types
+  at compile time: `required`, nested structs as `components.schemas`,
+  arrays, enums, nullable fields, `JSON::Field` keys and ignores. Routes
+  take `summary:`, `description:` and `tags:`, and list the 4xx answers
+  the framework gives for them (`iyi_web/openapi`).
+
+**Dependencies and auth**
+
+- `Dep.new(User) { |env| ... }`: a provider of the type it names, whose
+  error ends the request with its status before the route runs. A route
+  takes one with `deps:`; providers compose with `resolve(env)!`, run
+  once per request, and combine with `Dep.all(user: A, db: B)` into a
+  named tuple (`iyi_web/deps`).
+- `bearer_auth`, `api_key_auth` (header, query or cookie), `jwt_auth` and
+  `oauth2_password_bearer`, with `password_grant`, `token_response`,
+  `AuthError` and `OAuthError`. Each provider's scheme appears under
   `components.securitySchemes` and on its routes (`iyi_web/auth`).
-- `JWT.sign` and `JWT.verify` for HS256 tokens: `alg` must be `HS256`
-  (`none` and the rest refused), constant-time signature check, `exp`,
-  `nbf` and `iat` with `leeway:`, optional `issuer:` and `audience:`,
-  `Claims` or a payload type of the application's own; secrets under 32
-  bytes are refused (`iyi_web/jwt`).
-- `Params#query_pairs`, `json_errors(root, T)` and `enum_name` in
-  `iyi_web/validation`, used by the above.
-- `examples/openapi_auth.iyi`: a notes API with an OAuth2 password flow
-  issuing JWTs, user and admin providers, an API-key client and the docs
-  page.
-- `on_start do ... end` and `on_stop do ... end` in the DSL
-  (`iyi_web/lifecycle`), FastAPI's `lifespan` as two hooks. Start hooks run
-  in order before the server is bound; one that answers an `Error` or panics
-  stops the start, and the program exits 1 naming the hook's file and line
-  (`could not start: on_start (app.iyi:3) failed: ...`). Stop hooks run
-  after the drain and the background tasks, the last written first; one
-  that fails is reported and the rest still run. Blocks are checked like a
-  route's; `workers: 1` keeps one unchecked without putting the server on
-  one thread. `Lifecycle`, `lifecycle_hook` and `LIFECYCLE` run hooks as a
-  value, for tests.
-- Background tasks (`iyi_web/background`): `env.background { }` in a route
-  and `background { }` anywhere run work off the request path on whichever
-  worker is free. A panic is caught, reported on standard error (or through
-  `on_panic`) and counted; it never reaches the server. The stop waits up to
-  `shutdown_timeout` for queued and running tasks, then cancels the rest,
-  before the `on_stop` hooks. Outside a running server the work runs at
-  once, isolated. `Background` is the runner as a value (`run`, `close`,
-  `pending`, `panics`, `completed`, `running?`, `closing?`); `BACKGROUND`
-  is the process's, started beside the listener by `run`.
-- Stores (`iyi_web/store`): shared state every worker may change without
-  the `Mutex` showing. `HashStore(K, V)` and `ArrayStore(E)` start empty
-  and copy out what a route wants (`values`, `keys`, `to_h`, `to_a`,
-  `[]?`, `size`), as `Array(V)`, `Hash(K, V)` and so on; `Store(T)` holds
-  whatever its block makes, with `get`, `set` and `replace`. All run a
-  block under the lock with `read` and `update`, and are `Share`, so
-  routes, handlers and background tasks capture them on every core.
-- Prometheus metrics (`iyi_web/metrics`): `MetricsHandler` counts
-  `http_requests_total{method,route,status}`, times
-  `http_request_duration_seconds{method,route}` over Prometheus' default
-  buckets and gauges `http_requests_in_flight`, labelling by route pattern
-  (`/users/:id`), never by raw path, and serves the text exposition format
-  at `/metrics`. `MetricsRegistry` (`METRICS` by default) makes `Counter`s,
-  `Gauge`s, `Histogram`s and `gauge_function`s of an application's own; each
-  family is behind its own lock.
-- Tracing (`iyi_web/tracing`): `TraceHandler` records a span per request,
-  the child of an incoming W3C `traceparent` (version `ff`, upper-case hex,
-  zero ids and bad lengths refused) with its `tracestate` passed on, named by
-  route pattern, with OpenTelemetry's HTTP attributes; `current_span(env)`
-  adds the route's own attributes and events, and `Span#traceparent` carries
-  the trace downstream. Spans go through a bounded `BatchSpanProcessor`
-  drained by a background task, flushed when the server stops, to a
-  `SpanExporter`: `OtlpHttpExporter` posts OTLP/HTTP JSON to a collector,
-  `JsonLinesExporter` writes one JSON line per span.
-- `examples/observability.iyi`: a `HashStore`, metrics, tracing to a collector
-  or standard output, background work and start/stop hooks together.
-- Guides in `docs/`: `lifecycle-and-background.md`, `state.md`,
-  `observability.md` and `plugins.md` (writing, testing and publishing a
-  handler package).
-- `raw(value)` (in `iyi_web/dsl` and `iyi_web/templates`): `value.to_s` as
-  `SafeHTML`, printed by `<%= %>` without escaping.
-- `SafeHTML` and `HTMLBuffer` in `iyi_web/templates`.
-- `docs/templates.md`, with autoescape and the migration from 0.5.
-- `examples/templates.iyi` has a `/search` page that prints the visitor's
-  query in an attribute and a heading, and a `raw` rating.
-- The `iyi-web` command (`cmd/`, `iyi build --release cmd/iyi_web.iyi -o
-  bin/iyi-web`):
-  - `iyi-web new DIR [--api | --full] [--web-path PATH]` writes a project
-    that builds and passes its own test: `iyi.mod` requiring iyi-web as
-    `web`, `app.iyi`, routes in their own module, an in-process
-    `app_test.iyi`, `.gitignore`; `--api` a validated JSON CRUD of typed
-    routes (`path: Int32`, `body:`, `response:`) over a `HashStore`, `--full`
-    views in a layout and `public/`. `--web-path` adds a `replace` line
-    for a local checkout. A non-empty directory is refused before anything
-    is written.
-  - `iyi-web dev [ENTRY] [--watch DIR] [--interval MS] [-- ARGS]` builds
-    and runs the app, rebuilds on a saved
-    `*.iyi`/`*.eiy`/`*.ecr`/`iyi.mod` change and restarts it on success; a
-    failed build prints the compiler's error and keeps the previous build
-    serving. Changes under `public/` are reported without a rebuild.
-    Ctrl-C/TERM stops the app, then dev. Same-second saves of the same
-    size are caught by comparing text.
-- `examples/postgres/`: a standalone project on iyilang/db + iyilang/pg
-  with a pool from `DATABASE_URL`, migrations applied at start under an
-  advisory lock, a JSON CRUD with validated bodies, `DBError` answered as
-  `503`, and `smoke.sh`.
-- `bench/compare/`: the same four endpoints (plain text, JSON, a path and
-  query parameter route, and a PostgreSQL query through a connection pool)
-  in iyi-web, FastAPI, Express, Kemal and Go `net/http`, and a runner
-  (`bash bench/compare/run.sh`) that builds, checks, warms up and measures
-  each with oha, starts a portable PostgreSQL when no `DATABASE_URL` is
-  given, skips missing toolchains with the reason, and writes
-  `results.json` and `results.md`.
-- Docs: `docs/cli.md`, `docs/database.md`, `docs/benchmarks.md`,
-  `docs/transport.md`.
-- A documentation site: `mkdocs.yml` builds `docs/` with mkdocs-material
-  (`mkdocs build --strict`, run by CI's new `docs` job). The README's
-  reference sections are guide pages there (routing, parameters, requests
-  and responses, errors, routers, sessions and CSRF, middleware, security,
-  static files, every core, configuration, testing, WebSockets and SSE,
-  deployment, modules), and `docs/tutorial.md` builds a typed JSON API
-  step by step, from `iyi-web new --api` to a release build.
-- HTTP/2 (`docs/transport.md`): h2c with prior knowledge beside HTTP/1.1
-  on the same port, and h2 over TLS by ALPN. A TLS config that names no
-  protocol is offered `["h2", "http/1.1"]` when the server binds it, and
-  `-s` offers it too.
-- TLS 1.2 beside 1.3 (`config.ssl.min_version`, `--ssl-min-version 1.2`;
-  std/tls requires the extended master secret on 1.2, so LibreSSL's 1.2
-  clients are refused) and mutual TLS (`config.ssl.client_roots`,
-  `--ssl-client-ca FILE`), with the client's chain in
-  `env.request.peer_certificates`.
-- `config.autocert` (std/autocert, Let's Encrypt): `tls-alpn-01` answered
-  on the TLS port and renewals run beside the accept loop; `LETS_ENCRYPT`,
-  `LETS_ENCRYPT_STAGING`, `Config#tls_config`, `Server#autocert=`.
-- `config.stream_bodies`: bodies left on the connection for the route to
-  read as they arrive, with `env.request.body_io` (`RequestBody#read`),
-  `env.request.body_failure` (`BodyFailure`) and `body_pending?`.
-- `config.compress`: zstd or gzip, negotiated by std/http.
-- `multipart/form-data` uploads stream to disk as they arrive
-  (`parse_multipart(RequestBody, ...)`), so an upload costs a read's worth
-  of memory, not its size.
-- `params.body_error` reports a body that could not be read (413, 408,
+- `JWT.sign` and `JWT.verify` for HS256: `alg` must be `HS256`,
+  signatures are compared in constant time, `exp`, `nbf` and `iat` are
+  checked with `leeway:`, `issuer:` and `audience:` are optional, and
+  secrets under 32 bytes are refused (`iyi_web/jwt`).
+
+**Transport** (`docs/transport.md`)
+
+- HTTP/2: h2c with prior knowledge beside HTTP/1.1 on the same port, and
+  h2 over TLS by ALPN. A TLS config that names no protocol, and `-s`,
+  offer `["h2", "http/1.1"]`.
+- TLS 1.2 beside 1.3 (`config.ssl.min_version`, `--ssl-min-version 1.2`)
+  and mutual TLS (`config.ssl.client_roots`, `--ssl-client-ca FILE`),
+  with the client's chain in `env.request.peer_certificates`. std/tls
+  requires the extended master secret on 1.2, so LibreSSL's 1.2 clients
+  are refused.
+- `config.autocert`: certificates from Let's Encrypt through std/autocert,
+  `tls-alpn-01` answered on the TLS port and renewals run beside the
+  accept loop (`LETS_ENCRYPT`, `LETS_ENCRYPT_STAGING`).
+- `config.stream_bodies`: a route reads the body as it arrives with
+  `env.request.body_io`; `env.request.body_failure` says why a read
+  failed.
+- `config.compress`: zstd or gzip, negotiated per client.
+- `multipart/form-data` uploads stream to disk as they arrive, so an
+  upload costs a read's worth of memory rather than its size;
+  `params.body_error` reports a body that could not be read (413, 408,
   400).
+
+**Running an application**
+
+- `on_start do ... end` and `on_stop do ... end` (FastAPI's `lifespan`).
+  Start hooks run in order before the server binds; one that answers an
+  `Error` or panics stops the start, and the program exits 1 naming the
+  hook's file and line. Stop hooks run after the drain and the background
+  tasks, last written first (`iyi_web/lifecycle`).
+- Background tasks: `env.background { }` in a route and `background { }`
+  anywhere run work off the request path on a free worker. A panic is
+  caught, reported and counted; it never reaches the server. On stop,
+  queued and running tasks get up to `shutdown_timeout`
+  (`iyi_web/background`).
+- Shared state without the `Mutex` showing: `HashStore(K, V)`,
+  `ArrayStore(E)` and `Store(T)`, with `read`/`update` blocks under the
+  lock and copies out (`values`, `keys`, `to_h`, `to_a`, `[]?`, `size`).
+  They are `Share`, so routes on every core capture them
+  (`iyi_web/store`).
+- Prometheus metrics: `MetricsHandler` serves `/metrics` with
+  `http_requests_total{method,route,status}`,
+  `http_request_duration_seconds` and `http_requests_in_flight`, labelled
+  by route pattern, never by raw path; `METRICS` makes counters, gauges
+  and histograms of an application's own (`iyi_web/metrics`).
+- OpenTelemetry tracing: `TraceHandler` records a span per request, the
+  child of an incoming W3C `traceparent`, named by route and carrying
+  OpenTelemetry's HTTP attributes; `current_span(env)` adds the route's
+  own. Spans are batched to `OtlpHttpExporter` (OTLP/HTTP JSON) or
+  `JsonLinesExporter`, and flushed on stop (`iyi_web/tracing`).
+
+**Templates**
+
+- `raw(value)`, `SafeHTML` and `HTMLBuffer` (`iyi_web/templates`):
+  markup printed without escaping, and the buffer that escapes the rest.
+
+**Tooling**
+
+- The `iyi-web` command (`cmd/`; `iyi build --release cmd/iyi_web.iyi -o
+  bin/iyi-web`):
+  - `iyi-web new DIR [--api | --full]` writes a project that builds and
+    passes its own test: `--api` a validated JSON API of typed routes
+    over a `HashStore`, `--full` views in a layout and `public/`.
+    `--web-path PATH` builds against a local checkout.
+  - `iyi-web dev` builds and runs the app, rebuilds on save and restarts
+    it on success; a failed build prints the compiler's error and keeps
+    the previous build serving.
+- `bench/compare/`: the same four endpoints (plain text, JSON, a
+  parameter route and a pooled PostgreSQL query) in iyi-web, FastAPI,
+  Express, Kemal and Go `net/http`, with a runner that checks every
+  endpoint before timing it and writes `results.json` and `results.md`.
+
+**Examples and docs**
+
+- `examples/openapi_auth.iyi` (OAuth2 password flow issuing JWTs, user
+  and admin providers, an API-key client, `/docs`),
+  `examples/observability.iyi` (a store, metrics, tracing, background work
+  and hooks) and `examples/postgres/` (iyilang/db + iyilang/pg, a pool,
+  migrations at start, `503` on a database error).
+- A documentation site: `mkdocs.yml` builds `docs/` (checked by CI's new
+  `docs` job), with a step-by-step tutorial, the guide pages that used to
+  be the README, and new guides to typed routes, OpenAPI, dependencies
+  and auth, transport, templates, state, lifecycle and background tasks,
+  observability, plugins, the CLI, databases and benchmarks.
 
 ### Changed
 
 - **Breaking:** `<%= expr %>` in a template rendered with `render` prints
-  `expr.to_s` HTML-escaped (`&`, `<`, `>`, `"`, `'`, as `HTML.escape`). The
-  template's own text is printed as written. Migration: drop
-  `HTML.escape(...)` inside `<%= %>` (it would escape twice), and wrap every
-  `<%= %>` that prints markup on purpose in `raw(...)`: HTML the program
-  built, `csrf_tag(env)`, or a page a helper rendered in iyi code.
-- **Breaking:** a layout's `content` and `yield_content` answer `SafeHTML`
-  instead of `String`; `<%= content %>` and `<%= yield_content "key" %>`
-  print as before, String methods on them need `.to_s` first.
-- `render` written inside a template answers `SafeHTML`, so
-  `<%= render "_partial.eiy" %>` is not escaped a second time; written in iyi
-  code it still answers `String`.
-- Templates are translated by iyi-web's own compile-time program,
-  `iyi_web/templates/process.iyi`, instead of std/eiy's `eiy/process`; tags,
-  `<%- -%>` trimming, comments and error positions are unchanged.
-- `examples/typed_json.iyi` and `examples/json_api.iyi` are typed routes:
-  no route parses a parameter or matches on `BodyError` by hand, and
-  `json_api` serves its OpenAPI document.
-- Each route method of `Router` and the DSL is now a set of overloads, one
-  per combination of the typed options, and takes `response:`, `status:`,
-  `summary:`, `description:` and `tags:`. `get "/" do |env| ... end`
-  keeps working unchanged.
-- `Context` imports `iyi_web/background` for `Context#background`, and
-  `iyi_web/log`'s `STDOUT_LOCK` is exported so other writers to standard
-  output share the request log's lock.
-- `run` runs the background runner beside the listener and, after the
-  drain, closes it and runs the `on_stop` hooks before returning.
-- `.gitignore` ignores `.iyi-web/` (dev builds), the postgres example's
-  binary, and bench/compare's builds, results and fetched dependencies.
-- `examples/typed_json.iyi` and `examples/openapi_auth.iyi` keep their notes
-  in a `HashStore` and serve on every core (`typed_json` no longer registers its
-  routes with `workers: 1`); `examples/templates.iyi`,
-  `examples/observability.iyi` and `examples/testing/notes.iyi` read their
-  `:id` captures with `path: Int32`, so a word there is a `422`.
-- The README is an introduction that links the docs site; what it held is
-  in `docs/`, with stale statements fixed (the rate limiter's lock, the
-  WebSocket chat needing `workers: 1`, `@v0.5.1` in the install lines).
-- The transport is std/http's `Server.handle`, one call per connection;
-  iyi-web keeps its accept loop, worker pool, drain, timeouts, `408`, head
-  bounds (`414`/`431`) and body limit (`413`) in a thin layer over the
-  socket. A request head is no longer copied into a string and parsed
-  twice: bench/micro's GET parse went from 5966 ns to 3397 ns, a form POST
-  from 2267 ns to 1688 ns.
+  `expr.to_s` HTML-escaped (`&`, `<`, `>`, `"`, `'`). The template's own
+  text is printed as written; `render` written inside a template answers
+  `SafeHTML`, so a partial is not escaped twice.
+- **Breaking:** a layout's `content` and `yield_content` are `SafeHTML`
+  instead of `String`.
+- **Breaking:** std/http refuses any request body past 64 MiB
+  (`Server::MAX_BODY`), whatever `max_request_body_size` says.
 - **Breaking:** `Response#attach(sink, head)` replaces
   `attach(sink, version, keepalive, head)`; the sink gets unframed body
-  pieces (framing is std/http's). `Response#no_entity?` is public.
-- **Breaking:** std/http refuses any request body past 64 MiB
-  (`Server::MAX_BODY`), whatever `max_request_body_size` says; a limit set
-  above that has no effect.
-- HTTP/1.0 requests are answered with an `HTTP/1.1` status line (std/http's,
-  as RFC 9110 allows).
-- A drain also closes a connection whose next head was still arriving or
-  that was in its TLS handshake.
+  pieces. `Response#no_entity?` is public.
+- Every connection is served through std/http's `Server.handle`. iyi-web
+  keeps its accept loop, worker pool, drain, timeouts, `408`, `413`,
+  `414` and `431` in a thin layer over the socket. A request head is
+  parsed once instead of twice: parsing a GET went from 5966 ns to
+  3397 ns, a form POST from 2267 ns to 1688 ns.
+- HTTP/1.0 requests are answered with an `HTTP/1.1` status line, as RFC
+  9110 allows.
 - A head that misses `read_timeout` under TLS or HTTP/2 is closed (close
   notify or GOAWAY) rather than answered `408`.
-- `params.raw_body` is empty for a multipart request: its body streamed to
+- A drain also closes a connection whose next head was still arriving or
+  that was in its TLS handshake.
+- `params.raw_body` is empty for a multipart request: its body went to
   its files.
-- bench/micro: `intake.get` / `intake.post_form` are `wire.get` /
+- Templates are translated by iyi-web's own compile-time program,
+  `iyi_web/templates/process.iyi`, instead of std/eiy's; tags, trimming,
+  comments and error positions are unchanged.
+- Each route method of `Router` and the DSL is a set of overloads, one
+  per combination of typed options. Existing calls compile unchanged.
+- `run` runs the background runner beside the listener and, after the
+  drain, closes it and runs the `on_stop` hooks.
+- `iyi_web/log`'s `STDOUT_LOCK` is exported, so other writers to standard
+  output share the request log's lock.
+- The examples are typed routes over stores and serve on every core:
+  none parses a parameter by hand, and `typed_json` no longer needs
+  `workers: 1`. A word where an example expects a number is a `422`.
+- The README is an introduction that links the docs site, with badges and
+  benchmark results; stale statements were fixed on the way.
+- bench/micro's `intake.get` and `intake.post_form` are `wire.get` and
   `wire.post_form`.
 
 ### Removed
 
-- **Breaking:** `iyi_web/templates` (and through it `iyi_web/dsl`) no longer
-  re-exports `std/eiy`; a program that names `Eiy` imports `std/eiy` itself.
-  `ContentBlocks#capture` yields an `HTMLBuffer`, not an `Eiy::Buffer`.
+- **Breaking:** `iyi_web/templates` (and through it `iyi_web/dsl`) no
+  longer re-exports `std/eiy`. `ContentBlocks#capture` yields an
+  `HTMLBuffer`, not an `Eiy::Buffer`.
 - **Breaking:** `iyi_web/intake` (`Intake`, `TooLarge`, `HeadTooLarge`),
-  `Closed` and `TimedOut` from `iyi_web/server`, and `Response#reusable?`.
+  `Closed` and `TimedOut` from `iyi_web/server`, and
+  `Response#reusable?`.
 
 ### Security
 
-- Templates escape what `<%= %>` prints (see Changed): a value a request
-  sent can no longer inject markup or script into a page by default.
+- Templates escape what `<%= %>` prints: a value a request sent can no
+  longer inject markup or script into a page by default.
 - `JWT.verify` accepts only `HS256` and compares signatures in constant
-  time, so an `alg: none` or algorithm-confusion token is refused before its
-  signature is read (see Added).
+  time, so an `alg: none` or algorithm-confusion token is refused before
+  its signature is read.
 
 ## [0.5.1] - 2026-11-04
 
