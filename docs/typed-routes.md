@@ -266,6 +266,9 @@ post "/jobs", status: 202 do |env|
 end
 ```
 
+`response:`, `status:`, `summary:`, `description:` and `tags:` are also what
+the [OpenAPI document](openapi.md) says about the route.
+
 ## Every core
 
 A typed route's block is checked for data races where it is written, as a
@@ -289,4 +292,4 @@ its store behind a `Mutex` and serves typed routes on every core.
 ## Examples
 
 - `examples/typed_json.iyi`: `body:`, `query:` and `path:` with `response:`.
-- `examples/json_api.iyi`: a CRUD API, every route typed.
+- `examples/json_api.iyi`: a CRUD API, every route typed, with `/openapi.json`.

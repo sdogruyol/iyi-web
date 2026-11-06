@@ -30,6 +30,7 @@ import iyi_web/websocket::{WebSocket}
 import iyi_web/config::{Config, config}
 import iyi_web/failure::{StatusError, render_error_type_page, render_failure_page, render_client_error_page}
 import iyi_web/validation::{BodyError}
+import iyi_web/openapi::{RouteDoc, OpenAPIInfo, openapi_document, docs_page, path_captures}
 import iyi_web/typed::{scalar_capture, scalar_param?, decode_path, decode_query, decode_headers, decode_body, response_value}
 
 alias HandlerProc = Context -> String
@@ -93,7 +94,7 @@ private record RouteDefinition,
   method : String,
   path : String,
   handler : KeptRoute,
-  path_fields : Array(String)
+  doc : RouteDoc
 
 private record FilterDefinition,
   kind : Symbol,
@@ -116,6 +117,7 @@ pub class Router
   @sockets : Array(SocketDefinition)
   @error_handlers : Hash(Int32, KeptPage)
   @error_types : Hash(String, KeptPage)
+  @openapi : OpenAPIInfo?
 
   def initialize(@prefix : String = "")
     @routes = [] of RouteDefinition
@@ -124,6 +126,7 @@ pub class Router
     @sockets = [] of SocketDefinition
     @error_handlers = {} of Int32 => KeptPage
     @error_types = {} of String => KeptPage
+    @openapi = nil
   end
 
   pub def prefix : String
@@ -151,7 +154,8 @@ pub class Router
   # `response:` names the type the block answers, which is written as
   # JSON, and is checked when the program is compiled; errors may still
   # be answered beside it. `status:` is the status a route answers with
-  # unless its block sets another.
+  # unless its block sets another. They, `summary:`, `description:` and
+  # `tags:` are what the OpenAPI document says of the route (`openapi`).
   {% for method in HTTP_METHODS %}
     {% for mask in (0..15).to_a %}
       {% chosen = [] of TupleLiteral %}
@@ -163,19 +167,54 @@ pub class Router
       {% names = chosen.map { |kind| kind[0] } %}
       {% route = (mask == 0 ? "path" : "route").id %}
       @[Share(serial: workers)]
-      pub def {{ method.id }}({{ route }} : String, *, {% for kind in chosen %}{{ kind[0].id }} {{ kind[2].id }} : {{ kind[1].id }}.class, {% end %}workers : Int32? = nil, response : M.class = Nil, status : Int32 = 200, &block : Context{% for kind in chosen %}, {{ kind[1].id }}{% end %} -> B) : Nil forall B, M{% for kind in chosen %}, {{ kind[1].id }}{% end %}
+      pub def {{ method.id }}({{ route }} : String, *, {% for kind in chosen %}{{ kind[0].id }} {{ kind[2].id }} : {{ kind[1].id }}.class, {% end %}workers : Int32? = nil, response : M.class = Nil, status : Int32 = 200, summary : String? = nil, description : String? = nil, tags : Array(String) = [] of String, &block : Context{% for kind in chosen %}, {{ kind[1].id }}{% end %} -> B) : Nil forall B, M{% for kind in chosen %}, {{ kind[1].id }}{% end %}
         what = {{ method.upcase }} + " " + {{ route }}
+        doc = RouteDoc.new({{ method.upcase }}, {{ route }}, summary, description, tags, status)
+        doc.response = M
         {% if names.includes?("path") %}
           capture = scalar_param?(P) ? scalar_capture(what, path_captures({{ route }})) : ""
-          fields = capture.empty? ? path_fields(P) : [capture]
+          if capture.empty?
+            doc.add_params(P, "path")
+          else
+            doc.add_path_scalar(P, capture)
+          end
         {% else %}
           capture = ""
-          fields = [] of String
         {% end %}
-        add_route({{ method.upcase }}, {{ route }}, kept_serial?(workers, what) ? KeptRoute.new(->(ctx : Context) : String | Error { typed_answer_{{ mask }}(ctx, block, capture, {% for kind in chosen %}{{ kind[1].id }}, {% end %}M, status) }, what) : KeptRoute.new(SharedProc(Context, String | Error).of { |ctx| typed_answer_{{ mask }}(ctx, block, capture, {% for kind in chosen %}{{ kind[1].id }}, {% end %}M, status) }), fields)
+        {% if names.includes?("query") %}
+          doc.add_params(Q, "query")
+        {% end %}
+        {% if names.includes?("headers") %}
+          doc.add_params(H, "header")
+        {% end %}
+        {% if names.includes?("body") %}
+          doc.body = J
+        {% end %}
+        add_route({{ method.upcase }}, {{ route }}, kept_serial?(workers, what) ? KeptRoute.new(->(ctx : Context) : String | Error { typed_answer_{{ mask }}(ctx, block, capture, {% for kind in chosen %}{{ kind[1].id }}, {% end %}M, status) }, what) : KeptRoute.new(SharedProc(Context, String | Error).of { |ctx| typed_answer_{{ mask }}(ctx, block, capture, {% for kind in chosen %}{{ kind[1].id }}, {% end %}M, status) }), doc)
       end
     {% end %}
   {% end %}
+
+  # Serves the OpenAPI 3.1 document of this router's routes, mounts and
+  # namespaces included, at *path*, and a page that renders it with
+  # Swagger UI at *docs* (nil for none), both under this router's prefix.
+  # The document is made once, when the server is built, from the routes
+  # registered by then; see `iyi_web/openapi`.
+  pub def openapi(title : String, version : String, description : String? = nil, path : String = "/openapi.json", docs : String? = "/docs") : Nil
+    @openapi = OpenAPIInfo.new(title, version, description, path, docs)
+  end
+
+  # Every route's full path and what it says of itself, mounts included:
+  # what the OpenAPI document is made from.
+  pub def route_docs(base_prefix : String = "") : Array(Tuple(String, RouteDoc))
+    full_prefix = join_paths(base_prefix, @prefix)
+    collected = [] of Tuple(String, RouteDoc)
+    @routes.each { |route| collected << {join_paths(full_prefix, route.path), route.doc} }
+    @sub_routers.each do |sub|
+      collected.concat(sub.router.route_docs(join_paths(full_prefix, sub.path)))
+    end
+    collected
+  end
 
   # A GET route that answers with a server-sent event stream. The block
   # gets the stream and the context; the stream ends when it returns.
@@ -310,7 +349,8 @@ pub class Router
     kept_routes(base_prefix).map { |route| Route.new(route[0], route[1], route[2].serial) }
   end
 
-  # Method, full path and block of every route, mounts included. A typed
+  # Method, full path and block of every route, mounts included, and the
+  # OpenAPI document and its page when `openapi` asked for them. A typed
   # `path:` whose fields the full path does not capture is refused here,
   # where the full path is first known.
   pub def kept_routes(base_prefix : String = "") : Array(Tuple(String, String, KeptRoute))
@@ -318,11 +358,26 @@ pub class Router
     collected = [] of Tuple(String, String, KeptRoute)
     @routes.each do |route|
       full_path = join_paths(full_prefix, route.path)
-      check_captures(route.method, full_path, route.path_fields)
+      route.doc.check_captures(full_path)
       collected << {route.method, full_path, route.handler}
     end
     @sub_routers.each do |sub|
       collected.concat(sub.router.kept_routes(join_paths(full_prefix, sub.path)))
+    end
+    if info = @openapi
+      document = openapi_document(info, route_docs(base_prefix))
+      spec_url = join_paths(full_prefix, info.path)
+      collected << {"GET", spec_url, KeptRoute.new(SharedProc(Context, String | Error).of { |ctx|
+        ctx.json(document)
+        ""
+      })}
+      if docs_path = info.docs_path
+        page = docs_page(info.title, spec_url)
+        collected << {"GET", join_paths(full_prefix, docs_path), KeptRoute.new(SharedProc(Context, String | Error).of { |ctx|
+          ctx.html(page)
+          ""
+        })}
+      end
     end
     collected
   end
@@ -382,9 +437,9 @@ pub class Router
     nil
   end
 
-  private def add_route(method : String, path : String, kept : KeptRoute, path_fields : Array(String)) : Nil
+  private def add_route(method : String, path : String, kept : KeptRoute, doc : RouteDoc) : Nil
     raise "path must start with /" unless path.starts_with?('/')
-    @routes << RouteDefinition.new(method: method, path: path, handler: kept, path_fields: path_fields)
+    @routes << RouteDefinition.new(method: method, path: path, handler: kept, doc: doc)
   end
 
   private def add_filter(kind : Symbol, method : String, path : String, kept : KeptRoute) : Nil
@@ -455,40 +510,6 @@ end
     route_reply(ctx, block.call(ctx{% for kind in chosen %}, {{ kind[0].id }}_value{% end %}), M)
   end
 {% end %}
-
-# Raises, naming the route, when a field of its typed `path:` is no
-# capture of *full_path*: a route that could only ever answer 422.
-private def check_captures(method : String, full_path : String, fields : Array(String)) : Nil
-  captured = path_captures(full_path)
-  fields.each do |field|
-    raise "#{method} #{full_path}: path: has a field #{field.inspect}, which the path does not capture (#{captured.empty? ? "it captures nothing" : "it captures " + captured.join(", ")})" unless captured.includes?(field)
-  end
-end
-
-# The names a route path captures, in order: `:id` and `*rest`.
-private def path_captures(path : String) : Array(String)
-  names = [] of String
-  path.split('/').each do |segment|
-    if segment.starts_with?(":") || segment.starts_with?("*")
-      name = segment[1, segment.bytesize - 1]
-      names << name unless name.empty?
-    end
-  end
-  names
-end
-
-# The captures a struct `path:` reads: each field its `derive
-# serializable` reads, under its name or its `JSON::Field` key.
-private def path_fields(type : T.class) : Array(String) forall T
-  names = [] of String
-  {% for ivar in T.instance_vars %}
-    {% ann = ivar.annotation(::Std::Json::JSON::Field) %}
-    {% unless ann && (ann[:ignore] || ann[:ignore_deserialize]) %}
-      names << {{ ann && ann[:key] ? ann[:key] : ivar.name.stringify }}
-    {% end %}
-  {% end %}
-  names
-end
 
 # A route in the tree: its method, its path as declared, and its block.
 pub struct RouteEntry(B)

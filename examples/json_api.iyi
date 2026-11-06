@@ -1,10 +1,12 @@
 # A JSON API over an in-memory store: list, show, create, update and delete
-# todos. Run from the repository root with `iyi run examples/json_api.iyi`.
+# todos, with its OpenAPI document. Run from the repository root with
+# `iyi run examples/json_api.iyi`.
 #
 #   curl localhost:3000/todos
 #   curl -X POST localhost:3000/todos -H 'Content-Type: application/json' -d '{"title":"Write docs"}'
 #   curl -X PATCH localhost:3000/todos/1 -H 'Content-Type: application/json' -d '{"done":true}'
 #   curl -X DELETE localhost:3000/todos/1
+#   curl localhost:3000/openapi.json          # and localhost:3000/docs in a browser
 #
 # Every route is typed: `:id` is an `Int32`, a body is a struct, and the
 # answer is a `Todo`. A request that is not those types is answered with
@@ -81,22 +83,22 @@ error 404 do |env|
   env.json({"error" => "not found"})
 end
 
-get "/todos", response: Array(Todo) do |env|
+get "/todos", response: Array(Todo), summary: "Every todo" do |env|
   # A `List` leaves the lock; an `Array` the lock held would not.
   TODOS.get { |todos| List.new(todos.values) }.or_panic.to_a
 end
 
-get "/todos/:id", path: Int32, response: Todo do |env, id|
+get "/todos/:id", path: Int32, response: Todo, summary: "One todo" do |env, id|
   find_todo(id)
 end
 
-post "/todos", body: NewTodo, response: Todo, status: 201 do |env, input|
+post "/todos", body: NewTodo, response: Todo, status: 201, summary: "Add a todo" do |env, input|
   todo = Todo.new(LAST_ID.add(1) + 1, input.title.strip)
   TODOS.lock { |todos| todos[todo.id] = todo }
   todo
 end
 
-patch "/todos/:id", path: Int32, body: TodoChange, response: Todo do |env, id, change|
+patch "/todos/:id", path: Int32, body: TodoChange, response: Todo, summary: "Change a todo" do |env, id, change|
   title = change.title
   done = change.done
   # Read and written under one lock, so a second PATCH at the same time
@@ -108,9 +110,11 @@ patch "/todos/:id", path: Int32, body: TodoChange, response: Todo do |env, id, c
   changed || StatusError.new(404)
 end
 
-delete "/todos/:id", path: Int32, status: 204 do |env, id|
+delete "/todos/:id", path: Int32, status: 204, summary: "Remove a todo" do |env, id|
   removed = TODOS.get { |todos| todos.delete(id) }.or_panic
   removed ? nil : StatusError.new(404)
 end
+
+openapi("Todos", "1.0.0")
 
 run

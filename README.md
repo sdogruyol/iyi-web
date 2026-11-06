@@ -25,6 +25,7 @@ a route returns is checked when the program compiles.
 - Typed routes: `path:`, `query:`, `headers:` and `body:` read into your own
   types, `response:` and `status:` for the answer, and `env.params.int(...)`
   and friends for one parameter at a time
+- An OpenAPI 3.1 document made from the routes, and a Swagger UI page
 - URL, query-string, form, JSON and `multipart/form-data` parameters, with
   file uploads
 - JSON bodies read into your own types, with validation and `400`/`422`
@@ -184,6 +185,10 @@ A route can also say what it reads and what it answers - `get
 "/articles/:id", path: Int32, response: Article do |env, id|` - and have
 the capture, the query string, headers and JSON body read into types before
 its block runs: see [Typed routes](docs/typed-routes.md).
+
+`openapi("Notes API", "1.0.0")` serves an OpenAPI 3.1 document of every
+route at `/openapi.json`, made from those same declarations, and a Swagger
+UI page at `/docs`: see [OpenAPI](docs/openapi.md).
 
 ### Return values
 
@@ -1576,6 +1581,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/validation` | `BodyError`, `Validate`, `Validator`, `read_json`: typed JSON bodies and their checks |
 | `web/iyi_web/coerce` | `ParamError`, `decode_param`: parameters read as `Int32`, `Int64`, `Float64`, `Bool`, enums ([Typed routes](docs/typed-routes.md)) |
 | `web/iyi_web/typed` | What a typed route reads before its block runs (`path:`, `query:`, `headers:`, `body:`) and how it answers (`response:`) |
+| `web/iyi_web/openapi` | `OpenAPIInfo`, `openapi_document`, `docs_page` ([OpenAPI](docs/openapi.md)) |
 | `web/iyi_web/multipart` | `FileUpload` and the `multipart/form-data` parser |
 | `web/iyi_web/cookies` | `CookieJar` |
 | `web/iyi_web/headers` | `Headers` |
@@ -1621,7 +1627,7 @@ iyi run examples/json_api.iyi -- -p 8080
 | Example | Shows |
 |---|---|
 | `hello.iyi` | The smallest application |
-| `json_api.iyi` | A CRUD API over an in-memory store, every route typed |
+| `json_api.iyi` | A CRUD API over an in-memory store, every route typed, with its OpenAPI document |
 | `typed_json.iyi` | `body:`, `query:` and `path:` with `Validate` rules and `response:` types, and the `400`/`415`/`422` answers |
 | `forms_and_uploads.iyi` | Form fields, multipart uploads with limits, and `_method` override |
 | `templates.iyi` | Views in `examples/views/` with a layout, `content_for`, a partial and autoescape |
