@@ -1,0 +1,73 @@
+# What a typed route reads before its block runs, and how it answers.
+#
+#     get "/notes/:id", path: NoteId, query: Page do |env, id, page|
+#     post "/notes", body: NoteInput, response: Note, status: 201 do |env, input|
+#
+# A route registered with `path:`, `query:`, `headers:` or `body:` gets
+# each as a value of the type named, after `env`, in that order. Each is
+# read here, in that same order, and the first that cannot be read ends
+# the request with its error before the block runs: a `ParamError` (422)
+# naming every parameter that is wrong, or the body's `BodyError` (400,
+# 415 or 422). The block never sees a value that is not its type.
+#
+# `path:` is a struct whose fields are the path's captures, or one scalar
+# (`path: Int32`) for a route that captures exactly one. `query:` and
+# `headers:` are structs; `body:` is anything `json_as` reads. A struct of
+# parameters is read as `iyi_web/coerce` describes, with `derive
+# serializable`.
+module iyi_web/typed
+
+import iyi_web/context::{Context}
+import iyi_web/coerce::{ParamError, decode_param, decode_params}
+import iyi_web/validation::{BodyError}
+
+# The capture a scalar `path:` reads: the one *route* has. Raises, naming
+# the route, when it has none or several - a struct says which is which.
+pub def scalar_capture(what : String, captures : Array(String)) : String
+  raise "#{what}: a path: that is one value needs a route with one capture; this one has #{captures.size} - give a struct with a field per capture" unless captures.size == 1
+  captures[0]
+end
+
+# Whether *type* is read from one capture rather than a struct of them.
+pub def scalar_param?(type : T.class) : Bool forall T
+  {% if T == ::String || T == ::Bool || T == ::Int32 || T == ::Int64 || T == ::Float64 || T < ::Enum %}
+    true
+  {% else %}
+    false
+  {% end %}
+end
+
+# The path's captures as *type*: the one *capture* for a scalar, else a
+# struct of them.
+pub def decode_path(ctx : Context, type : T.class, capture : String) : T | ParamError forall T
+  {% if T == ::String || T == ::Bool || T == ::Int32 || T == ::Int64 || T == ::Float64 || T < ::Enum %}
+    decode_param(ctx.params.url[capture]? || "", T, capture, "path")
+  {% else %}
+    pairs = [] of Tuple(String, String)
+    ctx.params.url.each { |name, value| pairs << {name, value} }
+    decode_params(pairs, T, "path")
+  {% end %}
+end
+
+pub def decode_query(ctx : Context, type : T.class) : T | ParamError forall T
+  decode_params(ctx.params.query_pairs, T, "query")
+end
+
+pub def decode_headers(ctx : Context, type : T.class) : T | ParamError forall T
+  pairs = [] of Tuple(String, String)
+  ctx.request.headers.each { |name, value| pairs << {name, value} }
+  decode_params(pairs, T, "header", headers: true)
+end
+
+pub def decode_body(ctx : Context, type : T.class) : T | BodyError forall T
+  ctx.params.json_as(T)
+end
+
+# *value* as the route's declared `response:` type: the check is made
+# when the program is compiled, naming both types.
+pub def response_value(value : V, type : T.class) : T forall V, T
+  {% unless V <= T %}
+    {% raise "the route answers #{V}, which is not its response: #{T} (an error it answers is sent as an error)" %}
+  {% end %}
+  value
+end

@@ -8,10 +8,10 @@
 # not its type is a `ParamError`, a 422 naming the parameter, never a
 # guess.
 #
-# A struct of parameters (`decode_params`) is read the way a JSON body
-# is, so a field means the same thing in both places: each field the
-# struct's `derive serializable` reads is looked up under its name (or its
-# `JSON::Field` key), the text is checked against
+# A struct of parameters (`query: Page` on a route, `iyi_web/typed`) is
+# read the way a JSON body is, so a field means the same thing in both
+# places: each field the struct's `derive serializable` reads is looked up
+# under its name (or its `JSON::Field` key), the text is checked against
 # the field's type and written into a JSON object, and that object is read
 # with `decode_json` (`iyi_web/validation`). A field with a default or a
 # nilable type may be left out, an enum takes a member's name, an
@@ -168,8 +168,8 @@ private def space?(byte : UInt8) : Bool
   byte == 32_u8 || (byte >= 9_u8 && byte <= 13_u8)
 end
 
-# One parameter, *text*, as *type*: the typed lookups on `Params`
-# (`env.params.int("id")`) read through this.
+# One parameter, *text*, as *type*: a scalar `path:` (`get "/notes/:id",
+# path: Int32`) and the typed lookups on `Params` read through this.
 pub def decode_param(text : String, type : T.class, name : String, source : String) : T | ParamError forall T
   errors = {} of String => String
   fragment = param_json([text], T, name, errors)
