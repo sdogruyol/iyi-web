@@ -110,8 +110,8 @@ Not in Kemal's core, but seen in its examples:
 
 ## 5. Status
 
-iyi-web `master`, on iyi 0.18.0, the oldest it supports. `iyi test iyi_web`
-passes in all 33 test files and `iyi test examples` in its one. Every example
+iyi-web `master`, on iyi 0.20.1, the oldest it supports. `iyi test iyi_web`
+passes in all 44 test files and `iyi test examples` in its one. Every example
 was built, run and exercised with curl; WebSockets with Node's client, and
 over TLS with Python's.
 
@@ -192,8 +192,8 @@ Found later and fixed:
 | Command line | `-b` (IPv4 or IPv6), `-p`, `-s`, `--ssl-key-file`, `--ssl-cert-file`, `-h`, `extra_options` |
 | TLS | `config.ssl` (a `TlsServerConfig`), `bind_tls`, `wss://`; TLS 1.3 over iyi's own std/tls |
 | Listening options | IPv6 and `unix_socket` (with TLS too); `read_timeout`, `write_timeout` and `idle_timeout` (not in Kemal) |
-| Installation | `iyi get github.com/sdogruyol/iyi-web` writes `require github.com/sdogruyol/iyi-web v0.5.0` to `iyi.mod`, and files write `import github.com/sdogruyol/iyi-web/iyi_web/dsl::*`; with `--as web` the line ends `as web` and files write `import web/iyi_web/dsl::*` (iyi 0.18.0 and later) |
-| Examples | Ten, from `hello` to a JSON API, uploads, templates, routers, middleware, SSE, a WebSocket chat room, cookies and in-process testing |
+| Installation | `iyi get github.com/sdogruyol/iyi-web` writes `require github.com/sdogruyol/iyi-web v0.5.1` to `iyi.mod`, and files write `import github.com/sdogruyol/iyi-web/iyi_web/dsl::*`; with `--as web` the line ends `as web` and files write `import web/iyi_web/dsl::*` (iyi 0.18.0 and later) |
+| Examples | Thirteen, from `hello` to a JSON API, uploads, templates, routers, middleware, SSE, a WebSocket chat room, cookies and in-process testing |
 
 ### Remaining
 
@@ -219,7 +219,7 @@ Needing changes in iyi first:
 
 | Missing in iyi | iyi-web feature waiting on it |
 |---|---|
-| SO_REUSEPORT in std/socket (not in 0.18.0) | `reuse_port` |
+| SO_REUSEPORT in std/socket (not in 0.20.1) | `reuse_port` |
 | A caught panic that the runtime does not print (0.18.0 still prints it) | No `iyi: panic:` line on stderr when a client disconnects mid-response, or a write times out |
 
 Problems found in iyi and worked around in iyi-web. The first four were fixed

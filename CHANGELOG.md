@@ -57,6 +57,9 @@ Removed, and `docs/templates.md` for the migration).
 - `examples/templates.iyi` reads its `:id` capture with `env.params.int`, so
   a word there is a `422`.
 - `run`, after the drain, runs the `on_stop` hooks before returning.
+- The README's install lines name `@v0.5.1`, the latest release, and
+  `iyi-web-vs-kemal.md`'s status names iyi 0.20.1, the 44 test files and
+  the thirteen examples.
 
 ### Removed
 
