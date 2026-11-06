@@ -22,9 +22,11 @@ a route returns is checked when the program compiles.
 
 - Routes for `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `HEAD` and
   `QUERY`, with named and wildcard path segments
+- Typed routes: `path:`, `query:`, `headers:` and `body:` read into your own
+  types, `response:` and `status:` for the answer, and `env.params.int(...)`
+  and friends for one parameter at a time
 - URL, query-string, form, JSON and `multipart/form-data` parameters, with
-  file uploads, and `env.params.int(...)` and friends, which answer `422`
-  for a value that is not of the type
+  file uploads
 - JSON bodies read into your own types, with validation and `400`/`422`
   answers that name each bad field
 - Before and after filters for every route, a path pattern or a single method
@@ -178,6 +180,11 @@ A request that matches no route gets `404 Not Found`. A path that exists only
 for other methods gets `405 Method Not Allowed` with an `Allow` header. Every
 `GET` route also answers `HEAD`, without a body.
 
+A route can also say what it reads and what it answers - `get
+"/articles/:id", path: Int32, response: Article do |env, id|` - and have
+the capture, the query string, headers and JSON body read into types before
+its block runs: see [Typed routes](docs/typed-routes.md).
+
 ### Return values
 
 The value a route returns is the response body. A route may return any type
@@ -239,7 +246,9 @@ values; `env.params["name"]?` searches them in that order. Indexing without
 
 These are strings. To read one as a number or a flag, with a `422` naming
 it when it is not one, use `env.params.int("id")`, `int64`, `float`, `bool`
-or `string` (see [One parameter at a time](#one-parameter-at-a-time)).
+or `string` (see [One parameter at a time](#one-parameter-at-a-time)), or
+declare the route's captures, query string and body as types with
+[typed routes](docs/typed-routes.md).
 
 A name sent more than once keeps its last value in the tables.
 `env.params.query_all("tag")` and `env.params.body_all("tag")` return every
@@ -1565,7 +1574,8 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/response` | `Response` |
 | `web/iyi_web/params` | `Params`, `json_as` |
 | `web/iyi_web/validation` | `BodyError`, `Validate`, `Validator`, `read_json`: typed JSON bodies and their checks |
-| `web/iyi_web/coerce` | `ParamError`, `decode_param`: parameters read as `Int32`, `Int64`, `Float64`, `Bool`, enums |
+| `web/iyi_web/coerce` | `ParamError`, `decode_param`: parameters read as `Int32`, `Int64`, `Float64`, `Bool`, enums ([Typed routes](docs/typed-routes.md)) |
+| `web/iyi_web/typed` | What a typed route reads before its block runs (`path:`, `query:`, `headers:`, `body:`) and how it answers (`response:`) |
 | `web/iyi_web/multipart` | `FileUpload` and the `multipart/form-data` parser |
 | `web/iyi_web/cookies` | `CookieJar` |
 | `web/iyi_web/headers` | `Headers` |
@@ -1611,8 +1621,8 @@ iyi run examples/json_api.iyi -- -p 8080
 | Example | Shows |
 |---|---|
 | `hello.iyi` | The smallest application |
-| `json_api.iyi` | CRUD over an in-memory store with `env.json`, `env.params.json`, status codes and `404` via `halt` |
-| `typed_json.iyi` | JSON bodies read into a type with `json_as`, `Validate` rules, `400`/`415`/`422` answers, and responses written from `derive serializable` types |
+| `json_api.iyi` | A CRUD API over an in-memory store, every route typed |
+| `typed_json.iyi` | `body:`, `query:` and `path:` with `Validate` rules and `response:` types, and the `400`/`415`/`422` answers |
 | `forms_and_uploads.iyi` | Form fields, multipart uploads with limits, and `_method` override |
 | `templates.iyi` | Views in `examples/views/` with a layout, `content_for`, a partial and autoescape |
 | `routers.iyi` | `Router`, `mount`, `namespace`, router filters and error pages |

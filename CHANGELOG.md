@@ -18,7 +18,20 @@ Removed, and `docs/templates.md` for the migration).
   parameter), with `from: :url | :query | :body` and `default:`. Reading
   is strict: `"12abc"`, `" 12"` and `""` are not integers, `nan` and
   `inf` are not numbers (`iyi_web/coerce`, `iyi_web/params`).
-- `json_errors(root, T)` in `iyi_web/validation`, used by the above.
+- Typed routes: `path:`, `query:`, `headers:` and `body:` on every route
+  method, in the DSL and on `Router`. The block gets each value after
+  `env`, typed from the options given; what cannot be read is answered
+  before the block runs - a `ParamError` (422) naming every wrong
+  parameter, or the body's `BodyError` (400, 415, 422). Parameter structs
+  use `derive serializable`: defaults and nilable fields are optional,
+  enums take their names, `Array(T)` takes a repeated query key, and
+  `Validate` runs once they read. `path: Int32` reads a route's one
+  capture (`iyi_web/typed`, `iyi_web/router`, `iyi_web/dsl`).
+- `response: T` writes the block's answer as JSON and checks its type
+  when the program is compiled; `status:` is the status a route answers
+  with unless its block sets another, on plain routes too.
+- `Params#query_pairs` and `json_errors(root, T)` in `iyi_web/validation`,
+  used by the above.
 - `on_start do ... end` and `on_stop do ... end` in the DSL
   (`iyi_web/lifecycle`), FastAPI's `lifespan` as two hooks. Start hooks run
   in order before the server is bound; one that answers an `Error` or panics
@@ -54,11 +67,16 @@ Removed, and `docs/templates.md` for the migration).
 - Templates are translated by iyi-web's own compile-time program,
   `iyi_web/templates/process.iyi`, instead of std/eiy's `eiy/process`; tags,
   `<%- -%>` trimming, comments and error positions are unchanged.
-- `examples/templates.iyi` reads its `:id` capture with `env.params.int`, so
-  a word there is a `422`.
+- `examples/typed_json.iyi` and `examples/json_api.iyi` are typed routes:
+  no route parses a parameter or matches on `BodyError` by hand.
+- Each route method of `Router` and the DSL is now a set of overloads, one
+  per combination of the typed options, and takes `response:` and
+  `status:`. `get "/" do |env| ... end` keeps working unchanged.
 - `run`, after the drain, runs the `on_stop` hooks before returning.
+- `examples/templates.iyi` and `examples/testing/notes.iyi` read their `:id`
+  captures with `path: Int32`, so a word there is a `422`.
 - The README's install lines name `@v0.5.1`, the latest release, and
-  `iyi-web-vs-kemal.md`'s status names iyi 0.20.1, the 44 test files and
+  `iyi-web-vs-kemal.md`'s status names iyi 0.20.1, the 45 test files and
   the thirteen examples.
 
 ### Removed
