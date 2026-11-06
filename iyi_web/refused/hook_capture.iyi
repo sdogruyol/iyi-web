@@ -1,0 +1,11 @@
+# Refused: an `on_start` hook that captures an `Array` a route also
+# reads. iyi_web/refused_test.iyi checks the refusal's place and its two
+# ways out.
+module iyi_web/refused/hook_capture
+
+import iyi_web/dsl::*
+
+names = [] of String
+on_start do
+  names << "loaded"
+end

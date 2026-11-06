@@ -42,6 +42,7 @@ a route returns is checked when the program compiles.
 - Response compression, CORS and HTML form method override
 - Basic authentication, security headers, request ids and per-client rate
   limiting
+- `on_start` and `on_stop` hooks
 - Templates with layouts and partials, compiled into the program, escaping
   every value they print unless it is marked as markup
 - Command-line flags for host, port and TLS
@@ -1456,6 +1457,25 @@ once. A server-sent-events stream is in flight for as long as it is open.
 With `shutdown_message` on, the stop prints
 `[production] storefront is going to take a rest!`. Code after `run` runs.
 
+### Start and stop hooks
+
+```iyi
+on_start do
+  DB.connect(Program.env("DATABASE_URL") || "postgres://localhost/app")
+end
+
+on_stop do
+  DB.close
+end
+```
+
+`on_start` hooks run in the order they were written before the server is
+bound; one whose block answers an `Error` or panics stops the start, and the
+program exits 1 naming the hook's file and line
+(`could not start: on_start (app.iyi:3) failed: ...`). `on_stop` hooks run
+after the drain, the last written first; one that fails is reported and the
+rest still run. See [docs/lifecycle-and-background.md](docs/lifecycle-and-background.md).
+
 ### HTTPS
 
 ```sh
@@ -1573,6 +1593,7 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/harness` | `http_request`, `form_request`, `dispatch`, `routes` |
 | `web/iyi_web/session` | `SessionHandler`, `Session`, `session`, `save_session` |
 | `web/iyi_web/csrf` | `CSRFHandler`, `csrf_token`, `csrf_tag` |
+| `web/iyi_web/lifecycle` | `Lifecycle`, `lifecycle_hook`: `on_start` and `on_stop` ([Lifecycle](docs/lifecycle-and-background.md)) |
 | `web/iyi_web/token` | `random_hex`, `random_bytes`, `encode_base64url`, `decode_base64url?`: random tokens nobody can guess, and base64url for carrying them |
 
 ## Examples

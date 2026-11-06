@@ -19,6 +19,17 @@ Removed, and `docs/templates.md` for the migration).
   is strict: `"12abc"`, `" 12"` and `""` are not integers, `nan` and
   `inf` are not numbers (`iyi_web/coerce`, `iyi_web/params`).
 - `json_errors(root, T)` in `iyi_web/validation`, used by the above.
+- `on_start do ... end` and `on_stop do ... end` in the DSL
+  (`iyi_web/lifecycle`), FastAPI's `lifespan` as two hooks. Start hooks run
+  in order before the server is bound; one that answers an `Error` or panics
+  stops the start, and the program exits 1 naming the hook's file and line
+  (`could not start: on_start (app.iyi:3) failed: ...`). Stop hooks run
+  after the drain, the last written first; one that fails is reported and
+  the rest still run. Blocks are checked like a route's; `workers: 1` keeps
+  one unchecked without putting the server on one thread. `Lifecycle`,
+  `lifecycle_hook` and `LIFECYCLE` run hooks as a value, for tests.
+- A guide in `docs/`: `lifecycle-and-background.md`, the start and stop
+  hooks.
 - `raw(value)` (in `iyi_web/dsl` and `iyi_web/templates`): `value.to_s` as
   `SafeHTML`, printed by `<%= %>` without escaping.
 - `SafeHTML` and `HTMLBuffer` in `iyi_web/templates`.
@@ -45,6 +56,7 @@ Removed, and `docs/templates.md` for the migration).
   `<%- -%>` trimming, comments and error positions are unchanged.
 - `examples/templates.iyi` reads its `:id` capture with `env.params.int`, so
   a word there is a `422`.
+- `run`, after the drain, runs the `on_stop` hooks before returning.
 
 ### Removed
 
