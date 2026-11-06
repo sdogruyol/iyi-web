@@ -157,15 +157,19 @@ post "/notes", body: NoteInput do |env, input|   # the framework answers the Bod
 end
 ```
 
-- [ ] `json_as` and `Validate` already exist; this phase means moving them
+- [x] `json_as` and `Validate` already exist; this phase means moving them
       into the route's signature.
-- [ ] The response type can be declared too (FastAPI's `response_model`);
+- [x] The response type can be declared too (FastAPI's `response_model`);
       Phase 2 needs it.
 - **Simplicity rule:** `get "/" do |env|` keeps working exactly as it does.
   The typed form is an optional layer on top.
 
 **Done when:** no hand-written `to_i?` or `case ... in BodyError` is left in
 `examples/typed_json.iyi` and `examples/json_api.iyi`.
+
+**Status:** done. `path:`, `query:`, `headers:`, `body:`, `response:` and
+`status:` on every route method; neither example has a hand-written
+`to_i?` or a `BodyError` match left (see `docs/typed-routes.md`).
 
 ### Phase 2: The menu (OpenAPI 3.1 + Swagger UI/Scalar)
 
