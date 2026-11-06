@@ -53,12 +53,14 @@ The state at the time of the review:
    - TLS 1.2 and mTLS,
    - Let's Encrypt through `std/autocert`.
 
-   iyi-web uses none of it.
+   iyi-web uses none of it. *(Fixed in Phase 4: the transport is
+   `std/http` now; `intake.iyi` is deleted.)*
 6. **Parsing an incoming request is expensive.** In the old measurement
    `intake.get` took ~5 µs per request, radix lookup ~0.28 µs. The head is
    scanned once for framing, copied into a string, and then `std/http`
    parses the same head again from the start. The body is held whole in
-   memory; a 64 MB request grows to several times that.
+   memory; a 64 MB request grows to several times that. *(Fixed in Phase 4:
+   the head is parsed once, `wire.get` is 3397 ns; bodies can be streamed.)*
 7. **The performance numbers are old and there is no comparison.**
    `results.json` was taken with iyi 0.18, on one thread, on Windows: 27.6k
    req/s for hello, p99 ~3 ms. Nothing measured side by side with FastAPI,
@@ -118,7 +120,7 @@ wrong opening hours.
 
 - [x] Templates escape by default, with an explicit way out such as `raw`
       for raw output. A breaking change: announce it in the CHANGELOG.
-- [ ] Fix the TLS and version facts in the README, update
+- [x] Fix the TLS and version facts in the README, update
       `iyi-web-vs-kemal.md`.
 - [x] Small helpers like `env.params.url.int("id")` answering
       `Int32 | ParamError`.
@@ -127,10 +129,11 @@ wrong opening hours.
 **Done when:** forgetting to escape no longer produces XSS; every claim in
 the docs matches what the code does.
 
-**Status:** autoescape (`raw`, `SafeHTML`), `env.params.int(...)` and
-friends, and `on_start`/`on_stop` are in. The README's `@v0.5.0` examples
-and the status section of `iyi-web-vs-kemal.md` are updated; the TLS/HTTP
-version claims will be fixed with Phase 4's transport work.
+**Status:** done. Autoescape (`raw`, `SafeHTML`), `env.params.int(...)` and
+friends, and `on_start`/`on_stop` are in. The README's `@v0.5.0` examples and
+the status section of `iyi-web-vs-kemal.md` are updated; the TLS/HTTP
+version claims were fixed with Phase 4's transport work (README,
+`iyi-web-vs-kemal.md`: TLS 1.3 and 1.2, HTTP/2).
 
 ### Phase 1: The waiter writes the order down right (the part that actually beats FastAPI)
 
@@ -210,19 +213,41 @@ before every dish. Define it once, attach it to whichever dish you like.
 water (streams), an automatic certificate doorman. You are still doing
 everything by hand in the old building.
 
-- [ ] Hand the transport layer to `std/http`'s `Server.serve`. Router,
-      Context and middleware stay as they are.
-- What comes for free: HTTP/2, `stream_bodies` (a large upload does not
-  swell memory), zstd, mTLS, `std/autocert`. The head is no longer parsed
-  twice either.
+- [x] Hand the transport layer to `std/http`: every connection goes to
+      `Server.handle` (the per-connection half of `Server.serve`). The
+      accept loop, worker pool, drain and timeouts, and 408/413/414/431,
+      stay in iyi-web's thin socket layer; Router, Context and middleware
+      are as they were.
+- [x] HTTP/2: h2c (prior knowledge) and h2 by ALPN over TLS; `-s` and a TLS
+      config that names no protocols offer `["h2", "http/1.1"]`.
+- [x] `stream_bodies` (`env.request.body_io`, `body_failure`); multipart
+      uploads always stream to disk.
+- [x] zstd (and gzip): `config.compress`.
+- [x] TLS 1.2 and mTLS: `min_version` / `--ssl-min-version 1.2`,
+      `client_roots` / `--ssl-client-ca FILE`,
+      `env.request.peer_certificates`.
+- [x] Let's Encrypt through `std/autocert`: `config.autocert`.
 - **Risk:** iyi-web's own guarantees may not be exactly the same in std:
   the 414/431 bounds, `read/write/idle_timeout`, shutdown drain, unix
   sockets. Tests covering them must pass on std first; what does not should
-  go to std as a PR or be covered by a thin adapter.
-- [ ] A PR to std/socket for `reuse_port`.
+  go to std as a PR or be covered by a thin adapter. *(Outcome: covered by
+  the thin layer. The remaining differences are in the CHANGELOG: over
+  TLS/HTTP/2 a head that runs out of time is closed rather than answered
+  408, and HTTP/1.0 gets an HTTP/1.1 status line.)*
+- [ ] A PR to std/socket for `reuse_port`. Blocked: std/socket only sets
+      `SO_REUSEADDR`; there is nothing to do on iyi-web's side.
+- [ ] The 64 MiB body cap: std/http cuts every body at 64 MiB
+      (`Server::MAX_BODY`), even with a larger `max_request_body_size`.
+      Blocked: std/http needs a configurable limit.
 
 **Done when:** the 42 test files pass on the new transport and
 `curl --http2` works.
+
+**Status:** done; two items wait on std. The transport is on `std/http`,
+and 48 test files pass on it; HTTP/2, streamed bodies, TLS 1.2/mTLS,
+autocert and zstd are in (see `docs/transport.md`). Request parsing went
+from 5966 to 3397 ns for a GET and from 2267 to 1688 ns for a form POST.
+`reuse_port` waits on std/socket, anything above 64 MiB on std/http.
 
 ### Phase 5: Ecosystem and developer experience (to beat Express)
 
