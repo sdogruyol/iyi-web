@@ -399,7 +399,7 @@ private def enum_key(name : String) : String
 end
 
 # `JSON`'s written name: `DarkRed` is `dark_red`, `HTTPCode` `http_code`.
-private def enum_name(name : String) : String
+pub def enum_name(name : String) : String
   bytes = name.to_unsafe
   String.build do |text|
     index = 0

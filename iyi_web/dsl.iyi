@@ -78,8 +78,9 @@ APP = Router.new
 
 # A route may answer an error as well as a body; see `Router#get`. With
 # `path:`, `query:`, `headers:` or `body:` it is a typed route, its block
-# given each value after `env` (`iyi_web/typed`); `response:` writes the
-# block's answer as JSON and `status:` is the status it answers with.
+# given each value after `env` (`iyi_web/typed`); `response:`, `status:`,
+# `summary:`, `description:` and `tags:` describe it in the OpenAPI
+# document (`openapi`).
 {% for method in HTTP_METHODS %}
   {% for mask in (0..15).to_a %}
     {% chosen = [] of TupleLiteral %}
@@ -90,11 +91,17 @@ APP = Router.new
     {% end %}
     {% route = (mask == 0 ? "path" : "route").id %}
     @[Share(serial: workers)]
-    pub def {{ method.id }}({{ route }} : String, *, {% for kind in chosen %}{{ kind[0].id }} {{ kind[2].id }} : {{ kind[1].id }}.class, {% end %}workers : Int32? = nil, response : M.class = Nil, status : Int32 = 200, &block : Context{% for kind in chosen %}, {{ kind[1].id }}{% end %} -> B) : Nil forall B, M{% for kind in chosen %}, {{ kind[1].id }}{% end %}
-      APP.{{ method.id }}({{ route }}, {% for kind in chosen %}{{ kind[0].id }}: {{ kind[2].id }}, {% end %}workers: workers, response: response, status: status, &block)
+    pub def {{ method.id }}({{ route }} : String, *, {% for kind in chosen %}{{ kind[0].id }} {{ kind[2].id }} : {{ kind[1].id }}.class, {% end %}workers : Int32? = nil, response : M.class = Nil, status : Int32 = 200, summary : String? = nil, description : String? = nil, tags : Array(String) = [] of String, &block : Context{% for kind in chosen %}, {{ kind[1].id }}{% end %} -> B) : Nil forall B, M{% for kind in chosen %}, {{ kind[1].id }}{% end %}
+      APP.{{ method.id }}({{ route }}, {% for kind in chosen %}{{ kind[0].id }}: {{ kind[2].id }}, {% end %}workers: workers, response: response, status: status, summary: summary, description: description, tags: tags, &block)
     end
   {% end %}
 {% end %}
+
+# Serves the application's OpenAPI document and its Swagger UI page; see
+# `Router#openapi`.
+pub def openapi(title : String, version : String, description : String? = nil, path : String = "/openapi.json", docs : String? = "/docs") : Nil
+  APP.openapi(title, version, description, path, docs)
+end
 
 # One path or several, as `Router#before` takes them.
 {% for name in ["before_all", "after_all"] + FILTER_METHODS.map { |m| "before_" + m } + FILTER_METHODS.map { |m| "after_" + m } %}
