@@ -74,7 +74,8 @@ The state at the time of the review:
 10. **Some of the docs are stale.** The README says "TLS 1.3 only", but
     std/tls speaks 1.2 too now. `iyi-web-vs-kemal.md` says "33 test files";
     there are 42. The README shows `@v0.5.0`; the latest release is 0.5.1.
-    All the documentation is one 1,600-line README.
+    All the documentation is one 1,600-line README. *(The version and the
+    Kemal comparison's status are fixed in Phase 0.)*
 
 ## Side by side with the competition
 
@@ -115,16 +116,21 @@ flowchart LR
 **ELI5:** The knives are lying around, and the sign on the door shows the
 wrong opening hours.
 
-- [ ] Templates escape by default, with an explicit way out such as `raw`
+- [x] Templates escape by default, with an explicit way out such as `raw`
       for raw output. A breaking change: announce it in the CHANGELOG.
 - [ ] Fix the TLS and version facts in the README, update
       `iyi-web-vs-kemal.md`.
-- [ ] Small helpers like `env.params.url.int("id")` answering
+- [x] Small helpers like `env.params.url.int("id")` answering
       `Int32 | ParamError`.
-- [ ] `on_start` / `on_stop` hooks (FastAPI's `lifespan`).
+- [x] `on_start` / `on_stop` hooks (FastAPI's `lifespan`).
 
 **Done when:** forgetting to escape no longer produces XSS; every claim in
 the docs matches what the code does.
+
+**Status:** autoescape (`raw`, `SafeHTML`), `env.params.int(...)` and
+friends, and `on_start`/`on_stop` are in. The README's `@v0.5.0` examples
+and the status section of `iyi-web-vs-kemal.md` are updated; the TLS/HTTP
+version claims will be fixed with Phase 4's transport work.
 
 ### Phase 1: The waiter writes the order down right (the part that actually beats FastAPI)
 
