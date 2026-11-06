@@ -57,7 +57,7 @@ shop/
 ```
 module shop
 
-require github.com/sdogruyol/iyi-web v0.5.1 as web
+require github.com/sdogruyol/iyi-web v0.6.0 as web
 ```
 
 The first `iyi test` or `iyi build` fetches it and writes `iyi.sum`.

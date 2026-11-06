@@ -6,6 +6,8 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-06
+
 Requires iyi 0.20.1 or later. Breaking: templates escape `<%= %>` output,
 a layout's `content` and `yield_content` are `SafeHTML`, and
 `iyi_web/templates` no longer re-exports `std/eiy` (see Changed and
@@ -13,9 +15,6 @@ Removed, and `docs/templates.md` for the migration). The transport is
 std/http's: `Response#attach` takes `(sink, head)`, `Response#reusable?`
 and `iyi_web/intake` are gone, and std/http caps every request body at
 64 MiB (see Changed and Removed, and `docs/transport.md`).
-
-<!-- Release: bump WEB_VERSION in cmd/scaffold.iyi (0.5.1) to the release
-     that ships the iyi-web command, so new projects require it. -->
 
 ### Added
 
@@ -741,7 +740,8 @@ The first release. Requires iyi 0.14.1 or later.
   `Content-Length` is read, before the body is buffered.
 - Static file paths with a `..` segment or a NUL byte are refused.
 
-[Unreleased]: https://github.com/sdogruyol/iyi-web/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/sdogruyol/iyi-web/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/sdogruyol/iyi-web/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/sdogruyol/iyi-web/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/sdogruyol/iyi-web/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/sdogruyol/iyi-web/compare/v0.3.0...v0.4.0

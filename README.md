@@ -174,7 +174,7 @@ iyi get github.com/sdogruyol/iyi-web --as web
 That writes one line to `iyi.mod`:
 
 ```
-require github.com/sdogruyol/iyi-web v0.5.1 as web
+require github.com/sdogruyol/iyi-web v0.6.0 as web
 ```
 
 and `web/iyi_web/...` then names iyi-web's modules. `iyi get -u` moves to
