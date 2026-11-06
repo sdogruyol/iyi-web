@@ -59,8 +59,9 @@ routes registered by then, and is served as a string every worker shares.
 | `body:` | `requestBody`, `application/json`, required |
 | `response:` | the schema of the `status:` response (default `200`) |
 | `status:` | the success response's code; `204` has no content |
+| `deps:` | `security`, from the providers' schemes ([Dependencies and auth](dependencies-and-auth.md)) |
 | `summary:`, `description:`, `tags:` | the operation's own |
-| typed options | the errors the framework answers itself: `422` for parameters, `400`, `415` and `422` for a body, each with the `Error` schema |
+| typed options | the errors the framework answers itself: `422` for parameters, `400`, `415` and `422` for a body, `401` for a provider with a security scheme, each with the `Error` schema |
 
 Every route appears, typed or not: `get "/files/*path" do |env|` is listed
 with its `path` parameter as a string and a plain `200`. `operationId` is
@@ -114,18 +115,23 @@ given to `SecurityHeadersHandler`'s `content_security_policy:`, say) must
 also allow `cdn.jsdelivr.net` and the page's inline script on that path, or
 serve the page with `docs: nil` and use another viewer.
 
+Swagger UI's "Authorize" button follows the document's security schemes:
+for the OAuth2 password flow of `examples/openapi_auth.iyi` it asks for a
+username and a password, posts them to `/token`, and sends the token it gets
+with every "Try it out".
+
 ## Checking the document
 
-The document of `examples/json_api.iyi` passes
+The document of `examples/openapi_auth.iyi` passes
 [openapi-spec-validator](https://github.com/python-openapi/openapi-spec-validator):
 
 ```sh
-iyi run examples/json_api.iyi &
+iyi run examples/openapi_auth.iyi &
 curl -s localhost:3000/openapi.json > openapi.json
 python -m pip install openapi-spec-validator
 python -m openapi_spec_validator openapi.json
 # openapi.json: OK
 ```
 
-The docs page is a client built from that same document: its "Try it out"
-calls the running API.
+The docs page is a client built from that same document: signed in through
+its "Authorize" dialog, its "Try it out" calls the running API.

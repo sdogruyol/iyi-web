@@ -26,6 +26,9 @@ a route returns is checked when the program compiles.
   types, `response:` and `status:` for the answer, and `env.params.int(...)`
   and friends for one parameter at a time
 - An OpenAPI 3.1 document made from the routes, and a Swagger UI page
+- Dependencies (`deps:`), resolved once per request before the route runs
+- Bearer tokens, HS256 JWTs, API keys and OAuth2's password flow, each in
+  the OpenAPI document as a security scheme
 - URL, query-string, form, JSON and `multipart/form-data` parameters, with
   file uploads
 - JSON bodies read into your own types, with validation and `400`/`422`
@@ -189,6 +192,10 @@ its block runs: see [Typed routes](docs/typed-routes.md).
 `openapi("Notes API", "1.0.0")` serves an OpenAPI 3.1 document of every
 route at `/openapi.json`, made from those same declarations, and a Swagger
 UI page at `/docs`: see [OpenAPI](docs/openapi.md).
+
+`deps: CURRENT_USER` hands a route the value of a provider - the user a
+bearer JWT names, say - and answers its `401` or `403` before the block
+runs: see [Dependencies and auth](docs/dependencies-and-auth.md).
 
 ### Return values
 
@@ -1581,7 +1588,10 @@ written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
 | `web/iyi_web/validation` | `BodyError`, `Validate`, `Validator`, `read_json`: typed JSON bodies and their checks |
 | `web/iyi_web/coerce` | `ParamError`, `decode_param`: parameters read as `Int32`, `Int64`, `Float64`, `Bool`, enums ([Typed routes](docs/typed-routes.md)) |
 | `web/iyi_web/typed` | What a typed route reads before its block runs (`path:`, `query:`, `headers:`, `body:`) and how it answers (`response:`) |
-| `web/iyi_web/openapi` | `OpenAPIInfo`, `openapi_document`, `docs_page` ([OpenAPI](docs/openapi.md)) |
+| `web/iyi_web/openapi` | `OpenAPIInfo`, `SecurityScheme`, `KeyLocation`, `openapi_document`, `docs_page` ([OpenAPI](docs/openapi.md)) |
+| `web/iyi_web/deps` | `Dep`: providers a route names with `deps:` ([Dependencies and auth](docs/dependencies-and-auth.md)) |
+| `web/iyi_web/auth` | `bearer_auth`, `api_key_auth`, `jwt_auth`, `password_grant`, `token_response`, `AuthError`, `OAuthError` |
+| `web/iyi_web/jwt` | `JWT`, `Claims`, `JWTError`: HS256 JSON Web Tokens |
 | `web/iyi_web/multipart` | `FileUpload` and the `multipart/form-data` parser |
 | `web/iyi_web/cookies` | `CookieJar` |
 | `web/iyi_web/headers` | `Headers` |
@@ -1629,6 +1639,7 @@ iyi run examples/json_api.iyi -- -p 8080
 | `hello.iyi` | The smallest application |
 | `json_api.iyi` | A CRUD API over an in-memory store, every route typed, with its OpenAPI document |
 | `typed_json.iyi` | `body:`, `query:` and `path:` with `Validate` rules and `response:` types, and the `400`/`415`/`422` answers |
+| `openapi_auth.iyi` | A notes API with users and roles: OAuth2's password flow issuing JWTs, user and admin providers, an API-key client, and the docs page whose "Authorize" signs in |
 | `forms_and_uploads.iyi` | Form fields, multipart uploads with limits, and `_method` override |
 | `templates.iyi` | Views in `examples/views/` with a layout, `content_for`, a partial and autoescape |
 | `routers.iyi` | `Router`, `mount`, `namespace`, router filters and error pages |

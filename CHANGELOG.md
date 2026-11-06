@@ -18,10 +18,10 @@ Removed, and `docs/templates.md` for the migration).
   parameter), with `from: :url | :query | :body` and `default:`. Reading
   is strict: `"12abc"`, `" 12"` and `""` are not integers, `nan` and
   `inf` are not numbers (`iyi_web/coerce`, `iyi_web/params`).
-- Typed routes: `path:`, `query:`, `headers:` and `body:` on every route
-  method, in the DSL and on `Router`. The block gets each value after
-  `env`, typed from the options given; what cannot be read is answered
-  before the block runs - a `ParamError` (422) naming every wrong
+- Typed routes: `path:`, `query:`, `headers:`, `body:` and `deps:` on
+  every route method, in the DSL and on `Router`. The block gets each
+  value after `env`, typed from the options given; what cannot be read is
+  answered before the block runs - a `ParamError` (422) naming every wrong
   parameter, or the body's `BodyError` (400, 415, 422). Parameter structs
   use `derive serializable`: defaults and nilable fields are optional,
   enums take their names, `Array(T)` takes a repeated query key, and
@@ -35,11 +35,32 @@ Removed, and `docs/templates.md` for the migration).
   parameters, request and response schemas derived from the types at
   compile time (`required`, nested structs as `components.schemas`,
   arrays, enums, nullable, `JSON::Field` keys and ignores), `summary:`,
-  `description:` and `tags:`; and `/docs`, Swagger UI 5 loaded from the
-  jsDelivr CDN (`iyi_web/openapi`). The document of
-  `examples/json_api.iyi` passes openapi-spec-validator.
+  `description:`, `tags:` and security; and `/docs`, Swagger UI 5 loaded
+  from the jsDelivr CDN (`iyi_web/openapi`). The document of
+  `examples/openapi_auth.iyi` passes openapi-spec-validator.
+- Dependencies: `Dep.new(User) { |env| ... }` providers of the type they
+  name, whose block answers it or an error - anything else is refused
+  where it is written - and whose error ends the request with its status
+  before the route runs; composed with `resolve(env)!`, run once per
+  request, and combined with `Dep.all(user: A, db: B)` into a named tuple
+  (a macro that names the tuple's type for `Dep.combine(type, deps)`).
+  Every exported signature is written, so the module is an artifact
+  `iyi mod release` accepts (`iyi_web/deps`).
+- Auth providers: `bearer_auth`, `api_key_auth` (header, query or
+  cookie), `jwt_auth` and `oauth2_password_bearer`, with `bearer_token`,
+  `api_key`, `password_grant`, `token_response`, `AuthError` and
+  `OAuthError`; each provider's scheme is listed under
+  `components.securitySchemes` and on its routes (`iyi_web/auth`).
+- `JWT.sign` and `JWT.verify` for HS256 tokens: `alg` must be `HS256`
+  (`none` and the rest refused), constant-time signature check, `exp`,
+  `nbf` and `iat` with `leeway:`, optional `issuer:` and `audience:`,
+  `Claims` or a payload type of the application's own; secrets under 32
+  bytes are refused (`iyi_web/jwt`).
 - `Params#query_pairs`, `json_errors(root, T)` and `enum_name` in
   `iyi_web/validation`, used by the above.
+- `examples/openapi_auth.iyi`: a notes API with an OAuth2 password flow
+  issuing JWTs, user and admin providers, an API-key client and the docs
+  page.
 - `on_start do ... end` and `on_stop do ... end` in the DSL
   (`iyi_web/lifecycle`), FastAPI's `lifespan` as two hooks. Start hooks run
   in order before the server is bound; one that answers an `Error` or panics
@@ -86,8 +107,8 @@ Removed, and `docs/templates.md` for the migration).
 - `examples/templates.iyi` and `examples/testing/notes.iyi` read their `:id`
   captures with `path: Int32`, so a word there is a `422`.
 - The README's install lines name `@v0.5.1`, the latest release, and
-  `iyi-web-vs-kemal.md`'s status names iyi 0.20.1, the 46 test files and
-  the thirteen examples.
+  `iyi-web-vs-kemal.md`'s status names iyi 0.20.1, the 49 test files and
+  the fourteen examples.
 
 ### Removed
 
@@ -99,6 +120,9 @@ Removed, and `docs/templates.md` for the migration).
 
 - Templates escape what `<%= %>` prints (see Changed): a value a request
   sent can no longer inject markup or script into a page by default.
+- `JWT.verify` accepts only `HS256` and compares signatures in constant
+  time, so an `alg: none` or algorithm-confusion token is refused before its
+  signature is read (see Added).
 
 ## [0.5.1] - 2026-11-04
 
