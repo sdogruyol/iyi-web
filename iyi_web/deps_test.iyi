@@ -1,0 +1,137 @@
+# Providers: a value or an error before the route runs, composed, and run
+# once per request however many ask.
+module iyi_web/deps_test
+
+import std/atomic
+import std/json::{JSON, serializable}
+import iyi_web/router::{Router, RouteHandler}
+import iyi_web/harness::*
+import iyi_web/context::{Context}
+import iyi_web/request::{Request}
+import iyi_web/status::{HttpError}
+import iyi_web/deps::{Dep}
+import iyi_web/auth::{AuthError}
+import iyi_web/spec::*
+
+struct User
+  getter name : String
+  getter admin : Bool
+
+  def initialize(@name : String, @admin : Bool)
+  end
+end
+
+struct Input
+  getter title : String
+  derive serializable
+end
+
+LOOKUPS = Atomic(Int32).new(0)
+BLOCKS  = Atomic(Int32).new(0)
+
+def current_user(env : Context) : User | AuthError
+  LOOKUPS.add(1)
+  case env.request.headers["X-User"]?
+  when "ada" then User.new("ada", true)
+  when "bo"  then User.new("bo", false)
+  when nil   then AuthError.new(401, "sign in")
+  else            AuthError.new(401, "unknown user")
+  end
+end
+
+CURRENT_USER = Dep.new(User) { |env| current_user(env) }
+
+# Uses the provider above: a 401 from it stays a 401, and a user who is
+# not an admin is a 403.
+def admin(env : Context) : User | AuthError
+  user = CURRENT_USER.resolve(env)!
+  user.admin ? user : AuthError.new(403, "admins only")
+end
+
+ADMIN = Dep.new(User) { |env| admin(env) }
+
+# A provider that cannot fail: its value is the whole answer.
+VERSION = Dep.new(String) { |env| "v" + (env.request.headers["X-Version"]? || "1") }
+
+def as_user(method : String, path : String, user : String?, body : String = "") : Request
+  request = http_request(method, path, "", body, body.empty? ? "" : "application/json")
+  if name = user
+    request.headers["X-User"] = name
+  end
+  request
+end
+
+def app : RouteHandler
+  routes do |r|
+    r.get "/me", deps: CURRENT_USER do |env, user|
+      BLOCKS.add(1)
+      user.name
+    end
+    r.get "/admin", deps: ADMIN do |env, user|
+      BLOCKS.add(1)
+      "hello " + user.name
+    end
+    r.get "/both", deps: Dep.all(user: CURRENT_USER, admin: ADMIN, version: VERSION) do |env, deps|
+      deps[:user].name + " " + deps[:admin].name + " " + deps[:version]
+    end
+    r.post "/notes", body: Input, deps: CURRENT_USER do |env, input, user|
+      BLOCKS.add(1)
+      input.title + " by " + user.name
+    end
+  end
+end
+
+describe "deps" do
+  handler = app
+
+  it "hands the block the provider's value, its error type taken out" do
+    ctx = dispatch(handler, as_user("GET", "/me", "ada"))
+    assert ctx.response.status_code == 200
+    assert ctx.response.body == "ada"
+  end
+
+  it "ends the request with the provider's error before the block runs" do
+    before = BLOCKS.get
+    missing = dispatch(handler, as_user("GET", "/me", nil))
+    assert missing.response.status_code == 401
+    assert missing.response.body == "sign in\n"
+    unknown = dispatch(handler, as_user("GET", "/me", "eve"))
+    assert unknown.response.status_code == 401
+    assert BLOCKS.get == before
+  end
+
+  it "composes: the inner provider's error, then the outer's own" do
+    before = BLOCKS.get
+    assert dispatch(handler, as_user("GET", "/admin", nil)).response.status_code == 401
+    forbidden = dispatch(handler, as_user("GET", "/admin", "bo"))
+    assert forbidden.response.status_code == 403
+    assert forbidden.response.body == "admins only\n"
+    assert BLOCKS.get == before
+    assert dispatch(handler, as_user("GET", "/admin", "ada")).response.body == "hello ada"
+  end
+
+  it "runs a provider once per request however many ask for it" do
+    before = LOOKUPS.get
+    request = as_user("GET", "/both", "ada")
+    request.headers["X-Version"] = "2"
+    ctx = dispatch(handler, request)
+    assert ctx.response.body == "ada ada v2"
+    assert LOOKUPS.get == before + 1
+    dispatch(handler, as_user("GET", "/both", "ada"))
+    assert LOOKUPS.get == before + 2
+  end
+
+  it "stops Dep.all at the first error" do
+    assert dispatch(handler, as_user("GET", "/both", "bo")).response.status_code == 403
+  end
+
+  it "checks the credential before the body" do
+    before = BLOCKS.get
+    unsigned = dispatch(handler, as_user("POST", "/notes", nil, %({"title":7})))
+    assert unsigned.response.status_code == 401
+    wrong = dispatch(handler, as_user("POST", "/notes", "bo", %({"title":7})))
+    assert wrong.response.status_code == 422
+    assert BLOCKS.get == before
+    assert dispatch(handler, as_user("POST", "/notes", "bo", %({"title":"Milk"}))).response.body == "Milk by bo"
+  end
+end
