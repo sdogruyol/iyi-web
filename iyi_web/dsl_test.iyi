@@ -3,7 +3,7 @@
 module iyi_web/dsl_test
 
 import std/compress::{Gzip}
-import std/json::{serializable}
+import std/json::{JSON, serializable}
 import iyi_web/coerce::{ParamError}
 import iyi_web/dsl::*
 import iyi_web/router::{Router, RouteHandler}
@@ -166,7 +166,7 @@ struct DslPage
   derive serializable
 end
 
-get "/dsl-typed/:id", path: Int32, query: DslPage do |env, id, page|
+get "/dsl-typed/:id", path: Int32, query: DslPage, summary: "typed through the DSL" do |env, id, page|
   "#{id}:#{page.page}"
 end
 
@@ -175,6 +175,8 @@ get "/dsl-next/:id" do |env|
   next id if id.is_a?(ParamError)
   (id * 2).to_s
 end
+
+openapi("DSL", "0.1")
 
 describe "iyi_web/dsl" do
   it "registers GET and POST on the process app" do
@@ -211,10 +213,14 @@ describe "iyi_web/dsl" do
     assert dispatch(handler, "GET", "/sub/in").response.body == "mounted-dsl"
   end
 
-  it "registers typed routes" do
+  it "registers typed routes and serves the OpenAPI document" do
     handler = RouteHandler.new(app)
     assert dispatch(handler, http_request("GET", "/dsl-typed/4", "page=2")).response.body == "4:2"
     assert dispatch(handler, "GET", "/dsl-typed/x").response.status_code == 422
+    doc = JSON.parse(dispatch(handler, "GET", "/openapi.json").response.body)
+    assert doc["info"]["title"].as_s == "DSL"
+    assert doc["paths"]["/dsl-typed/{id}"]["get"]["summary"].as_s == "typed through the DSL"
+    assert doc["paths"]["/sub/in"]["get"]["responses"]["200"]["description"].as_s == "OK"
   end
 
   it "answers a typed lookup's error when the block nexts it" do
