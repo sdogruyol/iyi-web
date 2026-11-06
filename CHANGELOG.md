@@ -9,7 +9,10 @@ All notable changes to iyi-web are recorded here. The format follows
 Requires iyi 0.20.1 or later. Breaking: templates escape `<%= %>` output,
 a layout's `content` and `yield_content` are `SafeHTML`, and
 `iyi_web/templates` no longer re-exports `std/eiy` (see Changed and
-Removed, and `docs/templates.md` for the migration).
+Removed, and `docs/templates.md` for the migration). The transport is
+std/http's: `Response#attach` takes `(sink, head)`, `Response#reusable?`
+and `iyi_web/intake` are gone, and std/http caps every request body at
+64 MiB (see Changed and Removed, and `docs/transport.md`).
 
 ### Added
 
@@ -78,6 +81,28 @@ Removed, and `docs/templates.md` for the migration).
 - `docs/templates.md`, with autoescape and the migration from 0.5.
 - `examples/templates.iyi` has a `/search` page that prints the visitor's
   query in an attribute and a heading, and a `raw` rating.
+- Docs: `docs/transport.md`.
+- HTTP/2 (`docs/transport.md`): h2c with prior knowledge beside HTTP/1.1
+  on the same port, and h2 over TLS by ALPN. A TLS config that names no
+  protocol is offered `["h2", "http/1.1"]` when the server binds it, and
+  `-s` offers it too.
+- TLS 1.2 beside 1.3 (`config.ssl.min_version`, `--ssl-min-version 1.2`;
+  std/tls requires the extended master secret on 1.2, so LibreSSL's 1.2
+  clients are refused) and mutual TLS (`config.ssl.client_roots`,
+  `--ssl-client-ca FILE`), with the client's chain in
+  `env.request.peer_certificates`.
+- `config.autocert` (std/autocert, Let's Encrypt): `tls-alpn-01` answered
+  on the TLS port and renewals run beside the accept loop; `LETS_ENCRYPT`,
+  `LETS_ENCRYPT_STAGING`, `Config#tls_config`, `Server#autocert=`.
+- `config.stream_bodies`: bodies left on the connection for the route to
+  read as they arrive, with `env.request.body_io` (`RequestBody#read`),
+  `env.request.body_failure` (`BodyFailure`) and `body_pending?`.
+- `config.compress`: zstd or gzip, negotiated by std/http.
+- `multipart/form-data` uploads stream to disk as they arrive
+  (`parse_multipart(RequestBody, ...)`), so an upload costs a read's worth
+  of memory, not its size.
+- `params.body_error` reports a body that could not be read (413, 408,
+  400).
 
 ### Changed
 
@@ -107,14 +132,38 @@ Removed, and `docs/templates.md` for the migration).
 - `examples/templates.iyi` and `examples/testing/notes.iyi` read their `:id`
   captures with `path: Int32`, so a word there is a `422`.
 - The README's install lines name `@v0.5.1`, the latest release, and
-  `iyi-web-vs-kemal.md`'s status names iyi 0.20.1, the 49 test files and
+  `iyi-web-vs-kemal.md`'s status names iyi 0.20.1, the 48 test files and
   the fourteen examples.
+- The transport is std/http's `Server.handle`, one call per connection;
+  iyi-web keeps its accept loop, worker pool, drain, timeouts, `408`, head
+  bounds (`414`/`431`) and body limit (`413`) in a thin layer over the
+  socket. A request head is no longer copied into a string and parsed
+  twice: bench/micro's GET parse went from 5966 ns to 3397 ns, a form POST
+  from 2267 ns to 1688 ns.
+- **Breaking:** `Response#attach(sink, head)` replaces
+  `attach(sink, version, keepalive, head)`; the sink gets unframed body
+  pieces (framing is std/http's). `Response#no_entity?` is public.
+- **Breaking:** std/http refuses any request body past 64 MiB
+  (`Server::MAX_BODY`), whatever `max_request_body_size` says; a limit set
+  above that has no effect.
+- HTTP/1.0 requests are answered with an `HTTP/1.1` status line (std/http's,
+  as RFC 9110 allows).
+- A drain also closes a connection whose next head was still arriving or
+  that was in its TLS handshake.
+- A head that misses `read_timeout` under TLS or HTTP/2 is closed (close
+  notify or GOAWAY) rather than answered `408`.
+- `params.raw_body` is empty for a multipart request: its body streamed to
+  its files.
+- bench/micro: `intake.get` / `intake.post_form` are `wire.get` /
+  `wire.post_form`.
 
 ### Removed
 
 - **Breaking:** `iyi_web/templates` (and through it `iyi_web/dsl`) no longer
   re-exports `std/eiy`; a program that names `Eiy` imports `std/eiy` itself.
   `ContentBlocks#capture` yields an `HTMLBuffer`, not an `Eiy::Buffer`.
+- **Breaking:** `iyi_web/intake` (`Intake`, `TooLarge`, `HeadTooLarge`),
+  `Closed` and `TimedOut` from `iyi_web/server`, and `Response#reusable?`.
 
 ### Security
 
