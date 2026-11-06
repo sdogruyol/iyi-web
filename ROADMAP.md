@@ -53,12 +53,14 @@ The state at the time of the review:
    - TLS 1.2 and mTLS,
    - Let's Encrypt through `std/autocert`.
 
-   iyi-web uses none of it.
+   iyi-web uses none of it. *(Fixed in Phase 4: the transport is
+   `std/http` now; `intake.iyi` is deleted.)*
 6. **Parsing an incoming request is expensive.** In the old measurement
    `intake.get` took ~5 µs per request, radix lookup ~0.28 µs. The head is
    scanned once for framing, copied into a string, and then `std/http`
    parses the same head again from the start. The body is held whole in
-   memory; a 64 MB request grows to several times that.
+   memory; a 64 MB request grows to several times that. *(Fixed in Phase 4:
+   the head is parsed once, `wire.get` is 3397 ns; bodies can be streamed.)*
 7. **The performance numbers are old and there is no comparison.**
    `results.json` was taken with iyi 0.18, on one thread, on Windows: 27.6k
    req/s for hello, p99 ~3 ms. Nothing measured side by side with FastAPI,
@@ -74,8 +76,8 @@ The state at the time of the review:
 10. **Some of the docs are stale.** The README says "TLS 1.3 only", but
     std/tls speaks 1.2 too now. `iyi-web-vs-kemal.md` says "33 test files";
     there are 42. The README shows `@v0.5.0`; the latest release is 0.5.1.
-    All the documentation is one 1,600-line README. *(The version and the
-    Kemal comparison's status are fixed in Phase 0.)*
+    All the documentation is one 1,600-line README. *(Fixed in Phases 0
+    and 5.)*
 
 ## Side by side with the competition
 
@@ -118,7 +120,7 @@ wrong opening hours.
 
 - [x] Templates escape by default, with an explicit way out such as `raw`
       for raw output. A breaking change: announce it in the CHANGELOG.
-- [ ] Fix the TLS and version facts in the README, update
+- [x] Fix the TLS and version facts in the README, update
       `iyi-web-vs-kemal.md`.
 - [x] Small helpers like `env.params.url.int("id")` answering
       `Int32 | ParamError`.
@@ -127,10 +129,11 @@ wrong opening hours.
 **Done when:** forgetting to escape no longer produces XSS; every claim in
 the docs matches what the code does.
 
-**Status:** autoescape (`raw`, `SafeHTML`), `env.params.int(...)` and
-friends, and `on_start`/`on_stop` are in. The README's `@v0.5.0` examples
-and the status section of `iyi-web-vs-kemal.md` are updated; the TLS/HTTP
-version claims will be fixed with Phase 4's transport work.
+**Status:** done. Autoescape (`raw`, `SafeHTML`), `env.params.int(...)` and
+friends, and `on_start`/`on_stop` are in. The README's `@v0.5.0` examples and
+the status section of `iyi-web-vs-kemal.md` are updated; the TLS/HTTP
+version claims were fixed with Phase 4's transport work (README,
+`docs/configuration.md`, `iyi-web-vs-kemal.md`: TLS 1.3 and 1.2, HTTP/2).
 
 ### Phase 1: The waiter writes the order down right (the part that actually beats FastAPI)
 
@@ -157,9 +160,9 @@ post "/notes", body: NoteInput do |env, input|   # the framework answers the Bod
 end
 ```
 
-- [ ] `json_as` and `Validate` already exist; this phase means moving them
+- [x] `json_as` and `Validate` already exist; this phase means moving them
       into the route's signature.
-- [ ] The response type can be declared too (FastAPI's `response_model`);
+- [x] The response type can be declared too (FastAPI's `response_model`);
       Phase 2 needs it.
 - **Simplicity rule:** `get "/" do |env|` keeps working exactly as it does.
   The typed form is an optional layer on top.
@@ -167,30 +170,42 @@ end
 **Done when:** no hand-written `to_i?` or `case ... in BodyError` is left in
 `examples/typed_json.iyi` and `examples/json_api.iyi`.
 
+**Status:** done. `path:`, `query:`, `headers:`, `body:`, `response:` and
+`status:` on every route method; neither example has a hand-written
+`to_i?` or a `BodyError` match left (see `docs/typed-routes.md`).
+
 ### Phase 2: The menu (OpenAPI 3.1 + Swagger UI/Scalar)
 
 **ELI5:** The customer sees what they can order from the menu without
 walking into the kitchen.
 
-- [ ] Route registrations + Phase 1's types → `/openapi.json`.
-- [ ] An embedded UI at `/docs` (one static HTML page is enough).
+- [x] Route registrations + Phase 1's types → `/openapi.json`.
+- [x] An embedded UI at `/docs` (one static HTML page is enough).
 - The document is generated at compile time; a card against FastAPI, which
   builds its schema at run time.
 
 **Done when:** `/openapi.json` passes an OpenAPI validator and a client
 generated from it (e.g. openapi-generator) can call the real API.
 
+**Status:** done. `openapi(...)` serves `/openapi.json` and `/docs` with
+Swagger UI; the document of `examples/openapi_auth.iyi` passes
+openapi-spec-validator (see `docs/openapi.md`).
+
 ### Phase 3: Kitchen helpers (the `Depends` equivalent)
 
 **ELI5:** "Wash your hands, warm the plate" should not be written out again
 before every dish. Define it once, attach it to whichever dish you like.
 
-- [ ] A function like `def current_user(env) : User | HttpError` is attached
+- [x] A function like `def current_user(env) : User | HttpError` is attached
       to a route with `deps: {user: current_user}` and reaches the block
       typed.
-- [ ] Ready-made pieces: Bearer/JWT, API key, OAuth2 password flow (iyi std
+- [x] Ready-made pieces: Bearer/JWT, API key, OAuth2 password flow (iyi std
       has pieces such as `password` and `otp`).
-- [ ] They show up in OpenAPI as `securitySchemes`.
+- [x] They show up in OpenAPI as `securitySchemes`.
+
+**Status:** done. `Dep.new(User) { |env| ... }` and `deps:`; `bearer_auth`,
+`api_key_auth`, `jwt_auth`, OAuth2 password flow (see
+`docs/dependencies-and-auth.md`).
 
 ### Phase 4: Move the kitchen into the new building (onto std/http)
 
@@ -198,53 +213,90 @@ before every dish. Define it once, attach it to whichever dish you like.
 water (streams), an automatic certificate doorman. You are still doing
 everything by hand in the old building.
 
-- [ ] Hand the transport layer to `std/http`'s `Server.serve`. Router,
-      Context and middleware stay as they are.
-- What comes for free: HTTP/2, `stream_bodies` (a large upload does not
-  swell memory), zstd, mTLS, `std/autocert`. The head is no longer parsed
-  twice either.
+- [x] Hand the transport layer to `std/http`: every connection goes to
+      `Server.handle` (the per-connection half of `Server.serve`). The
+      accept loop, worker pool, drain and timeouts, and 408/413/414/431,
+      stay in iyi-web's thin socket layer; Router, Context and middleware
+      are as they were.
+- [x] HTTP/2: h2c (prior knowledge) and h2 by ALPN over TLS; `-s` and a TLS
+      config that names no protocols offer `["h2", "http/1.1"]`.
+- [x] `stream_bodies` (`env.request.body_io`, `body_failure`); multipart
+      uploads always stream to disk.
+- [x] zstd (and gzip): `config.compress`.
+- [x] TLS 1.2 and mTLS: `min_version` / `--ssl-min-version 1.2`,
+      `client_roots` / `--ssl-client-ca FILE`,
+      `env.request.peer_certificates`.
+- [x] Let's Encrypt through `std/autocert`: `config.autocert`.
 - **Risk:** iyi-web's own guarantees may not be exactly the same in std:
   the 414/431 bounds, `read/write/idle_timeout`, shutdown drain, unix
   sockets. Tests covering them must pass on std first; what does not should
-  go to std as a PR or be covered by a thin adapter.
-- [ ] A PR to std/socket for `reuse_port`.
+  go to std as a PR or be covered by a thin adapter. *(Outcome: covered by
+  the thin layer. The remaining differences are in the CHANGELOG: over
+  TLS/HTTP/2 a head that runs out of time is closed rather than answered
+  408, and HTTP/1.0 gets an HTTP/1.1 status line.)*
+- [ ] A PR to std/socket for `reuse_port`. Blocked: std/socket only sets
+      `SO_REUSEADDR`; there is nothing to do on iyi-web's side.
+- [ ] The 64 MiB body cap: std/http cuts every body at 64 MiB
+      (`Server::MAX_BODY`), even with a larger `max_request_body_size`.
+      Blocked: std/http needs a configurable limit.
 
 **Done when:** the 42 test files pass on the new transport and
 `curl --http2` works.
+
+**Status:** done; two items wait on std. The transport is on `std/http`,
+and 52 test files pass on it; HTTP/2, streamed bodies, TLS 1.2/mTLS,
+autocert and zstd are in (see `docs/transport.md`). Request parsing went
+from 5966 to 3397 ns for a GET and from 2267 to 1688 ns for a form POST.
+`reuse_port` waits on std/socket, anything above 64 MiB on std/http.
 
 ### Phase 5: Ecosystem and developer experience (to beat Express)
 
 **ELI5:** Even the best kitchen stays empty if nobody knows the way.
 
-- [ ] **Database:** no new driver; use the existing
+- [x] **Database:** no new driver; use the existing
       [iyilang/db](https://github.com/iyilang/db),
       [iyilang/pg](https://github.com/iyilang/pg) and
       [iyilang/mysql](https://github.com/iyilang/mysql).
       The work on iyi-web's side: an example application on them, a
       README/docs section, and the pattern for handing a route a connection
       through Phase 3's `deps:`.
-- [ ] Project scaffolding with `iyi-web new myapp`, hot reload with
+- [x] Project scaffolding with `iyi-web new myapp`, hot reload with
       `iyi-web dev`.
-- [ ] A docs site: tutorial + reference (modelled on FastAPI's docs); the
+- [x] A docs site: tutorial + reference (modelled on FastAPI's docs); the
       1,600-line README is split up.
-- [ ] Shared-state ergonomics: a small `Store(T)` helper that hides the
+- [x] Shared-state ergonomics: a small `Store(T)` helper that hides the
       `Mutex` + `List` dance, so examples don't have to escape to
       `workers: 1`.
-- [ ] `/metrics` (Prometheus), OpenTelemetry trace middleware, background
+- [x] `/metrics` (Prometheus), OpenTelemetry trace middleware, background
       tasks.
-- [ ] A plugin guide on how to write community middleware.
+- [x] A plugin guide on how to write community middleware.
+
+**Status:** done. `examples/postgres`, `iyi-web new`/`dev`, the `docs/`
+site with `mkdocs.yml` and `docs/tutorial.md`, `Store(T)` (with
+`HashStore` and `ArrayStore`), metrics/tracing/background and
+`docs/plugins.md` are in; the README is down to an introduction.
 
 ### Phase 6: Enter the race (a public benchmark)
 
 **ELI5:** Saying "we're the fastest" isn't enough; you have to run on the
 same track and show the stopwatch.
 
-- [ ] The same 3 endpoints (hello, JSON, DB query) on the same machine for
+- [x] The same 3 endpoints (hello, JSON, DB query) on the same machine for
       iyi-web, FastAPI (uvicorn workers), Express, Kemal and Go net/http;
       the results and scripts live in the repo.
-- [ ] The hot spot to target, `intake.get` (~5 µs); to be measured again
-      after Phase 4.
-- [ ] A TechEmpower submission.
+- [x] The hot spot to target, `intake.get` (~5 µs); re-measured after
+      Phase 4: now `wire.get`, 5966 → 3397 ns.
+- [ ] A TechEmpower submission. Open, because it is an outside submission
+      to TechEmpower's own repository, not part of the work in this one.
+
+**Status:** `bench/compare/` measures five frameworks on one machine on
+four endpoints: hello, JSON, an endpoint with path and query parameters,
+and a DB query (`/db`: TechEmpower's single query, PostgreSQL 16 and a
+connection pool in every framework). The results are in
+`docs/benchmarks.md`; Express was skipped in that run because the machine
+has no `node`. After Phase 4 `wire.get` (formerly `intake.get`) went from
+5966 to 3397 ns; the before/after table is in `docs/benchmarks.md`. The
+TechEmpower submission is left for later.
 
 ## The simplicity line (how far to move from Kemal)
 

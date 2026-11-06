@@ -1,0 +1,55 @@
+# The schema, as numbered SQL steps the program applies when it starts.
+#
+# `schema_migrations` records each step applied. A step runs in a
+# transaction together with its record, so a step that fails leaves
+# nothing behind and is tried again at the next start. The transaction
+# first takes a PostgreSQL advisory lock, so two copies of the program
+# starting at once - several replicas behind a load balancer - apply each
+# step once: the second waits for the first, then finds the step recorded.
+#
+# A step, once released, is never edited: a change to the schema is a new
+# step at the end of the list.
+module migrations
+
+import std/list::{List}
+import db/db/core::{Database, Transaction}
+import db/db/errors::{DBError}
+
+# An arbitrary number: the advisory lock this program's migrations share.
+LOCK_KEY = 72_6593_1180_i64
+
+MIGRATIONS = List.new([
+  {1, "CREATE TABLE todos (
+         id         bigserial PRIMARY KEY,
+         title      text NOT NULL CHECK (length(title) BETWEEN 1 AND 200),
+         done       boolean NOT NULL DEFAULT false,
+         created_at timestamptz NOT NULL DEFAULT now()
+       )"},
+  {2, "CREATE INDEX todos_open ON todos (id) WHERE NOT done"},
+])
+
+# Applies every step not yet recorded, in order. Answers how many it
+# applied.
+pub def migrate(db : Database) : Int32 | DBError
+  db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (
+             version    integer PRIMARY KEY,
+             applied_at timestamptz NOT NULL DEFAULT now()
+           )")!
+  applied = 0
+  MIGRATIONS.each do |step|
+    version, sql = step
+    ran = db.transaction { |tx| apply(tx, version, sql) }!
+    applied += 1 if ran == true
+  end
+  applied
+end
+
+# Runs one step inside *tx* unless it is recorded already: true when it ran.
+private def apply(tx : Transaction, version : Int32, sql : String) : Bool | DBError
+  conn = tx.connection
+  conn.exec("SELECT pg_advisory_xact_lock($1)", LOCK_KEY)!
+  return false if conn.query_one?("SELECT version FROM schema_migrations WHERE version = $1", version, as: Int32)!
+  conn.exec(sql)!
+  conn.exec("INSERT INTO schema_migrations (version) VALUES ($1)", version)!
+  true
+end

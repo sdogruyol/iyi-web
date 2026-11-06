@@ -32,10 +32,12 @@ refused = dispatch(handler, form_request("POST", "/notes", "text=++")).response
 assert refused.status_code == 422
 assert dispatch(handler, "GET", "/notes").response.body == %(["Buy milk"])
 
-# Past the end, a negative index and a word all answer 404.
-["/notes/1", "/notes/-1", "/notes/first"].each do |path|
+# Past the end and a negative index answer 404; a word is not an index at
+# all, and `path: Int32` answers it 422 before the route runs.
+["/notes/1", "/notes/-1"].each do |path|
   assert dispatch(handler, "GET", path).response.status_code == 404
 end
+assert dispatch(handler, "GET", "/notes/first").response.status_code == 422
 
 # The router answers 405 with an Allow header for a known path and an
 # unknown method.

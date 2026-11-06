@@ -1,12 +1,24 @@
-# An HTTP/1.1 request as a value: method, path, query, headers, body.
+# An HTTP request as a value: method, path, query, headers, body.
 #
-# The bytes come from `std/http`'s parser. This type is what a handler
-# mutates — `_method` override, a content-type chop — so it is a class
-# this module owns rather than `std/http`'s struct.
+# The head comes from `std/http`'s server, which parsed it; this type is
+# what a handler mutates - `_method` override, a content-type chop - so it
+# is a class this module owns rather than `std/http`'s.
+#
+# **The body may still be on the connection.** A request the server hands
+# the chain with `stream_bodies` off has its body read whole already, up
+# to `max_request_body_size`; with it on, or for a `multipart/form-data`
+# upload, the body is a `RequestBody` the chain reads as it arrives:
+# `body_io` piece by piece, `body` whole the first time it is asked for.
+# Either way the limit holds: a body past it stops at the limit with a 413
+# `BodyFailure` rather than growing the server's memory with it. A
+# request built in a test holds its body as a string, and reads the same.
 module iyi_web/request
 
-import std/http::{HTTP, Server}
+import std/http
+import std/http::{HTTP, Server, BodyReader, HTTPError}
+import std/socket::{SocketError}
 import std/text
+import std/x509::{Certificate}
 import iyi_web/codec::*
 import iyi_web/headers::{Headers}
 
@@ -23,15 +35,141 @@ impl Error for ParseError
   end
 end
 
+# Why a body could not be read whole: *status* is the answer it earns -
+# 413 past the limit, 408 when it stopped arriving in time, 400 when what
+# arrived is not a body (a broken chunk, a connection that ended inside
+# it) - and *reason* says which.
+pub struct BodyFailure
+  getter status : Int32
+  getter reason : String
+
+  def initialize(@status : Int32, @reason : String)
+  end
+end
+
+impl Error for BodyFailure
+  def message : String
+    @reason
+  end
+end
+
+# A request's body as it arrives: from the connection (`std/http`'s
+# `BodyReader`, which undoes the chunking and answers `100 Continue` the
+# first time it waits), or from a string already in hand. `read` answers
+# the next piece, "" once the body is done; past *limit* bytes, or when
+# the connection fails, a `BodyFailure`, which every read after it
+# answers too. Reading it is what reads the socket: a body nobody reads
+# costs nothing but what the server reads past after the answer.
+pub class RequestBody
+  @reader : BodyReader?
+  @text : String
+  @at : Int32
+  @limit : Int64
+  @taken : Int64
+  @failure : BodyFailure?
+  @done : Bool
+
+  # The body on a connection, refused past *limit* bytes.
+  def initialize(@reader : BodyReader?, @limit : Int64)
+    @text = ""
+    @at = 0
+    @taken = 0_i64
+    @failure = nil
+    @done = false
+  end
+
+  # A body already in hand.
+  def self.text(text : String) : RequestBody
+    body = RequestBody.new(nil, 9223372036854775807_i64)
+    body.hold(text)
+    body
+  end
+
+  protected def hold(text : String) : Nil
+    @text = text
+    @done = text.empty?
+  end
+
+  # The next piece, at most *max* bytes; "" when the body is done.
+  pub def read(max : Int32 = 65536) : String | BodyFailure
+    if failed = @failure
+      return failed
+    end
+    return "" if @done
+    reader = @reader
+    unless reader
+      take = @text.bytesize - @at
+      take = max if take > max
+      piece = @text[@at, take]
+      @at = @at + take
+      @done = true if @at >= @text.bytesize
+      return piece
+    end
+    got = reader.read(max)
+    case got
+    in String
+      if got.empty?
+        @done = true
+        return got
+      end
+      @taken = @taken + got.bytesize.to_i64
+      return fail(413, "body past #{@limit} bytes") if @taken > @limit
+      got
+    in HTTPError
+      fail(got.status == 413 ? 413 : 400, got.reason)
+    in SocketError
+      got.timed_out? ? fail(408, "the body did not arrive in time") : fail(400, "the connection failed inside the body: " + got.reason)
+    in Cancelled
+      fail(400, "the body's read was cancelled")
+    end
+  end
+
+  # The rest of the body as one string, or why it cannot be had. The
+  # pieces are joined once, at the end.
+  pub def read_all : String | BodyFailure
+    builder = String::Builder.new
+    while true
+      piece = read
+      return piece if piece.is_a?(BodyFailure)
+      break if piece.empty?
+      builder << piece
+    end
+    builder.to_s
+  end
+
+  # Whether every byte of the body has been read.
+  pub def finished? : Bool
+    @done
+  end
+
+  # Why the body stopped, once it has; nil while it reads, and for one
+  # read whole.
+  pub def failure : BodyFailure?
+    @failure
+  end
+
+  private def fail(status : Int32, reason : String) : BodyFailure
+    failed = BodyFailure.new(status, reason)
+    @failure = failed
+    failed
+  end
+end
+
 pub class Request
   @remote_address : String?
   @tls : Bool
   @raw_path : String?
+  @source : RequestBody?
+  @body_failure : BodyFailure?
+  @peer_certificates : Array(Certificate)
 
   def initialize(@method : String, @path : String, @query_string : String, @version : String, @headers : Headers, @body : String)
     @remote_address = nil
     @tls = false
     @raw_path = nil
+    @source = nil
+    @body_failure = nil
+    @peer_certificates = [] of Certificate
   end
 
   # `std/http`'s request as this type: path percent-decoded, query left
@@ -48,6 +186,17 @@ pub class Request
     request = Request.new(method, decoded.empty? ? "/" : decoded, query ? query : "", version, table, body)
     request.raw_path = raw
     request
+  end
+
+  # A request the server took off the wire, its body left where it is
+  # (*body*, refused past its limit). A header carrying a byte the table
+  # refuses is the client's error, answered 400.
+  def self.from_wire(request : Std::Http::Request, body : RequestBody, version : String = request.version) : Request | ParseError
+    return ParseError.new("invalid header field") unless wire_headers_valid?(request.headers)
+    made = from_http(request.method, request.path, request.query, request.headers, "", version)
+    made.source = body
+    made.peer_certificates = request.peer_certificates
+    made
   end
 
   pub def method : String
@@ -76,6 +225,8 @@ pub class Request
     @query_string
   end
 
+  # `HTTP/1.1`, `HTTP/1.0`, or `HTTP/2` for a request that came over an
+  # HTTP/2 connection.
   pub def version : String
     @version
   end
@@ -84,8 +235,49 @@ pub class Request
     @headers
   end
 
+  # The whole body, read from the connection the first time it is asked
+  # for when it was left there. A body that cannot be read whole - past
+  # `max_request_body_size`, cut short, too slow - reads as "", and
+  # `body_failure` says why; what `body_io` already took is not in it.
   pub def body : String
+    if source = @source
+      @source = nil
+      got = source.read_all
+      case got
+      in String
+        @body = got
+      in BodyFailure
+        @body_failure = got
+        @body = ""
+      end
+    end
     @body
+  end
+
+  # The body as it arrives, a piece at a time (`RequestBody#read`): what
+  # a route that takes a large upload reads, under `stream_bodies`, so
+  # that the upload never sits whole in memory. A body already read is
+  # handed out from the string.
+  pub def body_io : RequestBody
+    @source || RequestBody.text(@body)
+  end
+
+  # Whether the body is still on the connection, unread.
+  pub def body_pending? : Bool
+    !@source.nil?
+  end
+
+  protected def source=(value : RequestBody?) : RequestBody?
+    @source = value
+  end
+
+  # Why the body could not be read whole, once a read of it failed; nil
+  # otherwise.
+  pub def body_failure : BodyFailure?
+    if failed = @body_failure
+      return failed
+    end
+    (source = @source) ? source.failure : nil
   end
 
   pub def content_type : String
@@ -139,6 +331,17 @@ pub class Request
   pub def tls=(value : Bool) : Bool
     @tls = value
   end
+
+  # The certificate chain the client presented, leaf first, as std/tls
+  # checked it against the config's `client_roots` (mutual TLS); empty
+  # when the server asks for none, and in the clear.
+  pub def peer_certificates : Array(Certificate)
+    @peer_certificates
+  end
+
+  pub def peer_certificates=(value : Array(Certificate)) : Array(Certificate)
+    @peer_certificates = value
+  end
 end
 
 # One pass of `std/http`'s parser: a request, a refusal, or "not yet".
@@ -167,9 +370,10 @@ pub def split_target(target : String) : Tuple(String, String)
   end
 end
 
-# A complete request off the wire, or why not. Headers-only text is
-# completed with a blank line so a unit test can share the parser the
-# server uses.
+# A complete request from text, or why not: `std/http`'s parser, which
+# the server reads every head with, then `Request.from_wire`'s checks.
+# Headers-only text is completed with a blank line, so a unit test can
+# build a request from what a client would send.
 pub def parse_head(block : String) : Request | ParseError
   text = block.includes?("\r\n\r\n") ? block : block + "\r\n\r\n"
   incoming = parse_incoming(text)
@@ -185,12 +389,14 @@ end
 pub def parse_incoming(text : String) : Incoming
   parsed = Server.parse_request(text)
   if req = parsed.request
-    # The server's own header table refuses a control character; one that
-    # arrived on the wire is the client's error, answered as a 400.
-    unless wire_headers_valid?(req.headers)
-      return Incoming.new(nil, "invalid header field", true, parsed.consumed)
+    made = Request.from_wire(req, RequestBody.text(req.body), wire_version(text))
+    case made
+    in ParseError
+      Incoming.new(nil, made.message, true, parsed.consumed)
+    in Request
+      made.body
+      Incoming.new(made, nil, parsed.close, parsed.consumed)
     end
-    Incoming.new(Request.from_http(req.method, req.path, req.query, req.headers, req.body, wire_version(text)), nil, parsed.close, parsed.consumed)
   else
     Incoming.new(nil, parsed.error, parsed.close, parsed.consumed)
   end
@@ -201,9 +407,12 @@ pub def with_body(request : Request, body : String) : Request
   copy.remote_address = request.remote_address
   copy.tls = request.tls?
   copy.raw_path = request.raw_path
+  copy.peer_certificates = request.peer_certificates
   copy
 end
 
+# The server's own header table refuses a control character; one that
+# arrived on the wire is the client's error, answered as a 400.
 private def wire_headers_valid?(headers : Hash(String, String)) : Bool
   headers.each do |name, value|
     return false unless Headers.valid_name?(name) && Headers.valid_value?(value)
@@ -211,6 +420,8 @@ private def wire_headers_valid?(headers : Hash(String, String)) : Bool
   true
 end
 
+# `parse_request` reads the version and keeps it to itself; the request
+# line's last word.
 private def wire_version(text : String) : String
   lines = HTTP.split_crlf(text)
   return "HTTP/1.1" if lines.empty?

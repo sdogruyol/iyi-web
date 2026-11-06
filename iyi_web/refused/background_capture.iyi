@@ -1,0 +1,14 @@
+# Refused: background work that captures an `Array`. It runs on another
+# worker, and there is no `workers: 1` way past: iyi_web/refused_test.iyi
+# checks the refusal stands on the block's capture.
+module iyi_web/refused/background_capture
+
+import iyi_web/dsl::*
+
+done = [] of String
+get "/later" do |env|
+  env.background do
+    done << "later"
+  end
+  "queued"
+end

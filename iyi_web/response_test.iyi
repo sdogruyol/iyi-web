@@ -75,48 +75,37 @@ describe "Response" do
     assert cached.to_http("HTTP/1.1") == "HTTP/1.1 304 Not Modified\r\nETag: W/\"1\"\r\n\r\n"
   end
 
-  it "streams a flushed body in chunks and ends it with the last chunk" do
+  # The pieces each flush hands the server, unframed: chunking, a length
+  # or HTTP/2's DATA frames are std/http's to write, and server_test holds
+  # them on the wire.
+  it "hands each flush's piece to the sink, the first marking the headers sent" do
     writes = [] of String
     res = Response.new
-    res.attach(->(bytes : String) { writes << bytes; nil }, "HTTP/1.1", true, false)
+    res.attach(->(bytes : String) { writes << bytes; nil }, false)
     res.print("ab")
     res.flush
     assert res.headers_sent?
+    assert writes == ["ab"]
+    res.flush
+    assert writes == ["ab"]
     res.print("cd")
     res.finish
-    assert writes.size == 4
-    assert writes[0].starts_with?("HTTP/1.1 200 OK\r\n")
-    assert writes[0].includes?("Transfer-Encoding: chunked\r\n")
-    assert writes[0].includes?("Connection: keep-alive\r\n")
-    assert !writes[0].includes?("Content-Length")
-    assert writes[1] == "2\r\nab\r\n"
-    assert writes[2] == "2\r\ncd\r\n"
-    assert writes[3] == "0\r\n\r\n"
-    assert res.reusable?
+    assert writes == ["ab", "cd"]
   end
 
-  it "streams raw bytes when the length is known or the client speaks HTTP/1.0" do
-    sized = [] of String
-    known = Response.new
-    known.attach(->(bytes : String) { sized << bytes; nil }, "HTTP/1.1", true, false)
-    known.headers["Content-Length"] = "4"
-    known.print("abcd")
-    known.finish
-    assert sized[1] == "abcd"
-    assert sized.size == 2
-    assert known.reusable?
-
-    old = [] of String
-    legacy = Response.new
-    legacy.attach(->(bytes : String) { old << bytes; nil }, "HTTP/1.0", true, false)
-    legacy.print("x")
-    legacy.finish
-    assert old[0].includes?("Connection: close\r\n")
-    assert old[1] == "x"
-    assert !legacy.reusable?
+  it "sends the headers alone on a first flush with nothing printed" do
+    writes = [] of String
+    res = Response.new
+    res.attach(->(bytes : String) { writes << bytes; nil }, false)
+    res.flush
+    assert res.headers_sent?
+    assert writes == [""]
+    res.print("x")
+    res.flush
+    assert writes == ["", "x"]
   end
 
-  it "keeps buffering when nothing is attached, and sends no body for HEAD" do
+  it "keeps buffering when nothing is attached, and sends no body for HEAD or a 204" do
     buffered = Response.new
     buffered.print("a")
     buffered.flush
@@ -125,9 +114,19 @@ describe "Response" do
 
     heads = [] of String
     head = Response.new
-    head.attach(->(bytes : String) { heads << bytes; nil }, "HTTP/1.1", true, true)
+    head.attach(->(bytes : String) { heads << bytes; nil }, true)
     head.print("hidden")
+    head.flush
+    head.print("more")
     head.finish
-    assert heads.size == 1
+    assert heads == [""]
+
+    empty = [] of String
+    none = Response.new
+    none.status_code = 204
+    none.attach(->(bytes : String) { empty << bytes; nil }, false)
+    none.print("dropped")
+    none.finish
+    assert empty == [""]
   end
 end

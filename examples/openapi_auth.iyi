@@ -1,0 +1,231 @@
+# A notes API with users, roles and its own OpenAPI document: OAuth2's
+# password flow issues JWTs, a provider turns a token into a user, another
+# requires an admin, and a machine client reads statistics with an API
+# key. Run from the repository root with `iyi run examples/openapi_auth.iyi`,
+# then open localhost:3000/docs: "Authorize" signs in with ada / lovelace
+# (an admin) or bo / hunter22 (not one).
+#
+#   curl localhost:3000/openapi.json
+#   curl -X POST localhost:3000/token -d 'grant_type=password&username=ada&password=lovelace'
+#   TOKEN=...   # the access_token it answered
+#   curl localhost:3000/me -H "Authorization: Bearer $TOKEN"
+#   curl -X POST localhost:3000/notes -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"title":"Hello"}'
+#   curl 'localhost:3000/notes?limit=10'
+#   curl -X DELETE localhost:3000/notes/1 -H "Authorization: Bearer $TOKEN"
+#   curl localhost:3000/stats -H 'X-API-Key: demo-stats-key'
+#
+# And the refusals, each before the route's block runs:
+#
+#   curl -X POST localhost:3000/notes -d '{}'                                        # 401, no token
+#   curl localhost:3000/me -H 'Authorization: Bearer not.a.token'                    # 401, invalid_token
+#   curl -X DELETE localhost:3000/notes/1 -H "Authorization: Bearer $BO_TOKEN"       # 403, not an admin
+#   curl -X POST localhost:3000/token -H 'Accept: application/json' -d 'grant_type=password&username=ada&password=x'   # 400 invalid_grant
+#   curl localhost:3000/stats -H 'X-API-Key: guess'                                  # 401
+module examples/openapi_auth
+
+import std/json::{serializable}
+import std/list::{List}
+import std/time::{Span}
+import std/crypto::{Subtle}
+import std/password::{Bcrypt}
+import iyi_web/dsl::*
+import iyi_web/context::{Context}
+import iyi_web/failure::{StatusError}
+import iyi_web/validation::{Validate, Validator}
+import iyi_web/openapi::{SecurityScheme}
+import iyi_web/deps::{Dep}
+import iyi_web/auth::*
+import iyi_web/jwt::{JWT, Claims}
+import iyi_web/store::{HashStore}
+
+# Signs and checks every token. Read it from the environment or a vault in
+# a real application: whoever knows it can mint a token for anyone.
+SECRET = "change-me: thirty-two bytes or more of real randomness"
+
+# The accounts, their passwords stored as bcrypt hashes. A `List` of
+# structs is `Share`, so every worker may read it.
+struct Account
+  getter name : String
+  getter password_hash : String
+  getter admin : Bool
+
+  def initialize(@name : String, password : String, @admin : Bool)
+    @password_hash = Bcrypt.hash(password, 10)
+  end
+end
+
+ACCOUNTS = List.new([Account.new("ada", "lovelace", true), Account.new("bo", "hunter22", false)])
+
+# Checked against a hash even for a name nobody has, so how long a wrong
+# login takes does not say which names exist.
+UNKNOWN = Bcrypt.hash("no account has this password", 10)
+
+def account_named(name : String) : Account?
+  found = nil
+  ACCOUNTS.each { |account| found = account if account.name == name }
+  found
+end
+
+# What a route knows of whoever called it.
+struct User
+  getter name : String
+  getter admin : Bool
+  derive serializable
+
+  def initialize(@name : String, @admin : Bool)
+  end
+end
+
+# A bearer JWT signed with SECRET. The document describes it as OAuth2's
+# password flow at `/token`, so the docs page's "Authorize" asks for a
+# username and a password and fetches the token itself.
+TOKEN = jwt_auth(SECRET, security: SecurityScheme.oauth2_password("/token", {"notes" => "Read and write notes"}))
+
+# The token's user: a 401 for a token that is refused, or names an
+# account that is gone.
+def current_user(env : Context) : User | AuthError
+  claims = TOKEN.resolve(env)!
+  account = account_named(claims.sub || "")
+  return AuthError.new(401, "unknown user") unless account
+  User.new(account.name, account.admin)
+end
+
+CURRENT_USER = Dep.new(User, security: TOKEN.security) { |env| current_user(env) }
+
+# Uses the provider above: its 401 stays a 401, and a user who is not an
+# admin is a 403.
+def admin_user(env : Context) : User | AuthError
+  user = CURRENT_USER.resolve(env)!
+  user.admin ? user : AuthError.new(403, "admins only")
+end
+
+ADMIN = Dep.new(User, security: TOKEN.security) { |env| admin_user(env) }
+
+# A machine client's key, compared in constant time.
+STATS_KEY = api_key_auth("X-API-Key")
+
+def stats_client(env : Context) : String | AuthError
+  key = STATS_KEY.resolve(env)!
+  Subtle.constant_time_compare(key, "demo-stats-key") ? "stats" : AuthError.new(401, "unknown API key")
+end
+
+STATS_CLIENT = Dep.new(String, security: STATS_KEY.security) { |env| stats_client(env) }
+
+struct NoteInput
+  getter title : String
+  getter body : String = ""
+  derive serializable
+end
+
+impl Validate for NoteInput
+  def validate(v : Validator) : Nil
+    v.required("title", title)
+    v.length("title", title, max: 120)
+    v.length("body", body, max: 10_000)
+  end
+end
+
+struct Note
+  getter id : Int32
+  getter title : String
+  getter body : String
+  getter author : String
+  derive serializable
+
+  def initialize(@id : Int32, input : NoteInput, @author : String)
+    @title = input.title.strip
+    @body = input.body
+  end
+end
+
+# `GET /notes?author=ada&limit=10&offset=20`.
+struct NoteQuery
+  getter author : String?
+  getter limit : Int32 = 20
+  getter offset : Int32 = 0
+  derive serializable
+end
+
+impl Validate for NoteQuery
+  def validate(v : Validator) : Nil
+    v.range("limit", limit, min: 1, max: 100)
+    v.range("offset", offset, min: 0)
+  end
+end
+
+struct NotePage
+  getter total : Int32
+  getter notes : Array(Note)
+  derive serializable
+
+  def initialize(@total : Int32, @notes : Array(Note))
+  end
+end
+
+struct Stats
+  getter notes : Int32
+  getter accounts : Int32
+  derive serializable
+
+  def initialize(@notes : Int32, @accounts : Int32)
+  end
+end
+
+# Every worker reads and writes this one table; the store holds the lock.
+# A `Note` is strings and a number, so one leaves the lock as it is.
+NOTES   = HashStore(Int32, Note).new
+LAST_ID = Atomic(Int32).new(0)
+
+# OAuth2's token endpoint: a form with `grant_type=password`, answered
+# with a token that lasts an hour.
+post "/token", summary: "Sign in", description: "OAuth2 password flow: a form with grant_type=password, username and password.", tags: ["auth"] do |env|
+  grant = password_grant(env)
+  next grant if grant.is_a?(OAuthError)
+  account = account_named(grant.username)
+  matched = Bcrypt.verify(grant.password, account ? account.password_hash : UNKNOWN)
+  if account && matched
+    token = JWT.sign(Claims.new(sub: account.name, expires_in: Span.new(hours: 1), scope: "notes"), SECRET)
+    token_response(env, token, Span.new(hours: 1))
+    nil
+  else
+    OAuthError.new("invalid_grant")
+  end
+end
+
+get "/me", deps: CURRENT_USER, response: User, summary: "Who the token belongs to", tags: ["auth"] do |env, user|
+  user
+end
+
+get "/notes", query: NoteQuery, response: NotePage, summary: "List notes", tags: ["notes"] do |env, query|
+  wanted = query.author
+  every = NOTES.values
+  matching = wanted ? every.select { |note| note.author == wanted } : every
+  NotePage.new(matching.size, matching.skip(query.offset).first(query.limit))
+end
+
+get "/notes/:id", path: Int32, response: Note, summary: "One note", tags: ["notes"] do |env, id|
+  NOTES[id]? || StatusError.new(404)
+end
+
+post "/notes", body: NoteInput, deps: CURRENT_USER, response: Note, status: 201, summary: "Write a note", tags: ["notes"] do |env, input, user|
+  note = Note.new(LAST_ID.add(1) + 1, input, user.name)
+  NOTES.update { |notes| notes[note.id] = note; nil }
+  note
+end
+
+delete "/notes/:id", path: Int32, deps: ADMIN, status: 204, summary: "Remove a note (admins only)", tags: ["notes"] do |env, id, admin|
+  removed = NOTES.update { |notes| notes.delete(id) }
+  removed ? nil : StatusError.new(404)
+end
+
+get "/stats", deps: STATS_CLIENT, response: Stats, summary: "Counts, for monitoring", tags: ["ops"] do |env, client|
+  Stats.new(NOTES.size, ACCOUNTS.size)
+end
+
+error 404 do |env|
+  env.json({"error" => "not found"})
+end
+
+openapi("Notes API", "1.0.0", description: "Notes with users and roles: sign in at /token, then send the token as a bearer token.")
+
+run

@@ -2,6 +2,9 @@
 module iyi_web/config_test
 
 import std/file::{File}
+import std/dir::{Dir}
+import std/tls::{TlsServerConfig}
+import std/autocert::{AutocertManager, AutocertDirCache}
 import iyi_web/config::*
 import iyi_web/context::{Context}
 import iyi_web/handler::{Handler}
@@ -29,6 +32,36 @@ describe "Config" do
     assert fresh.idle_timeout == 75
     assert fresh.unix_socket.nil?
     assert fresh.custom_handlers.empty?
+    assert !fresh.stream_bodies
+    assert !fresh.compress
+    assert fresh.ssl.nil?
+    assert fresh.autocert.nil?
+    assert fresh.tls_config.nil?
+  end
+
+  it "serves TLS from ssl, else from the autocert manager, offering HTTP/2 and ACME's challenge" do
+    cache_dir = File.join(Dir.tempdir, "iyi-web-autocert-config-test")
+    fresh = Config.new
+    manager = AutocertManager.new(LETS_ENCRYPT_STAGING, AutocertDirCache.new(cache_dir), ["example.com"])
+    fresh.autocert = manager
+    if made = fresh.tls_config
+      assert made.alpn == ["h2", "http/1.1", "acme-tls/1"]
+      assert !made.identity_source.nil?
+    else
+      assert false
+    end
+    ssl = TlsServerConfig.from_pem(File.read(__DIR__ + "/testdata/localhost.crt"), File.read(__DIR__ + "/testdata/localhost.key")).or_panic
+    fresh.ssl = ssl
+    # `ssl` itself, not the manager's: it offers nothing until the server
+    # binds it.
+    chosen = fresh.tls_config
+    assert !chosen.nil? && chosen.alpn.empty? && chosen.identity_source.nil?
+    # Settings carry the transport options to every worker.
+    fresh.stream_bodies = true
+    fresh.compress = true
+    copied = Settings.new(fresh, fresh.log_requests.shared || raise "the default logger is shared")
+    assert copied.stream_bodies
+    assert copied.compress
   end
 
   it "accepts assignment and reports development?" do

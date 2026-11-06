@@ -14,17 +14,77 @@ end
 run
 ```
 
-iyi-web serves HTTP/1.1 and HTTPS from native iyi programs. Routes are blocks,
-middleware is a class, and settings live in a single `config` value. The type
-a route returns is checked when the program compiles.
+iyi-web serves HTTP/1.1, HTTP/2 and HTTPS from native iyi programs. Routes
+are blocks, middleware is a class, and settings live in a single `config`
+value. It began as a port of [Kemal](https://kemalcr.com) to iyi and keeps
+Kemal's DSL; [iyi-web-vs-kemal.md](iyi-web-vs-kemal.md) records where the
+two differ.
+
+**Documentation: [the docs site](docs/index.md)**, starting with the
+[tutorial](docs/tutorial.md).
+
+## Why iyi-web
+
+- **Data races are compile errors.** Every request runs on whichever core is
+  free, and the compiler checks each block you register where you write it:
+  a route that touches a bare `Array` from several threads does not build,
+  and the error names the variable and the two ways out - a
+  [`Store`](docs/state.md) or `workers: 1` ([Every core](docs/every-core.md)).
+- **Typed routes and OpenAPI.** A route says what it reads - the path, the
+  query string, headers, a JSON body - and what it answers; iyi-web reads
+  and validates it before your block runs, answers `400`/`415`/`422` naming
+  each bad field, and makes an OpenAPI 3.1 document with Swagger UI from the
+  same declarations ([Typed routes](docs/typed-routes.md),
+  [OpenAPI](docs/openapi.md)).
+- **Batteries included.** Dependencies and auth (JWT, OAuth2 password flow,
+  API keys), sessions and CSRF, templates that escape by default, metrics
+  and tracing, lifecycle hooks and background tasks, an in-process test
+  harness, and an `iyi-web` command that scaffolds a project and rebuilds it
+  on every save.
+- **One native binary.** `iyi build --release` compiles the routes,
+  templates and docs page into a program that starts at once and serves
+  every core ([Benchmarks](docs/benchmarks.md)).
+
+## A typed route and its OpenAPI document
+
+```iyi
+import std/json::{serializable}
+import web/iyi_web/dsl::*
+
+struct Page
+  getter limit : Int32 = 3
+  getter tag : String?
+  derive serializable
+end
+
+get "/users/:id/notes", path: Int32, query: Page, response: Array(String) do |env, id, page|
+  (1..page.limit).map { |n| "note #{n} of user #{id}" + (page.tag ? " tagged #{page.tag}" : "") }
+end
+
+openapi("Notes API", "1.0.0")   # /openapi.json, and Swagger UI at /docs
+
+run
+```
+
+```sh
+curl 'localhost:3000/users/7/notes?tag=work'
+# ["note 1 of user 7 tagged work","note 2 of user 7 tagged work","note 3 of user 7 tagged work"]
+curl -H 'Accept: application/json' 'localhost:3000/users/7/notes?limit=many'
+# 422 {"error":"invalid query parameters: limit must be an integer","fields":{"limit":"must be an integer"}}
+curl localhost:3000/openapi.json   # id, limit and tag, typed; Swagger UI at /docs
+```
 
 ## Features
 
+**Routing and input**
+
 - Routes for `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `HEAD` and
   `QUERY`, with named and wildcard path segments
+- Typed routes: `path:`, `query:`, `headers:` and `body:` read into your own
+  types, `response:` and `status:` for the answer, and `env.params.int(...)`
+  and friends for one parameter at a time
 - URL, query-string, form, JSON and `multipart/form-data` parameters, with
-  file uploads, and `env.params.int(...)` and friends, which answer `422`
-  for a value that is not of the type
+  file uploads streamed to disk as they arrive
 - JSON bodies read into your own types, with validation and `400`/`422`
   answers that name each bad field
 - Before and after filters for every route, a path pattern or a single method
@@ -32,94 +92,99 @@ a route returns is checked when the program compiles.
   responses, a `500` page for a route that panics, and errors that carry
   their own status
 - Composable routers with `mount` and `namespace`
-- Middleware for every request or for a path prefix
-- Streaming responses and server-sent events
-- WebSockets, with an `Origin` check and sends from any fiber
+
+**APIs**
+
+- An OpenAPI 3.1 document made from the routes, and a Swagger UI page
+- Dependencies (`deps:`), resolved once per request before the route runs
+- Bearer tokens, HS256 JWTs, API keys and OAuth2's password flow, each in
+  the OpenAPI document as a security scheme
+
+**Pages**
+
+- Templates with layouts and partials, compiled into the program, escaping
+  every value they print unless it is marked as markup
+- Encrypted cookie sessions with secret rotation, and CSRF protection
 - Static files with `ETag`, `304 Not Modified`, byte ranges, gzip at any size
   and precompressed `.gz` copies, streamed from disk
 - File downloads, cookies, redirects and early responses with `halt`
-- Encrypted cookie sessions with secret rotation, and CSRF protection
+
+**Around requests**
+
+- Middleware for every request or for a path prefix
 - Response compression, CORS and HTML form method override
 - Basic authentication, security headers, request ids and per-client rate
   limiting
-- `on_start` and `on_stop` hooks
-- Templates with layouts and partials, compiled into the program, escaping
-  every value they print unless it is marked as markup
-- Command-line flags for host, port and TLS
-- HTTPS and `wss://` with iyi's own TLS 1.3
-- Persistent connections, each served by its own fiber
-- Graceful shutdown on `INT` and `TERM`, and timeouts for slow and idle clients
+- `on_start` and `on_stop` hooks, and background tasks that run after the
+  response
+- `Store`, `HashStore` and `ArrayStore`: shared state every worker reads and
+  changes, behind one lock
+- Prometheus metrics at `/metrics`, and W3C trace context tracing exported
+  over OTLP/HTTP
+- An in-process test harness: requests sent to a router without a socket
+
+**Transport** ([Transport](docs/transport.md))
+
+- HTTP/1.1 and HTTP/2 on the same port: h2c with prior knowledge in the
+  clear, h2 by ALPN over TLS, through iyi's `std/http`
+- HTTPS and `wss://` with iyi's own TLS 1.3 and 1.2, mutual TLS with client
+  certificates, and certificates from Let's Encrypt (`config.autocert`)
+- Request bodies streamed to the route as they arrive (`stream_bodies`)
+- zstd or gzip responses, negotiated per client (`config.compress`)
+- Each request served on whichever core is free, checked for data races
+  when the program compiles
+- Streaming responses and server-sent events
+- WebSockets, with an `Origin` check and sends from any fiber
+- Persistent connections, graceful shutdown on `INT` and `TERM`, and
+  timeouts for slow and idle clients
 - IPv4, IPv6 and unix-socket listeners
+- Command-line flags for host, port, workers, TLS versions and client CAs
+
+**Tooling**
+
+- `iyi-web new` writes a project (plain, `--api` or `--full`) whose test
+  passes out of the box; `iyi-web dev` rebuilds and restarts it on every save
+- An example on PostgreSQL with a connection pool and migrations
+- A benchmark of iyi-web, FastAPI, Express, Kemal and Go on the same
+  endpoints
 
 ## Requirements
 
 [iyi](https://iyi-lang.com) 0.20.1 or later: `spawn_parallel`, the pool
-every connection is served on, and the `@[Share(serial: workers, crossing: ...)]` mark every
-registration carries, so a refusal is made on your line and names both
-ways past it.
-TLS (`std/tls`'s server), the streaming compressor (`std/compress`'s
-`Deflater`) and the media-type table (`std/mime`) arrived in 0.18.0.
+every connection is served on, and the `@[Share(serial: workers, crossing: ...)]`
+mark every registration carries, so a refusal is made on your line and names
+both ways past it.
 
 ## Installation
 
-iyi-web is an iyi module. Add it to your project's `iyi.mod`:
-
-```sh
-iyi get github.com/sdogruyol/iyi-web
-```
-
-This fetches the latest release, records it in `iyi.sum` and writes one line to
-`iyi.mod`:
-
-```
-require github.com/sdogruyol/iyi-web v0.5.1
-```
-
-Files then name iyi-web's modules by their full path. One `import` line loads
-a module and brings its names into scope:
-
-```iyi
-import github.com/sdogruyol/iyi-web/iyi_web/dsl::*
-```
-
-### A short name
-
-The examples in this README write the path once, in `iyi.mod`, under the short
-name `web`. Pass `--as web` when adding iyi-web, or run the same command in a
-project that already requires it:
+iyi-web is an iyi module. Add it to your project under the short name `web`,
+which the examples use:
 
 ```sh
 iyi get github.com/sdogruyol/iyi-web --as web
 ```
 
-or add ` as web` to the `require` line by hand:
+That writes one line to `iyi.mod`:
 
 ```
 require github.com/sdogruyol/iyi-web v0.5.1 as web
 ```
 
-`web/iyi_web/...` then means `github.com/sdogruyol/iyi-web/iyi_web/...`:
-
-```iyi
-import web/iyi_web/dsl::*
-import web/iyi_web/router::{Router}
-```
-
-### Versions
-
-`iyi get -u` moves to the latest release and
-`iyi get github.com/sdogruyol/iyi-web@v0.5.1` to a given one; both keep the
-short name. `iyi get -u --check` says whether a newer release exists without
-changing anything.
-
-iyi reads `iyi.mod` from the directory of the file being built, so keep the
-entry file, and every `*_test.iyi` that uses iyi-web, beside it. Modules of
-your own can live in subdirectories.
+and `web/iyi_web/...` then names iyi-web's modules. `iyi get -u` moves to
+the latest release. [Installation](docs/installation.md) has the details.
 
 ## Quick start
 
-Start a project, add iyi-web, and save the program at the top of this page as
-`app.iyi`:
+With the [`iyi-web` command](docs/cli.md):
+
+```sh
+iyi-web new app           # --api for a JSON API, --full for pages and assets
+cd app
+iyi test                  # the generated test passes
+iyi-web dev               # serves http://localhost:3000, rebuilds on save
+```
+
+Or by hand, with the program at the top of this page saved as `app.iyi`:
 
 ```sh
 mkdir app && cd app
@@ -128,1473 +193,25 @@ iyi get github.com/sdogruyol/iyi-web --as web
 iyi run app.iyi
 ```
 
-`iyi init` writes `iyi.mod` together with a starter `main.iyi`, `greet.iyi`
-and `main_test.iyi`, which can be deleted.
-
 The server listens on http://localhost:3000. Pass `-p 8080` or set `PORT` to
 use another port.
 
-The examples below extend this program. Each goes between the `import` line and
-`run`, and any `import` lines it shows go at the top of the file.
+## Documentation
 
-## Routing
+The guide lives in [`docs/`](docs/index.md) and builds into a site with
+`mkdocs serve` (`pip install mkdocs-material`).
 
-```iyi
-get "/articles" do |env|
-  "All articles"
-end
-
-post "/articles" do |env|
-  env.response.status_code = 201
-  "Created"
-end
-
-get "/articles/:id" do |env|
-  "Article " + env.params.url["id"]
-end
-
-delete "/articles/:id" do |env|
-  env.response.status_code = 204
-  nil
-end
-
-get "/assets/*path" do |env|
-  "Asset " + env.params.url["path"]
-end
-```
-
-`put`, `patch`, `options`, `head` and `query` work the same way. Paths start
-with `/`.
-
-- `:name` matches one path segment: `/articles/42` sets `id` to `42`.
-- `*name` matches the rest of the path: `/assets/css/site.css` sets `path` to
-  `css/site.css`.
-- A trailing slash does not matter: `/articles/` is `/articles`.
-- Two routes may name the same segment differently: `/users/:id` and
-  `/users/:user_id/posts` each read their own name.
-- Defining the same method and path twice stops the program at startup.
-
-A request that matches no route gets `404 Not Found`. A path that exists only
-for other methods gets `405 Method Not Allowed` with an `Allow` header. Every
-`GET` route also answers `HEAD`, without a body.
-
-### Return values
-
-The value a route returns is the response body. A route may return any type
-that implements `IntoBody`; `String`, `Nil` (an empty body), `Int32`, `Int64`
-and `Bool` do. The check happens at compile time. A route may also return an
-error value beside its body, such as `String | NotFound`; the error goes to the
-`error` page for its type (see [Error pages](#error-pages)). Implement
-`IntoBody` to return your own types:
-
-```iyi
-import web/iyi_web/body::{IntoBody}
-
-struct Temperature
-  def initialize(@celsius : Int32)
-  end
-
-  def celsius : Int32
-    @celsius
-  end
-end
-
-impl IntoBody for Temperature
-  def into_body : String
-    celsius.to_s + " °C"
-  end
-end
-
-get "/temperature" do |env|
-  Temperature.new(21)
-end
-```
-
-## Parameters
-
-```iyi
-get "/search" do |env|
-  term = env.params.query["q"]? || ""
-  "Results for " + term
-end
-
-post "/subscribe" do |env|
-  email = env.params.body["email"]? || ""
-  "Subscribed " + email
-end
-```
-
-| Source | Access |
+| | |
 |---|---|
-| Route segments (`:id`, `*path`) | `env.params.url` |
-| Query string | `env.params.query` |
-| `application/x-www-form-urlencoded` or `multipart/form-data` fields | `env.params.body` |
-| `application/json` and `application/*+json` bodies | `env.params.json`, or `env.params.json_as(T)` for a type of your own |
-| Uploaded files | `env.params.files`, `env.params.all_files` |
-
-`url`, `query` and `body` are `Hash(String, String)` tables of percent-decoded
-values; `env.params["name"]?` searches them in that order. Indexing without
-`?` panics when the key is missing, so use `[]?` for optional values.
-`env.params.raw_body` is the body as it arrived.
-
-These are strings. To read one as a number or a flag, with a `422` naming
-it when it is not one, use `env.params.int("id")`, `int64`, `float`, `bool`
-or `string` (see [One parameter at a time](#one-parameter-at-a-time)).
-
-A name sent more than once keeps its last value in the tables.
-`env.params.query_all("tag")` and `env.params.body_all("tag")` return every
-value, in the order sent, and an empty array when there is none; `body_all`
-covers form and multipart text fields alike. A name is matched as sent, so
-`?tag[]=a&tag[]=b` is `query_all("tag[]")`:
-
-```iyi
-get "/posts" do |env|
-  tags = env.params.query_all("tag")   # ?tag=iyi&tag=web => ["iyi", "web"]
-  "Tagged " + tags.join(", ")
-end
-```
-
-A JSON object's members are in `env.params.json`, a `Hash(String, JSON::Any)`;
-a top-level array is under the key `"_json"`. A request that declares JSON
-and sends something that does not parse gets `400 Bad Request` before the
-route runs, with the line and column where the body stopped making sense
-(see [Typed JSON bodies](#typed-json-bodies)).
-
-### One parameter at a time
-
-`env.params` reads a single parameter as a type. Each answers the value or a
-`ParamError` (422, naming the parameter):
-
-```iyi
-import web/iyi_web/coerce::{ParamError}
-
-get "/notes/:id" do |env|
-  id = env.params.int("id")
-  next id if id.is_a?(ParamError)          # answered 422
-  page = env.params.int("page", from: :query, default: 1)
-  next page if page.is_a?(ParamError)
-  "note #{id}, page #{page}"
-end
-```
-
-| Method | Type | Accepts |
-|---|---|---|
-| `string(key)` | `String` | anything |
-| `int(key)` | `Int32` | decimal digits with an optional sign |
-| `int64(key)` | `Int64` | the same, in Int64's range |
-| `float(key)` | `Float64` | a finite decimal or exponent number |
-| `bool(key)` | `Bool` | `true`, `1`, `yes`, `on`, `false`, `0`, `no`, `off`, in any case |
-
-Each takes `from:` (`:any`, the default, which searches url, then query,
-then form body as `env.params["key"]?` does; or `:url`, `:query`, `:body`)
-and `default:`. The default is used only when the parameter is missing: one
-that was sent and is not the type is still a 422. Reading is strict: `" 12"`,
-`"12abc"`, `"0x1f"` and `""` are not integers, and `"nan"` and `"inf"` are not
-numbers, so nothing turns a client's mistake into a silent `0`.
-
-A route's block is kept and called later, so `!` cannot leave it (the
-compiler says so). `next` the error, as above, and the router answers it with
-its status. Inside a `def`, `env.params.int("id")!` does the same.
-
-### Typed JSON bodies
-
-`env.params.json_as(T)` reads the body into a type with `derive serializable`
-(or anything `JSON.from_json` reads, such as `Array(Note)`), and answers
-`T | BodyError`. Return the error and the client gets its status:
-
-```iyi
-import std/json::{serializable}
-import web/iyi_web/validation::{BodyError, Validate, Validator}
-
-struct NoteInput
-  getter title : String
-  getter priority : Int32 = 3
-  getter tags : Array(String) = [] of String
-  derive serializable
-end
-
-post "/notes" do |env|
-  case input = env.params.json_as(NoteInput)
-  in BodyError
-    input
-  in NoteInput
-    env.status(201).json(save(input))
-  end
-end
-```
-
-`json_as` never panics on what the client sent. Kemal's
-`NoteInput.from_json(env.request.body)` raises on a body of the wrong shape;
-iyi's `JSON.from_json` panics, so the parsed body is first checked against
-the type the way `derive serializable` reads it, and every field it would
-refuse is reported at once:
-
-| Body | Status | `BodyError` |
-|---|---|---|
-| Not declared JSON (no `application/json` or `application/*+json`) | `415` | `expected a JSON body (...)` |
-| Empty, or not JSON | `400` | `malformed JSON: trailing comma in object at line 1, column 21` |
-| A required field missing or `null`, a value of the wrong kind, an integer out of range, an unknown enum member | `422` | `fields`: `{"title" => "is required", "tags[1]" => "must be a string"}` |
-| Failed the type's `Validate` rules | `422` | `fields`: one message per field |
-
-A field with a default may be left out, and keeps its default for a `null`; a
-field whose type admits `nil` may be left out or `null`. Nested fields are
-named by path: `author.name`, `tags[1]`, `[0].title` for an array body.
-
-Unless an `error` page takes it, a `BodyError` is answered with
-`{"error": message, "fields": {...}}` when the request sent JSON or its
-`Accept` asks for it, and with the message as plain text otherwise (see
-[Errors that carry a status](#errors-that-carry-a-status)). The messages are
-written for the client and shown in every environment.
-
-### Validation
-
-A type that implements `Validate` (`web/iyi_web/validation`) is checked once
-it has been read, and `json_as` answers `422` with every failing field:
-
-```iyi
-impl Validate for NoteInput
-  def validate(v : Validator) : Nil
-    v.required("title", title)
-    v.length("title", title, max: 80)
-    v.range("priority", priority, min: 1, max: 5)
-    v.length("tags", tags, max: 5)
-    v.add("title", "is taken") if title_taken?(title)
-  end
-end
-```
-
-| Rule | Fails when | Message |
-|---|---|---|
-| `required(field, value)` | `nil`, a blank string or an empty array | `is required` |
-| `length(field, value, min:, max:)` | a string has fewer or more characters, an array fewer or more items | `must be at least 3 characters`, `must have at most 5 items` |
-| `range(field, value, min:, max:)` | a number is outside the bounds, inclusive; the bounds are of the value's type | `must be between 1 and 5`, `must be at least 1` |
-| `format(field, value, regex, message = "is invalid")` | the regex does not match; it matches anywhere unless anchored with `\A` and `\z` | `is invalid` |
-| `one_of(field, value, choices)` | the value is not among the choices | `must be one of: free, pro` |
-| `add(field, message)` | always: a rule of your own | your message |
-
-Every rule but `required` passes over a `nil`, so an optional field is
-checked only when it was sent. A field keeps the first message it gets, so a
-blank title is `is required` and not also too short. `v.valid?`, `v.errors`
-and `v.failed?(field)` read what has been collected. Only the value read is
-validated: a type it holds is checked by the outer type's `validate`.
-`read_json(text, T)` does the same for a string that did not come from the
-request.
-
-### File uploads
-
-```iyi
-post "/avatar" do |env|
-  if upload = env.params.files["avatar"]?
-    env.text("Received " + upload.filename + ", " + upload.size.to_s + " bytes")
-  else
-    env.halt(422, "No file")
-  end
-end
-```
-
-Each uploaded file is written to a temporary file, in a new directory only
-the server's account can open: `upload.path`, `upload.filename`,
-`upload.content_type`, `upload.size`, `upload.headers` and `upload.read`
-describe it, and the file is deleted once the response has been
-sent. Files sent under a name ending in `[]` are all kept, in
-`env.params.all_files["photos[]"]`. The filename is the client's, unchanged:
-never join it to a directory path without cleaning it first.
-
-A malformed `multipart/form-data` body gets `400`. More file parts than
-`max_file_uploads`, or a text field larger than
-`max_multipart_form_field_size`, gets `413 Content Too Large`.
-
-## Requests
-
-`env.request` exposes `method`, `path`, `query_string`, `headers`, `body`,
-`content_type`, `content_length`, `host` and `version`, plus `remote_address`,
-the client's IP address as the connection saw it (nil over a unix socket, and
-the proxy's address behind a reverse proxy), and `tls?`, whether the request
-came over TLS to this server. Header lookups ignore case:
-
-```iyi
-get "/agent" do |env|
-  env.request.headers["User-Agent"]? || "unknown"
-end
-```
-
-## Responses
-
-Set the status, headers and content type on `env.response`:
-
-```iyi
-get "/report.csv" do |env|
-  env.response.content_type = "text/csv; charset=utf-8"
-  env.response.headers["Cache-Control"] = "no-store"
-  "id,total\n1,42\n"
-end
-```
-
-Responses default to `200` and `text/html; charset=utf-8`. The server sets
-`Content-Length`, `Date` and `Connection`. `env.response.headers.add` appends
-a header instead of replacing it, and `headers env, {"X-A" => "1"}` sets
-several at once. A header name or value containing a line break or another
-control character is refused with a panic, so a value built from user input
-cannot forge a second header.
-
-These helpers set the content type and the body in one call; each also takes
-a `content_type:` argument:
-
-| Helper | Content-Type |
-|---|---|
-| `env.text(body)` | `text/plain; charset=utf-8` |
-| `env.html(body)` | `text/html; charset=utf-8` |
-| `env.json(body)` | `application/json; charset=utf-8` |
-| `env.xml(body)` | `application/xml; charset=utf-8` |
-
-`env.json` sends a `String` as it is and serialises anything else, such as a
-`Hash`, an `Array` or a type that implements `ToJSON`. `env.status(code)` sets
-the status and returns `env`, so the two combine:
-
-```iyi
-post "/api/items" do |env|
-  env.status(201).json({"created" => true})
-end
-```
-
-### JSON
-
-`std/json` parses documents with `JSON.parse?` and writes them with
-`JSON.build` or `JSON.to_json`:
-
-```iyi
-import std/json::{JSON}
-
-get "/api/items/:id" do |env|
-  item = JSON.build do |json|
-    json.object do
-      json.field("id", env.params.url["id"])
-      json.field("status", "active")
-    end
-  end
-  env.json(item)
-end
-
-post "/api/echo" do |env|
-  env.json(env.params.json)
-end
-```
-
-A type with `derive serializable` writes itself, so `env.json` takes it, alone
-or in an `Array`, the same type `env.params.json_as` reads
-([Typed JSON bodies](#typed-json-bodies)):
-
-```iyi
-import std/json::{serializable}
-
-struct Note
-  getter id : Int32
-  getter title : String
-  derive serializable
-
-  def initialize(@id : Int32, @title : String)
-  end
-end
-
-get "/api/notes/:id" do |env|
-  env.json(Note.new(env.params.url["id"].to_i, "Groceries"))   # {"id":1,"title":"Groceries"}
-end
-```
-
-`JSON.to_json` refuses, when the program is compiled, a `Hash` whose values
-are of more than one type: `{"count" => 2, "notes" => notes}` is a
-`Hash(String, Int32 | Array(Note))`, and a union has no `to_json` of its own.
-Write such a document as a `derive serializable` struct with a field per key,
-or with `JSON.build`.
-
-### Redirects and halting
-
-```iyi
-get "/home" do |env|
-  env.redirect("/")
-end
-
-get "/legacy" do |env|
-  env.redirect("/articles", 301)
-end
-
-get "/private" do |env|
-  halt env, status_code: 403, response: "Forbidden"
-end
-```
-
-`redirect` responds with `302` unless given a status; `body:` adds a body and
-`close: false` keeps the chain running. `env.halt(403, "Forbidden")` and
-`halt env, status_code: 403, response: "Forbidden"` are the same. After a
-redirect or a halt, the rest of the chain is skipped: remaining filters and
-the route do not run, the route's return value is discarded, and error pages
-are not applied.
-
-### Cookies
-
-```iyi
-post "/sign-in" do |env|
-  env.set_cookie("session", "3f9a1c", http_only: true, secure: true, max_age: 86400, same_site: "Lax")
-  env.redirect("/account")
-end
-
-get "/account" do |env|
-  session = env.cookies["session"]?
-  session ? "Signed in" : "Signed out"
-end
-
-post "/sign-out" do |env|
-  env.delete_cookie("session")
-  env.redirect("/")
-end
-```
-
-`set_cookie` also takes `path` (default `/`), `domain` and `expires` (a
-`Time`); with neither `max_age` nor `expires` it makes a session cookie.
-Values are percent-encoded where cookies do not allow a character and
-decoded when read, so any string round-trips. `delete_cookie` needs the same
-`path` and `domain` the cookie was set with. To keep values between requests
-without a store of your own, use a [session](#sessions).
-
-### Files
-
-```iyi
-get "/download/report" do |env|
-  env.send_file("reports/latest.pdf", filename: "report.pdf")
-end
-
-get "/download/note" do |env|
-  env.send_data("Generated for you\n", filename: "note.txt")
-end
-```
-
-The content type follows the file extension (`std/mime`'s table) unless
-`mime_type:` is given.
-`filename:` marks the response as a download; `disposition: "inline"` shows
-it instead. Non-ASCII names are encoded for every browser. A `Range` request
-gets `206 Partial Content` or `416`. A missing file responds with `404`.
-`send_data` sends bytes held in memory the same way, typed by `filename:`.
-
-`send_file` reads the file as it sends it. A file or range larger than 64 KiB
-(`FILE_CHUNK_SIZE`) goes out in 64 KiB chunks behind its exact
-`Content-Length`, so a download costs 64 KiB of memory whatever its size;
-headers set after `send_file` are not sent for it. A `HEAD` request is
-answered from the file's size without reading it. A file cut short while it
-is being sent ends the connection, so the client sees the body as incomplete.
-
-With static files' `gzip` option on (`serve_static({"gzip" => true})`), a
-textual file of 860 bytes or more goes out gzip- or deflate-compressed to a
-client that accepts it, as Kemal does: compressed 64 KiB at a time as it is
-read, sent chunked and without a `Content-Length`, with
-`Vary: Accept-Encoding`. A `Range` request gets the file uncompressed, and an
-`ETag` set before the call gets the coding as a suffix.
-
-### Streaming
-
-`env.response.flush` sends what the route has written so far and keeps the
-response open; on HTTP/1.1 the body is sent chunked.
-
-```iyi
-get "/export.csv" do |env|
-  env.response.content_type = "text/csv; charset=utf-8"
-  env.response.print("id,total\n")
-  env.response.flush
-  (1..3).each { |id| env.response.print(id.to_s + "," + (id * 10).to_s + "\n") }
-  nil
-end
-```
-
-Headers changed after the first `flush` are not sent.
-
-### Server-sent events
-
-```iyi
-sse "/clock" do |stream, env|
-  3.times do |tick|
-    stream.send("tick " + tick.to_s, event: "tick", id: tick)
-    sleep(1000)
-  end
-end
-```
-
-`sse` registers a `GET` route answering `text/event-stream`. `send` takes
-`event:`, `id:` and `retry:` (a `Span`), splits multi-line data into `data:`
-lines and flushes; `comment` sends a keep-alive line clients ignore. An event
-name or id containing a line break panics. The stream ends when the block
-returns. A browser reads it with `new EventSource("/clock")`.
-
-### WebSockets
-
-```iyi
-import web/iyi_web/dsl::*
-import web/iyi_web/websocket::{WebSocket}
-
-class Room
-  @members : Array(WebSocket)
-
-  def initialize
-    @members = [] of WebSocket
-  end
-
-  def join(socket : WebSocket) : Nil
-    @members << socket
-  end
-
-  def leave(socket : WebSocket) : Nil
-    @members.delete(socket)
-  end
-
-  def broadcast(text : String) : Nil
-    @members.each { |member| member.send(text) }
-  end
-end
-
-ROOM = Room.new
-
-ws "/chat/:name" do |socket, env|
-  name = env.params.url["name"]
-  ROOM.join(socket)
-  socket.on_message { |text| ROOM.broadcast(name + ": " + text) }
-  socket.on_close { |code, reason| ROOM.leave(socket) }
-end
-```
-
-`ws` registers a WebSocket endpoint (RFC 6455); `Router#ws` does the same on a
-router. A `GET` with `Upgrade: websocket` runs the `before` filters for `GET`,
-then gets `101 Switching Protocols`. The block then receives the socket and the
-context and sets the callbacks, and the connection's fiber reads frames until
-the socket closes. The connection carries no more HTTP requests and has no read
-timeout.
-
-- Callbacks: `on_message` (text), `on_binary` (the bytes as a `String`),
-  `on_ping`, `on_pong` and `on_close(code, reason)`.
-- Sending: `send(text)`, `send_binary(bytes)`, `ping`, `pong` and
-  `close(code = 1000, reason = "")`. Each returns `false` once the socket is
-  closed or its client has gone, and affects nothing else. Any fiber may send,
-  as a broadcast from another connection does; frames never interleave.
-- A ping is answered with a pong, and fragments arrive as one message. Text that
-  is not UTF-8 closes the connection with `1007`, an unmasked or malformed frame
-  with `1002`, a message over `websocket_max_message_size` with `1009`, and a
-  callback that panics with `1011`. `on_close` gets `1006` when the client left
-  without a close frame.
-- Another method gets `405` unless an HTTP route serves it. A missing
-  `Connection: Upgrade`, HTTP/1.0 or a bad `Sec-WebSocket-Key` gets `400`, an
-  `Origin` that is not allowed `403`, and a `Sec-WebSocket-Version` other than
-  13 gets `426` with `Sec-WebSocket-Version: 13`. A refused handshake closes
-  the connection.
-- A `GET` without `Upgrade: websocket` goes to the HTTP route on the same path,
-  or gets `426 Upgrade Required` when there is none.
-
-`Origin` is checked against `websocket_allowed_origins`. Empty, the default,
-means same-origin: the `Origin` has to name the request's `Host`. A request
-without `Origin`, which most clients outside a browser send, is refused unless
-the list holds `"*"`. A browser connects with
-`new WebSocket("ws://localhost:3000/chat/ada")`, or `wss://` when the server
-runs with TLS.
-
-## Filters
-
-```iyi
-before_all do |env|
-  env.response.headers["X-Content-Type-Options"] = "nosniff"
-end
-
-before_all "/admin/*" do |env|
-  env.halt(401, "Unauthorized") unless env.cookies.has_key?("session")
-end
-
-after_get ["/api/*", "/reports/*"] do |env|
-  env.response.headers["Cache-Control"] = "no-store"
-end
-```
-
-- `before_all` and `after_all` run for every method. `before_get`,
-  `after_post` and their siblings run for one method: `get`, `post`, `put`,
-  `patch`, `delete`, `options` or `query`.
-- The path defaults to `*`, every path. `/admin/*` matches `/admin` and every
-  path under it; `/users/:id` matches one segment in place of `:id`; any other
-  path matches exactly. A list registers the same block for each path.
-- Filters run in declaration order. `before_all` filters also run for a
-  request no route matched, before its `404` or `405`; the others run only
-  for a matched route.
-- A before filter that calls `halt` or `redirect` stops the request before the
-  route runs. One that sets an error status with an error page gets that page
-  instead of the route.
-- A filter's return value is discarded, but like a route's it must implement
-  `IntoBody`.
-
-Filters, middleware and routes pass values along a request with `env.set`,
-`env.get` and `env.get?`. A `String`, `Int32`, `Int64`, `Float64`, `Bool` or
-`nil` reads back with `env.get(name)`. A value of any other type, such as
-your own class, reads back by its type: `env.get(name, User)` panics when
-nothing or something else is stored there, and `env.get?(name, User)`
-answers nil instead. Kemal needs `add_context_storage_type(User)` and
-`env.get(name).as(User)` for the same; iyi-web needs no registration.
-`env["key"]` reads and writes strings only:
-
-```iyi
-before_all "/account/*" do |env|
-  env.set("user_id", 42)
-  env.set("user", User.new("ada"))
-end
-
-get "/account/orders" do |env|
-  "Orders for " + env.get("user", User).name + ", user " + env.get("user_id").to_s
-end
-```
-
-## Error pages
-
-```iyi
-error 404 do |env|
-  "<h1>Page not found</h1>"
-end
-
-error 422 do |env|
-  "<h1>Please check the form and try again</h1>"
-end
-
-error 500 do |env, err|
-  "<h1>Something went wrong</h1><!-- " + err.message + " -->"
-end
-
-post "/signup" do |env|
-  email = env.params.body["email"]? || ""
-  env.response.status_code = 422 if email.empty?
-  "Welcome"
-end
-```
-
-An error page replaces the body of `404` and `405` responses from the router,
-and of any response a route finishes with a status of `400` or above. The
-status code is kept. Responses ended with `halt` are sent unchanged.
-
-A page may take a second argument, `err`, what caused it, as Kemal's
-`error 404 do |env, ex|` does. iyi has no exceptions; `err` is a value of the
-prelude's `Error` trait: the `Panicked` a route's panic was caught as, the
-error a route returned, or a `StatusError` (`web/iyi_web/failure`) with the
-status and a message such as `404 Not Found`.
-
-### Errors by type
-
-Where Kemal has `error MyException do |env, ex|`, iyi-web has a page per error
-type. A route returns the error as part of its value, and the page for its
-type answers it:
-
-```iyi
-struct Gone
-  getter what : String
-
-  def initialize(@what : String)
-  end
-end
-
-impl Error for Gone
-  def message : String
-    what + " is gone"
-  end
-end
-
-get "/posts/:id" do |env|
-  id = env.params.url["id"]
-  id == "1" ? "First post" : Gone.new("post " + id)
-end
-
-error Gone do |env, err|
-  env.response.status_code = 410
-  "<h1>" + err.message + "</h1>"
-end
-```
-
-- `err` has the page's type. Pages are tried in the order they were
-  registered, and a page for a type also takes its subclasses; `error Error`
-  takes every error.
-- The response is a `500`, or the status of an
-  [error that carries one](#errors-that-carry-a-status), unless the page sets
-  another. The route's headers are kept, its body is dropped, and after
-  filters do not run.
-- An error no page takes goes to the `error` page for that status (`error
-  500` for a plain error) with it as `err`, then to the built-in page.
-- A panic is offered to the type pages too, as a `Panicked`: `error Panicked`
-  or `error Error` catches it before `error 500` does.
-
-A route that panics gets `500 Internal Server Error` and its connection is
-closed; other connections are not affected, and the panic is logged. The
-first page that takes it is used. Otherwise the built-in page shows the panic
-message in development and hides it in every other environment;
-`config.show_exceptions = true` or `false` overrides that. An error a route
-returned that no page takes is shown the same way.
-
-### Errors that carry a status
-
-An error type that also implements `HttpError` (`web/iyi_web/status`) is
-answered with its own status instead of `500`, which is what Kemal's
-`CustomException` subclasses are for:
-
-```iyi
-import web/iyi_web/status::{HttpError}
-
-struct Conflict
-end
-
-impl Error for Conflict
-  def message : String
-    "that title is taken"
-  end
-end
-
-impl HttpError for Conflict
-  def status : Int32
-    409
-  end
-end
-
-post "/notes" do |env|
-  title_taken?(env) ? Conflict.new : "created"
-end
-```
-
-The page for its type comes first, then the page for its status (`error
-409`), then the built-in page. Below `500` the error is the client's, so the
-built-in page shows its `message`, and its `fields` (a `Hash(String,
-String)`, empty unless the type defines it): `{"error": message, "fields":
-{...}}` for a request that sent JSON or whose `Accept` asks for it, the
-message as plain text otherwise; write those for the client. From `500` up,
-the message is shown only under `show_exceptions`, as above.
-
-`BodyError` ([Typed JSON bodies](#typed-json-bodies)) and `StatusError`
-(`web/iyi_web/failure`) are `HttpError`s: a route may return
-`StatusError.new(404)` and get the `error 404` page. A JSON body that does not
-parse is answered as the `BodyError` `json_as` would have returned, so
-`error BodyError` and `error 400` both take it.
-
-## Routers
-
-```iyi
-import web/iyi_web/router::{Router}
-
-admin = Router.new
-
-admin.get "/" do |env|
-  "Dashboard"
-end
-
-admin.namespace "/reports" do |reports|
-  reports.get "/daily" do |env|
-    "Daily report"
-  end
-end
-
-mount "/admin", admin
-```
-
-This serves `/admin` and `/admin/reports/daily`. A `Router` has the same
-route, `sse`, filter (`before`, `after`, `before_get`, …) and `error`
-methods as the program. `mount` without a path mounts a router at the root,
-and `namespace` passes the nested router to its block.
-
-Larger applications keep routers in their own modules. A module does not need
-the DSL to define one:
-
-```iyi
-# routes/health.iyi
-module routes/health
-
-import web/iyi_web/router::{Router}
-
-pub def health_routes : Router
-  router = Router.new
-  router.get "/health" do |env|
-    "ok"
-  end
-  router
-end
-```
-
-```iyi
-import routes/health::*
-
-mount health_routes
-```
-
-## Sessions
-
-`SessionHandler` keeps the session in a cookie, as kemal-session's cookie
-engine and `Rack::Session::Cookie` do: the server stores nothing. The cookie
-is encrypted with AES-256-GCM under a key derived from your secret, so the
-client can neither read nor alter what it holds, and it carries its issue and
-expiry times, so a copied cookie stops working on the server when it lapses.
-
-```iyi
-import web/iyi_web/session::{SessionHandler, session}
-
-use SessionHandler.new(Program.env("SESSION_SECRET") || raise "SESSION_SECRET is not set")
-
-post "/sign-in" do |env|
-  session(env).regenerate
-  session(env)["user"] = env.params.body["name"]? || ""
-  env.redirect("/", 303)
-end
-
-get "/" do |env|
-  user = session(env)["user"]?
-  user ? "Signed in as " + user : "Signed out"
-end
-
-post "/sign-out" do |env|
-  session(env).clear
-  env.redirect("/", 303)
-end
-```
-
-The secret must be at least 32 bytes; a shorter one stops the program when
-the handler is made. `SessionHandler.new` also takes:
-
-| Option | Default | |
-|---|---|---|
-| `old_secrets` | `[] of String` | Secrets being retired. A cookie sealed under one is read, and sent back sealed under the current secret, so a secret can be replaced without signing anyone out. |
-| `cookie_name` | `"iyi_web.session"` | |
-| `max_age` | `14 * 86400` | Seconds. The cookie's `Max-Age`, and the server's own limit on a cookie's age. |
-| `path`, `domain` | `"/"`, `""` | |
-| `secure` | `false` | Set it behind HTTPS. |
-| `http_only` | `true` | |
-| `same_site` | `"Lax"` | `"None"` needs `secure: true`. |
-
-`session(env)` answers the request's `Session`: `[]`, `[]?` and `[]=` for
-strings, `set(key, value)` for anything `JSON.to_json` writes (read back as
-`JSON::Any` with `json?(key)`), `delete`, `has_key?`, `keys`, `clear`, and
-`id`, a random id for anything kept about the session elsewhere.
-`regenerate` gives the session a new id and keeps its values: call it at
-sign-in. A cookie that was altered, has lapsed, or was sealed under a secret
-that is no longer listed is an empty session.
-
-The response sets the cookie only when the session changed, and deletes it
-when the session was cleared. A cookie larger than the 4096 bytes browsers
-keep is refused with a `500`: keep an id in the session and the data on the
-server. The cookie is written after the route returns, so a route that
-streams calls `save_session(env)` before its first `env.response.flush`; a
-change made after the headers went out cannot reach the client, and is
-reported on the error stream.
-
-### CSRF
-
-`CSRFHandler`, kemal-csrf's equivalent, keeps a random token in the session
-and refuses with `403` every `POST`, `PUT`, `PATCH`, `DELETE` and other
-unsafe request that does not send it back in the `authenticity_token` form
-field or the `X-CSRF-Token` header. `GET`, `HEAD`, `OPTIONS`, `TRACE` and
-`QUERY` pass. It needs a `SessionHandler` before it.
-
-```iyi
-import web/iyi_web/session::{SessionHandler}
-import web/iyi_web/csrf::{CSRFHandler, csrf_tag}
-
-use SessionHandler.new(secret)
-csrf = CSRFHandler.new
-csrf.exclude ["/api/*"], "*"
-use csrf
-
-get "/note" do |env|
-  "<form method='post'>" + csrf_tag(env) + "<input name='note'><button>Save</button></form>"
-end
-```
-
-`csrf_tag(env)` is a hidden input holding the token; `csrf_token(env)` is the
-token alone, for a script to send in the header. Each call masks the token
-with fresh random bytes, so no two pages carry the same string and a
-compressed response does not give it away. `CSRFHandler.new` takes `field`,
-`header` and the refusal's `message` (default `"Forbidden (CSRF)"`). `only`
-and `exclude` choose the requests it checks; their method defaults to `GET`,
-which is never checked, so name the method or `"*"`.
-
-## Middleware
-
-Requests pass through request logging, static files, the middleware added with
-`use` in the order it was added, and then the router.
-
-```iyi
-import web/iyi_web/cors::{CORSHandler}
-import web/iyi_web/override::{OverrideMethodHandler}
-
-gzip true
-use OverrideMethodHandler.new
-use "/api", CORSHandler.new(origin: "https://app.example.com")
-```
-
-`use handler` runs a handler for every request; `use "/api", handler` or
-`use "/api", [first, second]` runs it for `/api` and every path under it.
-`use handler, 0` places a handler at an index of the finished chain, 0 being
-before request logging.
-
-| Handler | Module | Purpose |
-|---|---|---|
-| `CompressHandler` | `web/iyi_web/compress` | Compresses textual responses of 860 bytes or more with gzip or deflate when `Accept-Encoding` allows it. `gzip true` adds it. |
-| `CORSHandler` | `web/iyi_web/cors` | Sets `Access-Control-Allow-Origin` and answers preflight requests with `204`. Takes `origin` (default `*`), `methods`, `headers` (default `*`) and `max_age` (seconds as a string, default `"86400"`). |
-| `OverrideMethodHandler` | `web/iyi_web/override` | Treats a form `POST` with `_method` set to `PUT`, `PATCH` or `DELETE` as that method. |
-| `SessionHandler` | `web/iyi_web/session` | Keeps an encrypted session in a cookie. See [Sessions](#sessions). |
-| `CSRFHandler` | `web/iyi_web/csrf` | Refuses unsafe requests without the session's CSRF token with `403`. See [CSRF](#csrf). |
-| `LogHandler` | `web/iyi_web/log` | Writes one line per request to `config.logger`. Added by default; `logging false` removes it. |
-| `StaticHandler` | `web/iyi_web/static` | Serves the public folder. Added by default; `serve_static false` removes it. |
-| `SecurityHeadersHandler` | `web/iyi_web/security_headers` | Sets `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Cross-Origin-Opener-Policy` and, when given, `Content-Security-Policy` and `Strict-Transport-Security`. See [Security](#security). |
-| `BasicAuthHandler` | `web/iyi_web/basic_auth` | HTTP Basic authentication; `401` with a challenge otherwise. See [Security](#security). |
-| `RequestIdHandler` | `web/iyi_web/request_id` | Keeps or makes an `X-Request-Id`, echoes it and logs it. See [Security](#security). |
-| `RateLimitHandler` | `web/iyi_web/rate_limit` | Limits requests per client address or chosen key; `429` with `Retry-After` past the limit. See [Security](#security). |
-
-To write your own, subclass `Handler`, override `call`, and pass the request
-on with `call_next`. A handler that does not call `call_next` ends the chain.
-`only` and `exclude` record which paths and methods a handler is for, using
-the filter path syntax; `only_match?` and `exclude_match?` answer for the
-current request, and `applies?` combines them the way the built-in handlers
-do (an empty `only` meaning every path):
-
-```iyi
-import web/iyi_web/handler::{Handler}
-import web/iyi_web/context::{Context}
-
-class RequireToken < Handler
-  @token : String
-
-  def initialize(@token : String)
-    super()
-    only ["/api/*"], "*"
-    exclude ["/api/health"], "*"
-  end
-
-  pub def call(ctx : Context) : Nil
-    return call_next(ctx) unless only_match?(ctx)
-    return call_next(ctx) if exclude_match?(ctx)
-    if ctx.request.headers["Authorization"]? == "Bearer " + @token
-      call_next(ctx)
-    else
-      ctx.halt(401, "Unauthorized")
-    end
-  end
-end
-
-token = Program.env("API_TOKEN") || raise "API_TOKEN is not set"
-use RequireToken.new(token)
-```
-
-## Security
-
-Four handlers from the [Middleware](#middleware) table guard an application.
-None is in the default stack; each honours `only` and `exclude`.
-
-```iyi
-import web/iyi_web/basic_auth::{BasicAuthHandler}
-import web/iyi_web/rate_limit::{RateLimitHandler}
-import web/iyi_web/request_id::{RequestIdHandler}
-import web/iyi_web/security_headers::{SecurityHeadersHandler}
-
-use RequestIdHandler.new
-use SecurityHeadersHandler.new(content_security_policy: "default-src 'self'")
-use RateLimitHandler.new(limit: 60, period: 60)
-
-admin = BasicAuthHandler.new("admin", Program.env("ADMIN_PASSWORD") || raise "ADMIN_PASSWORD is not set")
-admin.only ["/admin", "/admin/*"], "*"
-use admin
-
-get "/admin" do |env|
-  "Signed in as " + env.get("basic_auth.username").to_s
-end
-```
-
-**Basic authentication.** `BasicAuthHandler.new(username, password, realm:
-"Restricted")` accepts one fixed user, comparing in constant time;
-`BasicAuthHandler.new(realm: "API") { |user, password| ... }` accepts whatever
-the block does. Missing, malformed or refused credentials get `401` with
-`WWW-Authenticate: Basic realm="...", charset="UTF-8"`; accepted ones store
-the user name under `"basic_auth.username"`. The password crosses the wire
-on every request, so serve it over HTTPS. Kemal has this as the
-kemal-basic-auth shard.
-
-**Security headers.** `SecurityHeadersHandler.new` sends
-`X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`,
-`Referrer-Policy: strict-origin-when-cross-origin` and
-`Cross-Origin-Opener-Policy: same-origin`. The named arguments
-`content_type_options`, `frame_options`, `referrer_policy`,
-`cross_origin_opener_policy`, `content_security_policy` and
-`strict_transport_security` replace a value; `nil` leaves a header out. HSTS
-is only sent over TLS, or when a proxy sends `X-Forwarded-Proto: https`. The
-headers are set before the route runs, so a route can overwrite one (a page
-meant to be framed sets its own `X-Frame-Options`) or delete it, and streamed
-responses carry them. Static files are served before `use` handlers; add the
-handler with `use SecurityHeadersHandler.new, 0` to cover them too.
-
-**Request ids.** `RequestIdHandler.new` keeps an incoming `X-Request-Id` of up
-to 128 letters, digits and `-_.:@+=/`, and replaces any other with a fresh
-UUID rather than cleaning it up. The id is sent back in the same header,
-stored under `"request_id"`, and appended to the request's log line:
-`GET / 200 0.17ms 6f1c...`. `header:`, `max_length:` and `trust_incoming:
-false` (always make a new one) change that.
-
-**Rate limiting.** `RateLimitHandler.new(limit: 60, period: 60)` lets each
-client address make `limit` requests per `period` seconds, counted in fixed
-windows. Every response carries `RateLimit-Limit`, `RateLimit-Remaining` and
-`RateLimit-Reset` (seconds); past the limit the answer is `429` with
-`Retry-After`. At most `max_keys` (default 10,000) windows are held: ended
-ones are dropped, and when all are open the oldest gives way. The counters
-need no lock, since a server's connection tasks share one thread. Behind a
-reverse proxy every request has the proxy's address, so pass a block that
-picks the key; trust `X-Forwarded-For` only when a proxy you run sets it,
-and answer nil to leave a request unlimited:
-
-```iyi
-use RateLimitHandler.new(limit: 100, period: 60) { |ctx|
-  forwarded = ctx.request.headers["X-Forwarded-For"]?
-  forwarded ? forwarded.split(",").last.strip : ctx.request.remote_address
-}
-```
-
-`clock:` takes a block answering milliseconds, which is how a test moves time
-without sleeping.
-
-## Static files
-
-Files under `./public` are served for `GET` and `HEAD` requests before
-routing, so a file takes precedence over a route with the same path:
-
-- The content type follows the extension. `ETag` and `Last-Modified` are
-  sent, and a matching `If-None-Match` or `If-Modified-Since` gets
-  `304 Not Modified`.
-- With the `gzip` option, a textual file of 860 bytes or more is sent gzip- or
-  deflate-compressed to a client that accepts it, compressed as it is read
-  from disk whatever its size. A compressed body gets a weak `ETag` naming its
-  coding. A `Range` request gets `206` or `416` from the uncompressed file.
-- A `<file>.gz` next to a file, no older than it, is sent as it is, with
-  `Content-Encoding: gzip` and the original's content type, to a client that
-  accepts gzip, whether or not the `gzip` option is on. A `Range` request is
-  always served from the original.
-- Content types come from `std/mime`'s table.
-- A directory serves its `index.html`, after redirecting to the path with a
-  trailing slash. Paths containing `..` are never served.
-
-`public_folder "/srv/app/public"` changes the folder, resolving relative
-paths against the working directory, and `serve_static false` turns static
-files off. `serve_static({"gzip" => true, "dir_listing" => true})` sets the
-options; a key left out counts as false, and `dir_index` controls the
-`index.html` lookup. `static_headers` runs for every served file:
-
-```iyi
-static_headers do |env, path, info|
-  env.response.headers["Cache-Control"] = "public, max-age=3600"
-end
-```
-
-## Templates
-
-```iyi
-get "/profile" do |env|
-  name = env.params.query["name"]? || "stranger"
-  render "views/profile.eiy", "views/layout.eiy"
-end
-```
-
-`views/profile.eiy`:
-
-```erb
-<% content_for "title" do %>Profile of <%= name %><% end -%>
-<h1>Hello, <%= name %></h1>
-```
-
-`views/layout.eiy`:
-
-```erb
-<!DOCTYPE html>
-<html>
-<head><title><%= yield_content "title" %></title></head>
-<body><%= content %></body>
-</html>
-```
-
-`curl -G localhost:3000/profile --data-urlencode 'name=<script>alert(1)</script>'`
-prints
-
-```html
-<!DOCTYPE html>
-<html>
-<head><title>Profile of &lt;script&gt;alert(1)&lt;/script&gt;</title></head>
-<body><h1>Hello, &lt;script&gt;alert(1)&lt;/script&gt;</h1>
-</body>
-</html>
-```
-
-Templates use iyi's `.eiy` format: `<%= expr %>` prints a value and
-`<% code %>` runs iyi code. They are compiled into the program, and see the
-local variables where `render` is written: a route block, or a method, as a
-controller's `def show(name : String) : String` with `render` inside.
-
-- `render "view.eiy"` returns the rendered text. `render "view.eiy",
-  "layout.eiy"` renders the view, then the layout with the view as `content`.
-- `content_for "key" do ... end` captures markup in the view, and
-  `yield_content "key"` prints it in the layout; a key never captured prints
-  nothing.
-- A template path is relative to the file that calls `render`, or, for a
-  template rendered inside another template, to that template.
-- `<%= expr %>` prints `expr.to_s` HTML-escaped, as `HTML.escape` does, in
-  an element or an attribute alike. `raw(value)` prints markup the program
-  built or trusts as it is, as `<%= raw(csrf_tag(env)) %>`; a layout's
-  `content`, `yield_content` and a `render` inside a template are markup
-  already and are not escaped again.
-
-[docs/templates.md](docs/templates.md) has the details of autoescape and
-the migration from 0.5, where `<%= %>` printed values as they were.
-
-## Every core
-
-`run` serves each connection as a parallel task on a pool of worker
-threads (iyi's `spawn_parallel`, SPEC.md III.4.13): whichever worker is
-free takes it, so a CPU-bound route - a bcrypt check, a template - uses
-the machine rather than one thread. The pool has one worker per core the
-process may run on; `IYI_WORKERS`, `workers 4`, `config.workers = 4` or
-`-w 4` set it, and `workers 1` serves every connection on the thread that
-accepts them, as iyi-web did before.
-
-Because a route may run on several cores at once, the compiler checks
-every block you register where you write it, as it checks a parallel
-task's (SPEC.md III.4.4). A route that captures a bare `Array` or `Hash`,
-or assigns a local it captured, does not compile:
-
-```iyi
-seen = [] of String
-
-get "/" do |env|
-  seen << env.request.path   # refused
-  seen.size.to_s
-end
-```
-
-```
-Error: the block Dsl.get keeps, which may run on other threads captures
-`seen : Array(String)`, which is not Share: Array(String)'s field @size is
-assigned in `append`. Put it behind a lock, a `Mutex(Array(String))`
-(std/mutex), or pass `workers: 1` so the block runs on one thread (SPEC.md
-III.4.4)
-```
-
-Those are the two ways out. Keep the state behind a lock or in an atomic -
-`Mutex.new { [] of String }` with `seen.lock { |list| list << path }`,
-`Atomic(Int32)` for a count, a `List` for a table nothing writes
-(`examples/json_api.iyi`). Or register the block with `workers: 1`: it is
-kept unchecked, and the application is served on one thread, saying so
-when it starts (`examples/websocket_chat.iyi`):
-
-```iyi
-get "/", workers: 1 do |env|
-  seen << env.request.path
-  seen.size.to_s
-end
-```
-
-The same holds for filters, `error` pages, `ws`, `sse` and
-`static_headers`. A handler given to `use`, and a logger, are called by
-every worker, so they must be `Share` - no field assigned after
-`initialize` - and one that is not is refused at the `use` or `logger`
-line, at the value given, naming the field and the same two ways out;
-`use handler, workers: 1` and `logger value, workers: 1` keep them
-unchecked. `use path, [a, b]` checks each handler inside iyi-web, since an
-`Array` is never `Share`; give a handler that must stay on one thread
-alone. `config.logger = value` has no `workers:`, and its refusal says to
-use `logger value, workers: 1`.
-
-A constant the block names is checked as a capture is. One it reaches
-through the functions it calls is warned about, with the path (iyi's
-reach warning, #148): make it a `List` if it is only read, put it behind
-a `Mutex`, or say why every worker may reach it with `@[SafeReach("...")]`
-on the constant. iyi-web's own programs, tests and examples compile with
-no such warning.
-
-Settings are copied when a server on more than one worker starts
-(`Settings`); one changed on `config` afterwards does not reach it.
-
-## Configuration
-
-```iyi
-import web/iyi_web/config::*
-
-config.app_name = "storefront"
-config.max_request_body_size = 1024 * 1024
-```
-
-| Setting | Default | Shorthand |
-|---|---|---|
-| `host` | `"0.0.0.0"` | `host "127.0.0.1"`, `-b 127.0.0.1` |
-| `port` | `PORT`, else `3000` | `run 8080`, `-p 8080` |
-| `env` | `IYI_WEB_ENV`, else `"development"` | |
-| `public_folder` | `"./public"` | `public_folder "assets"` |
-| `serve_static` | `true` | `serve_static false` |
-| `logging` | `true` | `logging false` |
-| `logger` | `StdoutLogger.new` | `logger MyLogger.new` |
-| `powered_by_header` | `false` | `powered_by true` |
-| `show_exceptions?` | `true` in development | `config.show_exceptions = false` |
-| `keepalive` | `true` | |
-| `max_keepalive_requests` | `100` | |
-| `max_request_body_size` | `8 * 1024 * 1024` | |
-| `max_file_uploads` | `128` | |
-| `max_multipart_form_field_size` | `8 * 1024 * 1024` | |
-| `max_ranges` | `16` | |
-| `reject_unreadable_body` | `true` | |
-| `route_on_raw_path` | `false` | |
-| `shutdown_timeout` | `30` | |
-| `shutdown_message` | `true` | |
-| `read_timeout` | `60` | |
-| `write_timeout` | `60` | |
-| `idle_timeout` | `75` | |
-| `unix_socket` | `nil` | |
-| `ssl` | `nil` (plain HTTP) | `-s --ssl-key-file FILE --ssl-cert-file FILE` |
-| `websocket_allowed_origins` | `[] of String` (same-origin) | |
-| `websocket_max_message_size` | `8 * 1024 * 1024` | |
-| `app_name` | `"iyi-web"` | |
-
-- `max_keepalive_requests` caps the requests served on one connection before
-  it is closed.
-- A request whose body is larger than `max_request_body_size` bytes gets
-  `413 Content Too Large`, as soon as its `Content-Length` is read, and its
-  connection is closed.
-- A request line longer than 8 KiB gets `414 URI Too Long`, and header
-  fields past 16 KiB `431 Request Header Fields Too Large`, the bounds
-  Crystal's server holds Kemal to. Neither is a setting.
-- `max_ranges` is the most ranges one `Range` header may ask for; `0` turns
-  range requests off.
-- `reject_unreadable_body` answers a JSON body that does not parse with `400`,
-  and a malformed multipart one or one past the upload limits with `400` or
-  `413`, before the route runs. Off, the route runs, as Kemal ran it, and
-  reads what went wrong from `params.json_valid?`, `params.json_error` and
-  `params.body_error`: an authentication check in the route then answers
-  first.
-- `route_on_raw_path` matches routes, filters, handlers' `only`/`exclude` and
-  `use "/prefix"` against the path as sent, percent-encoded, and decodes each
-  captured segment afterwards, as Kemal does: `/files/a%2Fb` reaches
-  `/files/:name` with `name` = `a/b`. Off, the path is decoded first, so the
-  same request is `/files/a/b`. Every handler and the router see the same
-  path either way, so a rule cannot exempt a request the router routes
-  elsewhere. Static files are looked up by the decoded path. The path as sent
-  is `env.request.raw_path`.
-- `websocket_allowed_origins` lists origins such as `"https://example.com"`;
-  `"*"` admits every request and `"null"` a sandboxed page.
-- `websocket_max_message_size` counts a fragmented message whole.
-- `app_name` and `env` appear in the line printed at startup. With `env` set
-  to `test`, `run` binds the port without serving requests.
-- `powered_by true` adds `X-Powered-By: iyi-web` to every response.
-- `unix_socket` is a path to listen at instead of `host` and `port`, for a
-  proxy on the same machine: `config.unix_socket = "/run/app.sock"`. The file
-  must not exist yet; it is removed when the server stops.
-- `ssl` is a `TlsServerConfig` from `std/tls`; set, every connection is TLS
-  1.3 and the startup line reads `https://`. See [HTTPS](#https).
-- Timeouts are in seconds, and `nil` or `0` turns one off. A client has
-  `read_timeout` to send a whole request, headers and body, counted from its
-  first byte (from the connection, for its first request); a request cut
-  short gets `408 Request Timeout` and its connection is closed, and a
-  connection that sent nothing is closed. `idle_timeout` is how long a
-  keep-alive connection waits for its next request. `write_timeout` is how
-  long one write waits for the client to take bytes; one that runs out ends
-  the connection, so a stream lasts as long as its client keeps reading.
-
-### Logging
-
-Each request is logged as one line, `GET /users 200 1.234ms`, after its
-response has been built, with the request's id after it when
-`RequestIdHandler` runs; a request whose handler panicked is logged with its
-`500`. `log "message"` writes a line of the application's own. Both go to
-`config.logger`, standard output by default, and `logging false` silences
-both.
-
-A logger is a subclass of `Logger` from `web/iyi_web/log` with
-`write(message)`; override `request(ctx, elapsed)` as well to choose what a
-request line holds:
-
-```iyi
-import std/time::{Span}
-import web/iyi_web/log::{Logger}
-import web/iyi_web/context::{Context}
-
-class JSONLogger < Logger
-  pub def request(ctx : Context, elapsed : Span) : Nil
-    write(%({"method":"#{ctx.request.method}","path":"#{ctx.request.path}","status":#{ctx.response.status_code}}))
-  end
-
-  pub def write(message : String) : Nil
-    STDERR.puts message
-  end
-end
-
-logger JSONLogger.new
-```
-
-### Command line
-
-`run` reads the program's arguments:
-
-```sh
-./app -b 127.0.0.1 -p 8080
-./app --help
-```
-
-`-b HOST` (`--bind`) and `-p PORT` (`--port`) set the host and port;
-`run 8080` still wins over `-p`. The host may be an IPv6 address, bare or
-bracketed (`-b ::1`, `-b '[::1]'`); `::` takes IPv6 connections only. An
-unknown flag or an invalid port stops the program with the reason and the
-list of flags. `-s` (`--ssl`) serves HTTPS with the PEM files `--ssl-key-file`
-and `--ssl-cert-file` name; a missing or unreadable file, or a key TLS
-refuses, stops the program with the reason. `extra_options` adds your own:
-
-```iyi
-extra_options do |parser|
-  parser.on("--public DIR", "Folder to serve static files from") { |dir| public_folder(dir) }
-end
-```
-
-`run(args: nil)` ignores the command line.
-
-### Stopping
-
-`INT` (Ctrl-C) or `TERM` stops the server as `stop` does: it takes no new
-connections, closes the idle ones, and lets each request in flight finish,
-closing its connection after the response. `run` returns once they have, or
-after `shutdown_timeout` seconds, when the rest are cut off: their fibers are
-cancelled and their connections closed. A second signal cuts them off at
-once. A server-sent-events stream is in flight for as long as it is open.
-
-With `shutdown_message` on, the stop prints
-`[production] storefront is going to take a rest!`. Code after `run` runs.
-
-### Start and stop hooks
-
-```iyi
-on_start do
-  DB.connect(Program.env("DATABASE_URL") || "postgres://localhost/app")
-end
-
-on_stop do
-  DB.close
-end
-```
-
-`on_start` hooks run in the order they were written before the server is
-bound; one whose block answers an `Error` or panics stops the start, and the
-program exits 1 naming the hook's file and line
-(`could not start: on_start (app.iyi:3) failed: ...`). `on_stop` hooks run
-after the drain, the last written first; one that fails is reported and the
-rest still run. See [docs/lifecycle-and-background.md](docs/lifecycle-and-background.md).
-
-### HTTPS
-
-```sh
-./app -s --ssl-cert-file chain.pem --ssl-key-file key.pem
-```
-
-or in code, as Kemal's `config.ssl`:
-
-```iyi
-import std/file::{File}
-import std/tls::{TlsServerConfig}
-
-tls = TlsServerConfig.from_pem(File.read("chain.pem"), File.read("key.pem")).or_panic
-tls.alpn = ["http/1.1"]
-config.ssl = tls
-```
-
-TLS is `std/tls`, iyi's own, TLS 1.3 only. The certificate chain comes leaf
-first; the key is PKCS #8, Ed25519, P-256 or RSA of 2048 bits or more. Each
-connection's handshake runs in its own fiber within `read_timeout`, and one
-that fails closes that connection only. Streaming, server-sent events,
-WebSockets (`wss://`) and the unix socket listener work over TLS.
-`Server#bind_tls(host, port, tls)` does the same without the DSL. `std/tls`
-has not been audited yet; until it is, a reverse proxy remains the
-conservative choice in front of a public site.
-
-## Deployment
-
-```sh
-iyi build --release app.iyi -o app
-IYI_WEB_ENV=production ./app -p 8080
-```
-
-- iyi-web serves HTTP/1.1, and HTTPS itself with `-s` (see [HTTPS](#https)).
-  Behind a reverse proxy such as nginx, Caddy or HAProxy, the proxy can reach
-  the server over a unix socket (`unix_socket`). Keep `idle_timeout` above the
-  proxy's own keep-alive timeout, so that the proxy is the one to close an
-  idle connection.
-- A client that disconnects while its response is being written ends that
-  request only; iyi's runtime reports it as a panic line on standard error.
-
-## Testing
-
-`web/iyi_web/harness` sends requests through a router in-process, without a
-socket:
-
-```iyi
-# health_test.iyi
-module health_test
-
-import web/iyi_web/router::{RouteHandler}
-import web/iyi_web/harness::*
-import routes/health::*
-
-handler = RouteHandler.new(health_routes)
-response = dispatch(handler, "GET", "/health").response
-
-assert response.status_code == 200
-assert response.body == "ok"
-```
-
-```sh
-iyi test
-```
-
-A test is a `*_test.iyi` program that exits non-zero on failure, and
-`iyi test` runs every one in the project. A test that uses iyi-web sits beside
-`iyi.mod`, like the entry file. `http_request` and `form_request` build
-requests with a query string, a body or a content type. `dispatch` gives the
-request the process `config`'s per-request settings, as the server does
-(`dispatch(handler, request, settings)` takes another `Config`).
-`handler_chain` from `web/iyi_web/dsl` is the whole application as `run`
-serves it (logging, static files, middleware and routes), for tests that need
-more than one router.
-
-## Modules
-
-Paths as written with the short name `web`. Without a short name, a module is
-written with the whole path: `github.com/sdogruyol/iyi-web/iyi_web/dsl`.
-
-| Module | Provides |
-|---|---|
-| `web/iyi_web/dsl` | Routes, filters, `error`, `mount`, `use`, `sse`, `ws`, `render`, `run` and the setting shorthands |
-| `web/iyi_web/router` | `Router`, `RouteHandler` |
-| `web/iyi_web/context` | `Context` |
-| `web/iyi_web/request` | `Request` (with `remote_address` and `tls?`) |
-| `web/iyi_web/response` | `Response` |
-| `web/iyi_web/params` | `Params`, `json_as` |
-| `web/iyi_web/validation` | `BodyError`, `Validate`, `Validator`, `read_json`: typed JSON bodies and their checks |
-| `web/iyi_web/coerce` | `ParamError`, `decode_param`: parameters read as `Int32`, `Int64`, `Float64`, `Bool`, enums |
-| `web/iyi_web/multipart` | `FileUpload` and the `multipart/form-data` parser |
-| `web/iyi_web/cookies` | `CookieJar` |
-| `web/iyi_web/headers` | `Headers` |
-| `web/iyi_web/body` | `IntoBody` |
-| `web/iyi_web/handler` | `Handler`, `chain` |
-| `web/iyi_web/config` | `Config`, `config` |
-| `web/iyi_web/cli` | `CLIParser` |
-| `web/iyi_web/event_stream` | `EventStream` |
-| `web/iyi_web/websocket` | `WebSocket`, `Frame`, `FrameError` |
-| `web/iyi_web/templates` | `render`, `content_for`, `yield_content`, `raw`, `SafeHTML` ([Templates](docs/templates.md)) |
-| `web/iyi_web/compress` | `CompressHandler` |
-| `web/iyi_web/content_coding` | `Accept-Encoding` negotiation, `Vary` and `ETag` helpers, `COMPRESS_MIN_SIZE` |
-| `web/iyi_web/failure` | `StatusError`, the built-in error pages |
-| `web/iyi_web/status` | `HttpError`, `phrase` |
-| `web/iyi_web/range` | `Range` header parsing and `206` responses |
-| `web/iyi_web/file_body` | `respond_file`, `respond_file_encoded`, `FILE_CHUNK_SIZE`: a file sent from disk, whole, by range or compressed |
-| `web/iyi_web/cors` | `CORSHandler` |
-| `web/iyi_web/override` | `OverrideMethodHandler` |
-| `web/iyi_web/static` | `StaticHandler` |
-| `web/iyi_web/log` | `LogHandler`, `Logger`, `StdoutLogger` |
-| `web/iyi_web/basic_auth` | `BasicAuthHandler`, `basic_credentials` |
-| `web/iyi_web/security_headers` | `SecurityHeadersHandler` |
-| `web/iyi_web/request_id` | `RequestIdHandler`, `acceptable_id?` |
-| `web/iyi_web/rate_limit` | `RateLimitHandler`, `monotonic_ms` |
-| `web/iyi_web/harness` | `http_request`, `form_request`, `dispatch`, `routes` |
-| `web/iyi_web/session` | `SessionHandler`, `Session`, `session`, `save_session` |
-| `web/iyi_web/csrf` | `CSRFHandler`, `csrf_token`, `csrf_tag` |
-| `web/iyi_web/lifecycle` | `Lifecycle`, `lifecycle_hook`: `on_start` and `on_stop` ([Lifecycle](docs/lifecycle-and-background.md)) |
-| `web/iyi_web/token` | `random_hex`, `random_bytes`, `encode_base64url`, `decode_base64url?`: random tokens nobody can guess, and base64url for carrying them |
+| Start | [Installation](docs/installation.md), [Tutorial](docs/tutorial.md), [The `iyi-web` command](docs/cli.md) |
+| Routes and input | [Routing](docs/routing.md), [Parameters](docs/parameters.md), [Typed routes](docs/typed-routes.md), [Requests and responses](docs/requests-and-responses.md), [Errors](docs/errors.md), [Routers](docs/routers.md) |
+| Pages | [Templates](docs/templates.md), [Static files](docs/static-files.md), [Sessions and CSRF](docs/sessions-and-csrf.md) |
+| Real time | [WebSockets and server-sent events](docs/websockets-and-sse.md) |
+| APIs | [OpenAPI](docs/openapi.md), [Dependencies and auth](docs/dependencies-and-auth.md), [Databases](docs/database.md) |
+| Around requests | [Middleware](docs/middleware.md), [Security](docs/security.md), [Lifecycle and background tasks](docs/lifecycle-and-background.md), [Observability](docs/observability.md), [Writing a plugin](docs/plugins.md) |
+| Concurrency | [Every core](docs/every-core.md), [Shared state with `Store`](docs/state.md) |
+| Running it | [Configuration](docs/configuration.md), [Testing](docs/testing.md), [Deployment](docs/deployment.md) |
+| Reference | [Modules](docs/modules.md), [Benchmarks](docs/benchmarks.md), [Changelog](CHANGELOG.md) |
 
 ## Examples
 
@@ -1610,67 +227,49 @@ iyi run examples/json_api.iyi -- -p 8080
 
 | Example | Shows |
 |---|---|
-| `hello.iyi` | The smallest application |
-| `json_api.iyi` | CRUD over an in-memory store with `env.json`, `env.params.json`, status codes and `404` via `halt` |
-| `typed_json.iyi` | JSON bodies read into a type with `json_as`, `Validate` rules, `400`/`415`/`422` answers, and responses written from `derive serializable` types |
-| `forms_and_uploads.iyi` | Form fields, multipart uploads with limits, and `_method` override |
-| `templates.iyi` | Views in `examples/views/` with a layout, `content_for`, a partial and autoescape |
-| `routers.iyi` | `Router`, `mount`, `namespace`, router filters and error pages |
-| `middleware.iyi` | A custom `Handler` with `only` and `exclude`, CORS, gzip and static files from `examples/public/` |
-| `streaming_and_sse.iyi` | `flush`, chunked responses and server-sent events |
-| `websocket_chat.iyi` | A chat room over `ws`, broadcasting to every member |
-| `cookies_and_context.iyi` | Cookies, redirects and `env.set` / `env.get`, with a value of the application's own type |
-| `sessions_and_csrf.iyi` | Sign-in and sign-out with an encrypted cookie session, and forms guarded by `CSRFHandler` |
-| `security.iyi` | Basic auth on `/admin`, security headers, request ids and a per-address rate limit |
-| `testing.iyi` | Routes in their own module, tested in-process by `testing_test.iyi` |
+| [`hello.iyi`](examples/hello.iyi) | The smallest application |
+| [`json_api.iyi`](examples/json_api.iyi) | A CRUD API over an in-memory store, every route typed, with its OpenAPI document |
+| [`typed_json.iyi`](examples/typed_json.iyi) | `body:`, `query:` and `path:` with `Validate` rules and `response:` types, the `400`/`415`/`422` answers, and notes kept in a `HashStore` |
+| [`openapi_auth.iyi`](examples/openapi_auth.iyi) | A notes API with users and roles: OAuth2's password flow issuing JWTs, user and admin providers, an API-key client, and the docs page whose "Authorize" signs in |
+| [`forms_and_uploads.iyi`](examples/forms_and_uploads.iyi) | Form fields, multipart uploads with limits, and `_method` override |
+| [`templates.iyi`](examples/templates.iyi) | Views in `examples/views/` with a layout, `content_for`, a partial and autoescape |
+| [`routers.iyi`](examples/routers.iyi) | `Router`, `mount`, `namespace`, router filters and error pages |
+| [`middleware.iyi`](examples/middleware.iyi) | A custom `Handler` with `only` and `exclude`, CORS, gzip and static files from `examples/public/` |
+| [`streaming_and_sse.iyi`](examples/streaming_and_sse.iyi) | `flush`, chunked responses and server-sent events |
+| [`websocket_chat.iyi`](examples/websocket_chat.iyi) | A chat room over `ws`, broadcasting to every member |
+| [`cookies_and_context.iyi`](examples/cookies_and_context.iyi) | Cookies, redirects and `env.set` / `env.get`, with a value of the application's own type |
+| [`sessions_and_csrf.iyi`](examples/sessions_and_csrf.iyi) | Sign-in and sign-out with an encrypted cookie session, and forms guarded by `CSRFHandler` |
+| [`security.iyi`](examples/security.iyi) | Basic auth on `/admin`, security headers, request ids and a per-address rate limit |
+| [`observability.iyi`](examples/observability.iyi) | A `HashStore`, Prometheus metrics, a trace span per request sent to a collector, a background task and start/stop hooks |
+| [`testing.iyi`](examples/testing.iyi) | Routes in their own module, tested in-process by `testing_test.iyi` |
+| [`postgres/`](examples/postgres/app.iyi) | A JSON API on PostgreSQL with a connection pool and migrations, a project of its own ([Databases](docs/database.md)) |
 
 Each file's opening comment lists `curl` commands to try. `iyi test examples`
 runs the example test.
 
 ## Benchmarks
 
-`bench/` measures the framework itself, with nothing but iyi:
+`bench/compare/` serves the same four endpoints from iyi-web, FastAPI,
+Express, Kemal and Go's `net/http` on one machine, the fourth a PostgreSQL
+query through a connection pool. On a 12-core Windows virtual machine,
+iyi-web answered 71,000-78,000 requests a second on the plain endpoints,
+ahead of Go's `net/http` (65,000-74,000), FastAPI (27,000-33,000) and Kemal
+(about 11,000); on the database query iyi-web and Go were even (37,600 and
+38,000), FastAPI 14,300, Kemal 10,800. [Benchmarks](docs/benchmarks.md) has
+the tables, the setup and what the numbers do not say: an hour earlier the
+same machine gave every framework about a quarter more.
 
-```sh
-bash bench/run.sh              # build with --release, run both parts
-bash bench/run.sh --repeat 3   # three runs of each, for compare's medians
-bash bench/run.sh --help       # durations, connections, port, a filter
-```
-
-- `bench/micro.iyi` times the paths every request takes with `std/benchmark`:
-  route lookup in a tree of about a hundred static, parameter and wildcard
-  routes (`radix.*`, `router.*`), reading a request head off the wire
-  (`intake.*`), query, form and JSON parameters (`params.*`), the header table
-  (`headers.*`), and a whole in-process dispatch through `RouteHandler`
-  (`dispatch.*`) and through `handler_chain` (`chain.*`). Each case is checked
-  once before it is timed, so one that stops doing its job aborts rather than
-  reporting a fast nothing.
-- `bench/load.iyi` is a load generator for Linux and Windows alike (no `wrk`):
-  N tasks, one keep-alive connection each, request `bench/server.iyi`'s hello,
-  JSON and parameter routes for a fixed time and report req/s, p50 and p99
-  latency, and errors. The client runs on one thread, as the server does, so
-  the numbers compare two builds on one machine; they are not a ceiling.
-- `bench/run.sh` writes every result to `bench/results.json` (ignored by git):
-  one object per microbenchmark (`ns_per_op`, `ops_per_sec`, `rsd_pct`) and
-  per end-to-end target (`rps`, `p50_us`, `p99_us`, `errors`).
-- `bench/compare.iyi` reads two result files (or comma-separated lists of
-  repeated runs), compares each side's median, and prints a Markdown table; it
-  exits 1 when a microbenchmark is more than `--threshold` percent (30) slower
-  and every head run is slower than every base run.
-
-On a pull request CI runs the pull request's benchmarks against the base
-branch and against the pull request, in three alternating rounds on one runner
-at 2 s per case, puts the comparison in the job summary, and fails on such a
-regression. End-to-end changes are shown, not gated: loopback timings move by
-more than that between identical runs. A push to master keeps its results as
-the `bench-results` artifact.
+`bench/run.sh` times iyi-web against itself, and CI compares every pull
+request with its base branch so a slower hot path fails the build.
 
 ## Development
 
 ```sh
 iyi test iyi_web
+iyi test examples
 iyi run examples/hello.iyi
 bash bench/run.sh
+mkdocs build --strict          # the docs site; pip install mkdocs-material
 ```
 
 `iyi_web/refused_test.iyi` checks what the compiler says to the programs

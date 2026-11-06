@@ -1,0 +1,518 @@
+# What `iyi-web new` writes: the files of a new application, as data, and
+# the one function that puts them on disk.
+#
+# The files are built in memory first (`scaffold_files`) and written second
+# (`write_project`), so a test can read every file a kind produces without
+# touching the disk, and so the writer can refuse a directory that already
+# holds something before it has written a single file into it: a half
+# scaffold over somebody's work is worse than none.
+#
+# Every kind has the same skeleton, the one docs/testing.md
+# describes: the routes in their own module, as a function that builds a
+# `Router`, which `app.iyi` mounts and serves and `app_test.iyi` dispatches
+# to in-process. `iyi test` in the new directory runs the test with no port
+# opened, and `iyi-web dev` serves `app.iyi`.
+#
+#   Basic  two text routes, one with a path parameter
+#   Api    a JSON CRUD over an in-memory store, as typed routes: a
+#          `path: Int32` capture, a validated body (`body:` + `Validate`),
+#          `derive serializable` responses and a JSON 404, with the notes
+#          in a `HashStore` so it serves on every core
+#   Full   HTML pages from views/ inside a layout, and public/ served as
+#          static files
+module cmd/scaffold
+
+import std/dir::{Dir}
+import std/file::{File}
+import std/text
+import cmd/usage::{UsageError}
+
+# The iyi-web release a new project requires. The newest published tag:
+# the line has to name a version `iyi get` can fetch, and `iyi get -u` in
+# the project moves it on from there.
+pub WEB_VERSION = "0.5.1"
+
+# The repository a new project requires, under the short name `web`.
+pub WEB_MODULE = "github.com/sdogruyol/iyi-web"
+
+# Which application `new` writes: `--api`, `--full`, or neither.
+pub enum Kind
+  Basic
+  Api
+  Full
+end
+
+# One file of a new project: its path inside the project, `/`-separated,
+# and its whole text.
+pub struct ScaffoldFile
+  getter path : String
+  getter content : String
+
+  def initialize(@path : String, @content : String)
+  end
+end
+
+# A project `new` could not write, and why, in words for the terminal.
+pub class ScaffoldError
+  @message : String
+
+  def initialize(@message : String)
+  end
+end
+
+impl Error for ScaffoldError
+  def message : String
+    @message
+  end
+end
+
+# The project name a directory argument gives, or nil when it would not be
+# a module path: a lower-case letter, then lower-case letters, digits, `_`
+# and `-`. `iyi init` takes the same names; `my-app` is fine, `My App`
+# is not.
+pub def project_name?(directory : String) : String?
+  name = File.basename(directory.rstrip("/").rstrip("\\"))
+  return nil if name.empty?
+  first = name[0]
+  return nil unless first >= 'a' && first <= 'z'
+  name.each_char do |char|
+    ok = (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '_' || char == '-'
+    return nil unless ok
+  end
+  name
+end
+
+# What `iyi-web new` was asked for, once its arguments made sense.
+pub class NewOptions
+  getter directory : String
+  getter name : String
+  getter kind : Kind
+  # An absolute path with `/` separators, as the `replace` line wants it.
+  getter web_path : String?
+
+  def initialize(@directory : String, @name : String, @kind : Kind, @web_path : String?)
+  end
+end
+
+# Reads `new`'s arguments: one directory, `--api` or `--full` (the last
+# one given wins), `--web-path DIR`. The directory's name has to be a
+# project name, and a `--web-path` has to hold iyi-web, so a typo is
+# refused before anything is written rather than at the project's first
+# build.
+pub def parse_new_args(args : Array(String)) : NewOptions | UsageError
+  kind = Kind::Basic
+  web_path = nil.as(String?)
+  directory = nil.as(String?)
+  index = 0
+  while index < args.size
+    arg = args[index]
+    case arg
+    when "--api"  then kind = Kind::Api
+    when "--full" then kind = Kind::Full
+    when "--web-path"
+      index += 1
+      return UsageError.new("--web-path needs a directory") if index >= args.size
+      web_path = File.expand_path(args[index]).gsub("\\", "/")
+    else
+      return UsageError.new("unknown option " + arg + " for new") if arg.starts_with?("-")
+      return UsageError.new("new takes one directory, not " + arg) if directory
+      directory = arg
+    end
+    index += 1
+  end
+  dir = directory
+  return UsageError.new("new needs a directory: iyi-web new myapp") unless dir
+  name = project_name?(dir)
+  return UsageError.new(File.basename(dir) + " is not a project name: a lower-case letter, then lower-case letters, digits, _ and -") unless name
+  if path = web_path
+    return UsageError.new(path + " does not hold iyi-web (no iyi_web/dsl.iyi)") unless File.file?(File.join(path, "iyi_web", "dsl.iyi"))
+  end
+  NewOptions.new(dir, name, kind, web_path)
+end
+
+# Every file of a new *kind* project called *name*. With *web_path* the
+# manifest also replaces iyi-web with that checkout (`replace ... => DIR`),
+# so the project builds against a local iyi-web instead of the release:
+# for working on iyi-web itself, and for testing a scaffold before its
+# version is tagged.
+pub def scaffold_files(name : String, kind : Kind, web_path : String? = nil) : Array(ScaffoldFile)
+  files = [] of ScaffoldFile
+  files << ScaffoldFile.new("iyi.mod", manifest(name, web_path))
+  files << ScaffoldFile.new(".gitignore", GITIGNORE)
+  files << ScaffoldFile.new("README.md", readme(name, kind))
+  case kind
+  in Kind::Basic
+    files << ScaffoldFile.new("app.iyi", entry(name, "home", "home_routes", ""))
+    files << ScaffoldFile.new("routes/home.iyi", basic_routes(name))
+    files << ScaffoldFile.new("app_test.iyi", basic_test(name))
+  in Kind::Api
+    files << ScaffoldFile.new("app.iyi", entry(name, "notes", "note_routes", ""))
+    files << ScaffoldFile.new("routes/notes.iyi", API_ROUTES)
+    files << ScaffoldFile.new("app_test.iyi", API_TEST)
+  in Kind::Full
+    files << ScaffoldFile.new("app.iyi", entry(name, "pages", "page_routes", FULL_SETTINGS))
+    files << ScaffoldFile.new("routes/pages.iyi", full_routes(name))
+    files << ScaffoldFile.new("app_test.iyi", full_test(name))
+    files << ScaffoldFile.new("views/layout.eiy", FULL_LAYOUT)
+    files << ScaffoldFile.new("views/index.eiy", FULL_INDEX)
+    files << ScaffoldFile.new("views/about.eiy", FULL_ABOUT)
+    files << ScaffoldFile.new("public/css/app.css", FULL_CSS)
+    files << ScaffoldFile.new("public/robots.txt", "User-agent: *\nAllow: /\n")
+  end
+  files
+end
+
+# Writes *files* under *directory*, creating it. A directory that exists
+# and holds anything is refused before a file is written.
+pub def write_project(directory : String, files : Array(ScaffoldFile)) : Nil | ScaffoldError
+  if File.exists?(directory)
+    return ScaffoldError.new(directory + " exists and is not a directory") unless File.directory?(directory)
+    return ScaffoldError.new(directory + " already exists and is not empty") unless Dir.empty?(directory)
+  end
+  files.each do |file|
+    path = File.join(directory, file.path)
+    Dir.mkdir_p(File.dirname(path))
+    File.write(path, file.content)
+  end
+  nil
+end
+
+private def manifest(name : String, web_path : String?) : String
+  text = "# The project's dependencies. `iyi get -u` moves iyi-web to its latest\n" \
+         "# release; `web/...` in an import means iyi-web's modules.\n" \
+         "module " + name + "\n\n" \
+         "require " + WEB_MODULE + " v" + WEB_VERSION + " as web\n"
+  if path = web_path
+    path = %("#{path}") if path.includes?(" ")
+    text = text + "\n# Built from a local checkout instead of the release (iyi-web new --web-path).\n" \
+                  "replace " + WEB_MODULE + " => " + path + "\n"
+  end
+  text
+end
+
+private def entry(name : String, routes : String, function : String, settings : String) : String
+  <<-IYI
+  # #{name}: an iyi-web application. The routes are in routes/#{routes}.iyi;
+  # app_test.iyi tests them without opening a port.
+  #
+  #   iyi run app.iyi            serves http://localhost:3000 (-p to change)
+  #   iyi-web dev                rebuilds and restarts on every save
+  #   iyi test                   runs app_test.iyi
+  #   iyi build --release app.iyi -o app
+  module app
+
+  import web/iyi_web/dsl::*
+  import routes/#{routes}::*
+  #{settings}
+  mount #{function}
+
+  run
+
+  IYI
+end
+
+private def basic_routes(name : String) : String
+  <<-IYI
+  # The application's routes, as a function that builds a router: app.iyi
+  # mounts it and serves it, and app_test.iyi sends it requests in-process.
+  # Each call builds a fresh router, so every test starts from a clean
+  # application.
+  module routes/home
+
+  import web/iyi_web/router::{Router}
+
+  pub def home_routes : Router
+    router = Router.new
+
+    router.get "/" do |env|
+      "Hello from #{name}!"
+    end
+
+    # `:name` matches one path segment.
+    router.get "/hello/:name" do |env|
+      "Hello, " + env.params.url["name"] + "!"
+    end
+
+    router
+  end
+
+  IYI
+end
+
+private def basic_test(name : String) : String
+  <<-IYI
+  # `iyi test` runs every *_test.iyi: exit 0 passes. The harness sends
+  # requests straight to the router, so no port is opened.
+  module app_test
+
+  import web/iyi_web/router::{RouteHandler}
+  import web/iyi_web/harness::*
+  import routes/home::*
+
+  app = RouteHandler.new(home_routes)
+
+  home = dispatch(app, "GET", "/").response
+  assert home.status_code == 200
+  assert home.body == "Hello from #{name}!"
+
+  assert dispatch(app, "GET", "/hello/ada").response.body == "Hello, ada!"
+
+  # No route, 404; a known path with another method, 405.
+  assert dispatch(app, "GET", "/nowhere").response.status_code == 404
+  assert dispatch(app, "POST", "/").response.status_code == 405
+
+  IYI
+end
+
+API_ROUTES = <<-'IYI'
+  # A JSON API over an in-memory store, as typed routes: each route says
+  # what it reads and what it answers, and iyi-web reads it before the
+  # block runs. A capture that is not a number, or a body that does not
+  # parse, has the wrong types or breaks a `Validate` rule, is answered
+  # 400, 415 or 422 with the fields that failed.
+  module routes/notes
+
+  import std/json::{serializable}
+  import web/iyi_web/router::{Router}
+  import web/iyi_web/failure::{StatusError}
+  import web/iyi_web/store::{HashStore}
+  import web/iyi_web/validation::{Validate, Validator}
+
+  # What a client sends. A field with a default may be left out.
+  struct NoteInput
+    getter title : String
+    getter done : Bool = false
+    derive serializable
+  end
+
+  impl Validate for NoteInput
+    def validate(v : Validator) : Nil
+      v.required("title", title)
+      v.length("title", title, max: 80)
+    end
+  end
+
+  # What the API answers with: `derive serializable` lets a route answer
+  # it as JSON. A struct of plain values, so it may cross between workers.
+  pub struct Note
+    getter id : Int32
+    getter title : String
+    getter done : Bool
+    derive serializable
+
+    def initialize(@id : Int32, @title : String, @done : Bool)
+    end
+  end
+
+  # Every call builds a router with its own empty store. The routes run on
+  # every core at once, so the notes are in a `HashStore` (a table behind
+  # a lock) and the last id is an `Atomic`.
+  pub def note_routes : Router
+    notes = HashStore(Int32, Note).new
+    last_id = Atomic(Int32).new(0)
+    router = Router.new
+
+    router.get "/notes", response: Array(Note) do |env|
+      notes.values
+    end
+
+    # `path: Int32` reads the `:id` capture as a number: `/notes/abc` is
+    # answered 422 before the block runs.
+    router.get "/notes/:id", path: Int32, response: Note do |env, id|
+      notes[id]? || StatusError.new(404)
+    end
+
+    # `body: NoteInput` reads the JSON body and runs its rules; the block
+    # only ever sees a valid one.
+    router.post "/notes", body: NoteInput, response: Note, status: 201 do |env, input|
+      note = Note.new(last_id.add(1) + 1, input.title.strip, input.done)
+      notes.update { |all| all[note.id] = note; nil }
+      note
+    end
+
+    router.delete "/notes/:id", path: Int32, status: 204 do |env, id|
+      notes.update { |all| all.delete(id) } ? nil : StatusError.new(404)
+    end
+
+    router.error 404 do |env|
+      env.json({"error" => "not found"})
+    end
+
+    router
+  end
+
+  IYI
+
+API_TEST = <<-'IYI'
+  # `iyi test` runs every *_test.iyi: exit 0 passes. The harness sends
+  # requests straight to the router, so no port is opened.
+  module app_test
+
+  import web/iyi_web/router::{RouteHandler}
+  import web/iyi_web/harness::*
+  import routes/notes::*
+
+  JSON_TYPE = "application/json"
+
+  app = RouteHandler.new(note_routes)
+
+  # An empty store is still a JSON array.
+  assert dispatch(app, "GET", "/notes").response.body == "[]"
+
+  created = dispatch(app, http_request("POST", "/notes", body: %({"title":" Buy milk "}), content_type: JSON_TYPE)).response
+  assert created.status_code == 201
+  assert created.body == %({"id":1,"title":"Buy milk","done":false})
+  assert dispatch(app, "GET", "/notes/1").response.body == created.body
+
+  # A blank title breaks a rule (422); a title that is not a string is the
+  # wrong type (422); a body that is not JSON does not parse (400).
+  blank = dispatch(app, http_request("POST", "/notes", body: %({"title":"  "}), content_type: JSON_TYPE)).response
+  assert blank.status_code == 422
+  assert blank.body.includes?("title")
+  assert dispatch(app, http_request("POST", "/notes", body: %({"title":7}), content_type: JSON_TYPE)).response.status_code == 422
+  assert dispatch(app, http_request("POST", "/notes", body: %({"title":), content_type: JSON_TYPE)).response.status_code == 400
+  assert dispatch(app, "GET", "/notes").response.body == "[" + created.body + "]"
+
+  # Deleting answers 204 once, then 404 as JSON.
+  assert dispatch(app, "DELETE", "/notes/1").response.status_code == 204
+  missing = dispatch(app, "DELETE", "/notes/1").response
+  assert missing.status_code == 404
+  assert missing.body == %({"error":"not found"})
+  # A capture that is not a number is a bad parameter, not a missing note.
+  assert dispatch(app, "GET", "/notes/abc").response.status_code == 422
+
+  IYI
+
+FULL_SETTINGS = <<-'IYI'
+
+  # Files under public/ are served as they are, before any route:
+  # /css/app.css is public/css/app.css. The path is relative to the
+  # directory the program runs in.
+  public_folder "public"
+
+  IYI
+
+private def full_routes(name : String) : String
+  <<-IYI
+  # The application's pages. Views are compiled into the program: `render`
+  # reads them when the program is built, relative to this file, and the
+  # view sees the locals where `render` is written (`title` below).
+  # `<%= ... %>` writes a value into the page; anything a visitor sent must
+  # be escaped on its way there.
+  module routes/pages
+
+  import web/iyi_web/dsl::*
+  import web/iyi_web/router::{Router}
+
+  pub def page_routes : Router
+    router = Router.new
+
+    router.get "/" do |env|
+      title = "#{name}"
+      render "../views/index.eiy", "../views/layout.eiy"
+    end
+
+    router.get "/about" do |env|
+      title = "About"
+      render "../views/about.eiy", "../views/layout.eiy"
+    end
+
+    router
+  end
+
+  IYI
+end
+
+private def full_test(name : String) : String
+  <<-IYI
+  # `iyi test` runs every *_test.iyi: exit 0 passes. The harness sends
+  # requests straight to the router, so no port is opened.
+  module app_test
+
+  import web/iyi_web/router::{RouteHandler}
+  import web/iyi_web/harness::*
+  import routes/pages::*
+
+  app = RouteHandler.new(page_routes)
+
+  home = dispatch(app, "GET", "/").response
+  assert home.status_code == 200
+  assert home.content_type.starts_with?("text/html")
+  # The view inside the layout, with the layout's stylesheet link.
+  assert home.body.includes?("<h1>#{name}</h1>")
+  assert home.body.includes?(%(<link rel="stylesheet" href="/css/app.css">))
+
+  about = dispatch(app, "GET", "/about").response
+  assert about.body.includes?("<title>About</title>")
+
+  assert dispatch(app, "GET", "/nowhere").response.status_code == 404
+
+  IYI
+end
+
+FULL_LAYOUT = <<-'EIY'
+  <!DOCTYPE html>
+  <html lang="en">
+  <head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><%= title %></title>
+  <link rel="stylesheet" href="/css/app.css">
+  </head>
+  <body>
+  <nav><a href="/">Home</a> <a href="/about">About</a></nav>
+  <main>
+  <%= content %></main>
+  </body>
+  </html>
+
+  EIY
+
+FULL_INDEX = <<-'EIY'
+  <h1><%= title %></h1>
+  <p>Edit <code>views/index.eiy</code> and save: <code>iyi-web dev</code> rebuilds the program and restarts it.</p>
+
+  EIY
+
+FULL_ABOUT = <<-'EIY'
+  <h1><%= title %></h1>
+  <p>Built with <a href="https://github.com/sdogruyol/iyi-web">iyi-web</a>.</p>
+
+  EIY
+
+FULL_CSS = <<-'CSS'
+  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  nav a { margin-right: 1rem; }
+
+  CSS
+
+GITIGNORE = <<-'TEXT'
+  # Build products
+  /app
+  /app.exe
+  /app.pdb
+  *.iyimod
+  # iyi-web dev's builds
+  /.iyi-web/
+
+  TEXT
+
+private def readme(name : String, kind : Kind) : String
+  layout = case kind
+           in Kind::Basic then "routes/home.iyi    the routes\n"
+           in Kind::Api   then "routes/notes.iyi   the JSON API and its body type\n"
+           in Kind::Full  then "routes/pages.iyi   the pages\nviews/             templates, compiled into the program\npublic/            static files, served from disk\n"
+           end
+  "# " + name + "\n\n" \
+  "An [iyi-web](https://github.com/sdogruyol/iyi-web) application.\n\n" \
+  "```sh\n" \
+  "iyi-web dev           # serve on http://localhost:3000, rebuild on every save\n" \
+  "iyi test              # run app_test.iyi\n" \
+  "iyi build --release app.iyi -o app\n" \
+  "```\n\n" \
+  "```\n" \
+  "app.iyi            the program: mounts the routes and serves them\n" +
+    layout +
+    "app_test.iyi       in-process tests, no port opened\n" \
+    "```\n"
+end

@@ -1,0 +1,223 @@
+# `iyi-web dev`: build the application, run it, and on every saved change
+# build it again and swap the running program for the new one.
+#
+# The loop, as a person sees it:
+#
+#   1. `iyi build ENTRY` into .iyi-web/dev/ beside the entry, then start the
+#      program with the arguments given after `--`, in the entry's
+#      directory, on this terminal.
+#   2. Every `--interval` milliseconds, walk the project (cmd/watch.iyi). A
+#      changed source (*.iyi, *.eiy, *.ecr, iyi.mod) starts a build.
+#   3. A build that succeeds stops the running program and starts the new
+#      one. A build that fails prints the compiler's message and leaves the
+#      running program alone: the last good version keeps answering while
+#      the mistake is fixed.
+#   4. A change under public/ is reported and nothing else happens: static
+#      files are read from disk on every request.
+#   5. Ctrl-C (INT) or TERM stops the program and then dev itself.
+#
+# Builds alternate between two executables, app-0 and app-1. The new one is
+# written while the old one runs - Windows will not overwrite or delete an
+# executable that is running - and the slot a build writes is always the
+# one whose program has already been stopped.
+#
+# Stopping the program is `ChildProcess#terminate`: SIGTERM on Linux and
+# darwin, which iyi-web's `run` answers by draining its requests; on
+# Windows, which has no request to stop a program, the program ends at
+# once. Ctrl-C in a console reaches the program too (it shares the
+# terminal), so on every platform the program begins its own graceful stop
+# before dev asks.
+module cmd/dev
+
+import std/dir::{Dir}
+import std/file::{File}
+import std/process::{Process, ChildProcess, ProcessError, ProcessResult, ProcessStatus}
+import std/signal::{Signal}
+import std/text
+import std/time::{Time}
+import cmd/watch::{Snapshot, snapshot}
+import cmd/usage::{UsageError}
+
+# What `iyi-web dev` was asked to do.
+pub class DevOptions
+  # The program to build and run: app.iyi in the current directory unless
+  # named.
+  property entry : String = "app.iyi"
+  # Handed to the program, as written after `--`.
+  property app_args : Array(String) = [] of String
+  # Directories watched besides the entry's own, a local iyi-web checkout
+  # say.
+  property watch : Array(String) = [] of String
+  # How long to wait between two walks of the project.
+  property interval_ms : Int32 = 500
+  # The compiler: `IYI`, or `iyi` on the PATH.
+  property iyi : String = ENV["IYI"]? || "iyi"
+
+  def initialize
+  end
+end
+
+# Reads `dev`'s arguments: an optional entry, `--watch DIR` (repeatable),
+# `--interval MS`, and everything after the first `--` for the program,
+# untouched: `iyi-web dev -- --watch x` hands `--watch x` to the program.
+pub def parse_dev_args(args : Array(String)) : DevOptions | UsageError
+  options = DevOptions.new
+  entry = nil.as(String?)
+  index = 0
+  while index < args.size
+    arg = args[index]
+    if arg == "--"
+      options.app_args = args[index + 1, args.size - index - 1]
+      break
+    elsif arg == "--watch"
+      index += 1
+      return UsageError.new("--watch needs a directory") if index >= args.size
+      options.watch << args[index]
+    elsif arg == "--interval"
+      index += 1
+      ms = index < args.size ? args[index].to_i? : nil
+      return UsageError.new("--interval needs a number of milliseconds, at least 50") unless ms && ms >= 50
+      options.interval_ms = ms
+    elsif arg.starts_with?("-")
+      return UsageError.new("unknown option " + arg + " for dev (arguments for the program go after --)")
+    elsif entry
+      return UsageError.new("dev takes one entry file, not " + arg)
+    else
+      entry = arg
+      options.entry = arg
+    end
+    index += 1
+  end
+  options
+end
+
+# The running program and the build that started it, between iterations
+# of the loop and the task that waits for Ctrl-C.
+class DevState
+  property child : ChildProcess? = nil
+  property slot : Int32 = 0
+  property stopping : Bool = false
+
+  def initialize
+  end
+end
+
+# Runs the loop until INT or TERM. Answers the exit code for `iyi-web`: 0
+# after a stop by signal, 1 when the entry is not there.
+pub def dev(options : DevOptions) : Int32
+  entry = File.expand_path(options.entry)
+  unless File.file?(entry)
+    STDERR.puts "iyi-web dev: " + options.entry + " not found (name the program to run: iyi-web dev app.iyi)"
+    return 1
+  end
+  root = File.dirname(entry)
+  roots = [root] + options.watch.map { |dir| File.expand_path(dir) }
+  build_dir = File.join(root, ".iyi-web", "dev")
+  Dir.mkdir_p(build_dir)
+  state = DevState.new
+
+  group do |g|
+    g.spawn do
+      Signal.wait(Signal::INT, Signal::TERM)
+      state.stopping = true
+      say "stopping"
+      stop_child(state)
+      g.cancel_children
+      0
+    end
+    g.spawn do
+      watch_loop(options, entry, root, roots, build_dir, state)
+      0
+    end
+  end
+  0
+end
+
+private def watch_loop(options : DevOptions, entry : String, root : String, roots : Array(String), build_dir : String, state : DevState) : Nil
+  seen = snapshot(roots, Time.utc.to_unix)
+  say "watching " + roots.join(", ") + " every " + options.interval_ms.to_s + " ms"
+  rebuild(options, entry, root, build_dir, state)
+  while true
+    return if sleep(options.interval_ms).is_a?(Cancelled)
+    report_exit(state)
+    now = snapshot(roots, Time.utc.to_unix, seen)
+    changed = now.changes(seen)
+    next if changed.empty?
+    # An editor's save can be several writes: let them land, then take the
+    # walk the next comparison starts from.
+    return if sleep(100).is_a?(Cancelled)
+    rebuild_needed = now.rebuild?(changed, seen)
+    seen = snapshot(roots, Time.utc.to_unix, now)
+    changed.each { |path| say "changed " + relative(path, root) }
+    if rebuild_needed
+      rebuild(options, entry, root, build_dir, state)
+    else
+      say "public files are served from disk: nothing to rebuild"
+    end
+  end
+end
+
+# Builds the next slot; on success swaps the running program for it.
+private def rebuild(options : DevOptions, entry : String, root : String, build_dir : String, state : DevState) : Nil
+  slot = state.child ? 1 - state.slot : state.slot
+  output = File.join(build_dir, "app-" + slot.to_s)
+  say "building " + relative(entry, root)
+  started = Time.monotonic
+  built = Process.run(options.iyi, ["build", entry, "-o", output], chdir: root, capture: false)
+  case built
+  in Cancelled
+    return
+  in ProcessError
+    say "could not run " + options.iyi + ": " + built.reason
+    return
+  in ProcessResult
+    unless built.success?
+      say state.child ? "build failed; the previous build keeps running" : "build failed; waiting for a change"
+      return
+    end
+  end
+  return if state.stopping
+  say "built in " + (Time.monotonic - started).total_milliseconds.to_i.to_s + " ms"
+  stop_child(state)
+  executable = {{ flag?(:win32) }} ? output + ".exe" : output
+  case child = Process.spawn(executable, options.app_args, chdir: root)
+  in ProcessError
+    say "could not start " + executable + ": " + child.reason
+  in ChildProcess
+    state.child = child
+    state.slot = slot
+    say "started " + relative(entry, root) + " (pid " + child.pid.to_s + ")"
+  end
+end
+
+# Stops the running program, if any, and waits for it to end.
+private def stop_child(state : DevState) : Nil
+  child = state.child
+  return unless child
+  state.child = nil
+  return if child.ended?
+  child.terminate
+  child.wait
+end
+
+# A program that ended on its own - a panic, a port in use - is reported
+# once, and the next good build starts it again.
+private def report_exit(state : DevState) : Nil
+  child = state.child
+  return unless child
+  return unless child.ended?
+  if status = child.status
+    say "the program exited with code " + status.exit_code.to_s + "; waiting for a change"
+  end
+  state.child = nil
+end
+
+private def relative(path : String, root : String) : String
+  prefix = root + File::SEPARATOR_STRING
+  path.starts_with?(prefix) ? path[prefix.size, path.size - prefix.size] : path
+end
+
+private def say(message : String) : Nil
+  STDOUT.puts "[dev] " + message
+  STDOUT.flush
+end

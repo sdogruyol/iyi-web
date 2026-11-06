@@ -1,0 +1,447 @@
+# Prometheus metrics: what the application did, as numbers a scraper
+# reads from `/metrics` in the text exposition format (version 0.0.4).
+#
+#     use MetricsHandler.new          # counts every request and serves /metrics
+#
+#     JOBS = METRICS.counter("jobs_total", "Jobs run, by queue.", ["queue"])
+#     JOBS.inc(["email"])
+#
+# `MetricsHandler` keeps three families for HTTP:
+#
+# - `http_requests_total{method,route,status}`, a counter;
+# - `http_request_duration_seconds{method,route}`, a histogram over
+#   `DEFAULT_BUCKETS`, Prometheus' own defaults (5 ms to 10 s);
+# - `http_requests_in_flight`, a gauge of the requests being handled now.
+#
+# **The route label is the pattern, never the path.** `/users/42` and
+# `/users/43` are both `route="/users/:id"`: a label takes one series per
+# distinct value, and the raw path would give a scraper one per user. A
+# request no route matched - a 404, a static file, one a handler answered
+# itself - is `route="unrouted"`.
+#
+# **Every worker at once.** A registry and each family in it are `Share`:
+# names and label names are fixed when a family is made, and the series
+# are behind the family's own `Mutex`, so two requests counting into
+# different families never wait for each other, and none waits for the
+# page being written except the family being read.
+#
+# Names are checked when a family is made - a metric name is
+# `[a-zA-Z_:][a-zA-Z0-9_:]*`, a label name `[a-zA-Z_][a-zA-Z0-9_]*` not
+# starting `__`, and a histogram takes no `le` label - and registering a
+# name twice answers the family already there when the kind and labels
+# agree, and panics when they do not. Giving a family the wrong number of
+# label values panics: that is a bug where the metric is used.
+module iyi_web/metrics
+
+import std/float
+import std/list::{List}
+import std/mutex::{Mutex}
+import std/shared_proc::{SharedProc}
+import std/time::{Span, Time}
+import iyi_web/context::{Context}
+import iyi_web/handler::{Handler}
+
+# Prometheus' default histogram buckets, in seconds: 5 ms to 10 s.
+pub DEFAULT_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+
+# The `Content-Type` of the text exposition format.
+pub EXPOSITION_TYPE = "text/plain; version=0.0.4; charset=utf-8"
+
+# One series: a counter's or a gauge's value, or a histogram's per-bucket
+# counts (not yet cumulative), sum and count.
+class Series
+  getter labels : Array(String)
+  property value : Float64
+  getter buckets : Array(Int64)
+  property sum : Float64
+  property count : Int64
+
+  def initialize(@labels : Array(String), bucket_count : Int32)
+    @value = 0.0
+    @buckets = Array(Int64).new(bucket_count, 0_i64)
+    @sum = 0.0
+    @count = 0_i64
+  end
+end
+
+# A metric family: its name, help, kind and label names, fixed when it is
+# made, and its series behind a lock of its own.
+pub class Family
+  @name : String
+  @help : String
+  @kind : String
+  @label_names : List(String)
+  @bounds : List(Float64)
+  @series : Mutex(Hash(String, Series))
+  # A gauge read when the page is written, instead of series.
+  @reader : SharedProc(Nil, Float64)?
+
+  def initialize(@name : String, @help : String, @kind : String, label_names : Array(String), bounds : Array(Float64), @reader : SharedProc(Nil, Float64)? = nil)
+    @label_names = List.new(label_names)
+    @bounds = List.new(bounds)
+    @series = Mutex.new { {} of String => Series }
+    if label_names.empty? && reader.nil?
+      # A family without labels has its one series from the start, so the
+      # page shows 0 before anything has been counted.
+      count = bounds.size
+      @series.lock { |all| all[""] = Series.new([] of String, count) }
+    end
+  end
+
+  pub def name : String
+    @name
+  end
+
+  pub def kind : String
+    @kind
+  end
+
+  pub def label_names : Array(String)
+    @label_names.to_a
+  end
+
+  pub def bounds : Array(Float64)
+    @bounds.to_a
+  end
+
+  # Adds *amount* to the series for *labels*: a counter's `inc`, a
+  # gauge's `inc` and `dec`.
+  pub def add(labels : Array(String), amount : Float64) : Nil
+    key = series_key(labels)
+    values = List.new(labels)
+    count = @bounds.size
+    locked(@series.lock { |all| (all[key] ||= Series.new(values.to_a, count)).value += amount })
+  end
+
+  pub def set(labels : Array(String), value : Float64) : Nil
+    key = series_key(labels)
+    values = List.new(labels)
+    count = @bounds.size
+    locked(@series.lock { |all| (all[key] ||= Series.new(values.to_a, count)).value = value })
+  end
+
+  # One observation into the series for *labels*: the first bucket whose
+  # bound is at least *value*, or none past the last (the `+Inf` bucket
+  # counts it through `count`).
+  pub def observe(labels : Array(String), value : Float64) : Nil
+    key = series_key(labels)
+    values = List.new(labels)
+    bounds = @bounds
+    locked(@series.lock { |all|
+      series = all[key] ||= Series.new(values.to_a, bounds.size)
+      index = 0
+      while index < bounds.size && value > bounds[index]
+        index += 1
+      end
+      series.buckets[index] += 1 if index < bounds.size
+      series.sum += value
+      series.count += 1
+    })
+  end
+
+  # The value of a counter's or gauge's series, 0 when nothing was counted
+  # under *labels*.
+  pub def value(labels : Array(String) = [] of String) : Float64
+    if reader = @reader
+      return reader.call(nil)
+    end
+    key = series_key(labels)
+    found = @series.get { |all| (series = all[key]?) ? series.value : 0.0 }
+    found.is_a?(Float64) ? found : 0.0
+  end
+
+  # The family as the exposition format writes it.
+  pub def expose(io : String::Builder) : Nil
+    io << "# HELP " << @name << " " << escape_help(@help) << "\n"
+    io << "# TYPE " << @name << " " << @kind << "\n"
+    if reader = @reader
+      io << @name << " " << format_number(reader.call(nil)) << "\n"
+      return
+    end
+    names = @label_names
+    bounds = @bounds
+    text = @series.get { |all|
+      text_out = String::Builder.new
+      all.keys.sorted.each do |key|
+        series = all[key]
+        if bounds.size > 0 || @kind == "histogram"
+          cumulative = 0_i64
+          bounds.each_with_index do |bound, index|
+            cumulative += series.buckets[index]
+            text_out << @name << "_bucket" << label_text(names, series.labels, "le", format_number(bound)) << " " << cumulative.to_s << "\n"
+          end
+          text_out << @name << "_bucket" << label_text(names, series.labels, "le", "+Inf") << " " << series.count.to_s << "\n"
+          text_out << @name << "_sum" << label_text(names, series.labels, nil, nil) << " " << format_number(series.sum) << "\n"
+          text_out << @name << "_count" << label_text(names, series.labels, nil, nil) << " " << series.count.to_s << "\n"
+        else
+          text_out << @name << label_text(names, series.labels, nil, nil) << " " << format_number(series.value) << "\n"
+        end
+      end
+      text_out.to_s
+    }
+    io << text if text.is_a?(String)
+  end
+
+  private def series_key(labels : Array(String)) : String
+    unless labels.size == @label_names.size
+      raise "metric #{@name} takes #{@label_names.size} label value#{@label_names.size == 1 ? "" : "s"} (#{@label_names.to_a.join(", ")}), not #{labels.size}"
+    end
+    labels.join("\u{0}")
+  end
+
+  # A lock refused only because the task was cancelled while it waited: a
+  # request being cut off at shutdown, whose count no longer matters.
+  private def locked(outcome : Nil | Cancelled) : Nil
+  end
+end
+
+# `{method="GET",route="/users/:id"}`, with *extra* last (a histogram
+# bucket's `le`); empty when there are no labels at all.
+private def label_text(names : List(String), values : Array(String), extra : String?, extra_value : String?) : String
+  return "" if names.size == 0 && extra.nil?
+  parts = [] of String
+  names.each_with_index do |name, index|
+    parts << name + "=\"" + escape_label(values[index]) + "\""
+  end
+  if extra && extra_value
+    parts << extra + "=\"" + extra_value + "\""
+  end
+  "{" + parts.join(",") + "}"
+end
+
+# A label value as the format quotes it: `\`, `"` and line feeds escaped.
+pub def escape_label(value : String) : String
+  value.gsub("\\", "\\\\").gsub("\"", "\\\"").gsub("\n", "\\n")
+end
+
+private def escape_help(value : String) : String
+  value.gsub("\\", "\\\\").gsub("\n", "\\n")
+end
+
+# A sample value: an integral one without a fraction (`3`, not `3.0`),
+# infinities and NaN as Prometheus spells them.
+pub def format_number(value : Float64) : String
+  return "NaN" if value.nan?
+  return "+Inf" if value.infinite? && value > 0
+  return "-Inf" if value.infinite?
+  return value.to_i64.to_s if value == value.floor && value.abs < 1.0e15
+  value.to_s
+end
+
+# A counter: only goes up.
+pub struct Counter
+  @family : Family
+
+  def initialize(@family : Family)
+  end
+
+  pub def inc(labels : Array(String) = [] of String, by : Float64 = 1.0) : Nil
+    raise "counter #{@family.name} cannot go down (inc by #{by})" if by < 0
+    @family.add(labels, by)
+  end
+
+  pub def value(labels : Array(String) = [] of String) : Float64
+    @family.value(labels)
+  end
+end
+
+# A gauge: a value that goes up and down, or is set.
+pub struct Gauge
+  @family : Family
+
+  def initialize(@family : Family)
+  end
+
+  pub def set(value : Float64, labels : Array(String) = [] of String) : Nil
+    @family.set(labels, value)
+  end
+
+  pub def inc(labels : Array(String) = [] of String, by : Float64 = 1.0) : Nil
+    @family.add(labels, by)
+  end
+
+  pub def dec(labels : Array(String) = [] of String, by : Float64 = 1.0) : Nil
+    @family.add(labels, -by)
+  end
+
+  pub def value(labels : Array(String) = [] of String) : Float64
+    @family.value(labels)
+  end
+end
+
+# A histogram: observations counted into buckets, with their sum.
+pub struct Histogram
+  @family : Family
+
+  def initialize(@family : Family)
+  end
+
+  pub def observe(value : Float64, labels : Array(String) = [] of String) : Nil
+    @family.observe(labels, value)
+  end
+end
+
+pub class MetricsRegistry
+  @families : Mutex(Array(Family))
+
+  def initialize
+    @families = Mutex.new { [] of Family }
+  end
+
+  pub def counter(name : String, help : String, labels : Array(String) = [] of String) : Counter
+    Counter.new(family(name, help, "counter", labels, [] of Float64))
+  end
+
+  pub def gauge(name : String, help : String, labels : Array(String) = [] of String) : Gauge
+    Gauge.new(family(name, help, "gauge", labels, [] of Float64))
+  end
+
+  # *buckets* are upper bounds, in increasing order; `+Inf` is implied.
+  pub def histogram(name : String, help : String, labels : Array(String) = [] of String, buckets : Array(Float64) = DEFAULT_BUCKETS) : Histogram
+    raise "histogram #{name} needs at least one bucket" if buckets.empty?
+    buckets.each_with_index do |bound, index|
+      raise "histogram #{name}'s buckets must increase: #{buckets.inspect}" if index > 0 && bound <= buckets[index - 1]
+    end
+    raise "histogram #{name} cannot have a label named le" if labels.includes?("le")
+    Histogram.new(family(name, help, "histogram", labels, buckets))
+  end
+
+  # A gauge whose value *block* answers when the page is written: a queue's
+  # length, a pool's free connections, an `Atomic` count.
+  @[Share]
+  pub def gauge_function(name : String, help : String, &block : -> Float64) : Nil
+    reader = SharedProc(Nil, Float64).of { |_| block.call }
+    check_name(name)
+    made = Family.new(name, help, "gauge", [] of String, [] of Float64, reader)
+    added = @families.get { |all|
+      clash = all.find { |f| f.name == name }
+      clash ? false : (all << made; true)
+    }
+    raise "metric #{name} is already registered" unless added == true
+  end
+
+  # The family registered under *name*, or nil.
+  pub def [](name : String) : Family?
+    found = @families.get { |all| all.find { |f| f.name == name } }
+    found.is_a?(Family) ? found : nil
+  end
+
+  # Every family, in the order they were registered, as the text
+  # exposition format.
+  pub def expose : String
+    families = @families.get { |all| List.new(all) }
+    text_out = String::Builder.new
+    if families.is_a?(List(Family))
+      families.each { |f| f.expose(text_out) }
+    end
+    text_out.to_s
+  end
+
+  private def family(name : String, help : String, kind : String, labels : Array(String), bounds : Array(Float64)) : Family
+    check_name(name)
+    labels.each { |label| check_label(name, label) }
+    made = Family.new(name, help, kind, labels, bounds)
+    wanted = List.new(labels)
+    kept = List.new(bounds)
+    found = @families.get { |all|
+      existing = all.find { |f| f.name == name }
+      if existing
+        existing.kind == kind && existing.label_names == wanted.to_a && existing.bounds == kept.to_a ? existing : nil
+      else
+        all << made
+        made
+      end
+    }
+    raise "metric #{name} is already registered as another #{kind == "histogram" ? "histogram" : "family"} (kind, labels or buckets differ)" unless found.is_a?(Family)
+    found
+  end
+
+  private def check_name(name : String) : Nil
+    raise "invalid metric name #{name.inspect}" unless metric_name?(name)
+  end
+
+  private def check_label(metric : String, label : String) : Nil
+    raise "invalid label name #{label.inspect} on metric #{metric}" unless label_name?(label)
+  end
+end
+
+# `[a-zA-Z_:][a-zA-Z0-9_:]*`
+pub def metric_name?(name : String) : Bool
+  name_of?(name, true)
+end
+
+# `[a-zA-Z_][a-zA-Z0-9_]*`, not starting `__`, which Prometheus keeps.
+pub def label_name?(name : String) : Bool
+  !name.starts_with?("__") && name_of?(name, false)
+end
+
+private def name_of?(name : String, colon : Bool) : Bool
+  return false if name.empty?
+  bytes = name.to_unsafe
+  index = 0
+  while index < name.bytesize
+    byte = bytes[index]
+    letter = (byte >= 65_u8 && byte <= 90_u8) || (byte >= 97_u8 && byte <= 122_u8) || byte == 95_u8 || (colon && byte == 58_u8)
+    digit = byte >= 48_u8 && byte <= 57_u8
+    return false unless letter || (index > 0 && digit)
+    index += 1
+  end
+  true
+end
+
+# The process's registry: `MetricsHandler` counts into it unless given
+# another, and an application's own metrics go here too.
+pub METRICS = MetricsRegistry.new
+
+# Counts every request it sees into a registry's HTTP families and serves
+# the registry at *path* (`GET` and `HEAD`), which it does not count. It
+# honours `only` and `exclude`: a request it is not for is neither counted
+# nor timed. Put it first - `use MetricsHandler.new, 0` - to count static
+# files and the requests other handlers answer themselves too.
+pub class MetricsHandler < Handler
+  @path : String
+  @registry : MetricsRegistry
+  @unrouted : String
+  @requests : Counter
+  @duration : Histogram
+  @in_flight : Gauge
+
+  def initialize(@registry : MetricsRegistry = METRICS, @path : String = "/metrics", buckets : Array(Float64) = DEFAULT_BUCKETS, @unrouted : String = "unrouted")
+    super()
+    @requests = @registry.counter("http_requests_total", "HTTP requests answered, by method, route pattern and status.", ["method", "route", "status"])
+    @duration = @registry.histogram("http_request_duration_seconds", "Time from the request reaching this handler to the response being ready, by method and route pattern.", ["method", "route"], buckets)
+    @in_flight = @registry.gauge("http_requests_in_flight", "HTTP requests being handled now.")
+  end
+
+  pub def path : String
+    @path
+  end
+
+  pub def call(ctx : Context) : Nil
+    request = ctx.request
+    if request.path == @path && (request.method == "GET" || request.method == "HEAD")
+      ctx.response.content_type = EXPOSITION_TYPE
+      ctx.response.set_body(@registry.expose)
+      return
+    end
+    return call_next(ctx) unless applies?(ctx)
+    @in_flight.inc
+    started = Time.monotonic
+    answered = false
+    # Recorded on every way out: a panic that leaves the chain is counted
+    # as the 500 it becomes.
+    defer record(ctx, started, answered)
+    call_next(ctx)
+    answered = true
+  end
+
+  private def record(ctx : Context, started : Span, answered : Bool) : Nil
+    @in_flight.dec
+    elapsed = (Time.monotonic - started).total_seconds
+    route = ctx.route_pattern || @unrouted
+    method = ctx.request.method
+    status = answered ? ctx.response.status_code : 500
+    @requests.inc([method, route, status.to_s])
+    @duration.observe(elapsed, [method, route])
+  end
+end

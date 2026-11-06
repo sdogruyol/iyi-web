@@ -26,6 +26,7 @@ import std/signal::{Signal}
 import iyi_web/body::{IntoBody}
 import iyi_web/context::{Context}
 import iyi_web/router::{Router, RouteHandler}
+import iyi_web/deps::{Dep}
 import iyi_web/handler::{Handler, ChainHandler, serial_step}
 import iyi_web/config::*
 import iyi_web/kept::{Kept, kept_serial?}
@@ -37,6 +38,7 @@ import iyi_web/event_stream::{EventStream}
 import iyi_web/websocket::{WebSocket}
 import iyi_web/cli::{CLIParser, cli_parser}
 import iyi_web/lifecycle::{LIFECYCLE, LifecycleHook, hook_outcome, lifecycle_hook}
+import iyi_web/background::{BACKGROUND, BackgroundJob}
 pub import iyi_web/templates
 
 # Templates from `iyi_web/templates`, so `import iyi_web/dsl::*` is enough. A
@@ -72,16 +74,37 @@ end
 
 HTTP_METHODS   = %w(get post put patch delete options head query)
 FILTER_METHODS = %w(get post put patch delete options query)
+TYPED_KINDS    = [{"path", "P", "path_type"}, {"query", "Q", "query_type"}, {"headers", "H", "headers_type"}, {"body", "J", "body_type"}, {"deps", "V", "deps"}]
 
 APP = Router.new
 
-# A route may answer an error as well as a body; see `Router#get`.
+# A route may answer an error as well as a body; see `Router#get`. With
+# `path:`, `query:`, `headers:`, `body:` or `deps:` it is a typed route,
+# its block given each value after `env` (`iyi_web/typed`); `response:`,
+# `status:`, `summary:`, `description:` and `tags:` describe it in the
+# OpenAPI document (`openapi`).
 {% for method in HTTP_METHODS %}
-  @[Share(serial: workers)]
-  pub def {{ method.id }}(path : String, *, workers : Int32? = nil, &block : Context -> B) : Nil forall B
-    APP.{{ method.id }}(path, workers: workers, &block)
-  end
+  {% for mask in (0..31).to_a %}
+    {% chosen = [] of TupleLiteral %}
+    {% for kind, index in TYPED_KINDS %}
+      {% if mask & [1, 2, 4, 8, 16][index] != 0 %}
+        {% chosen << kind %}
+      {% end %}
+    {% end %}
+    {% names = chosen.map { |kind| kind[0] } %}
+    {% route = (mask == 0 ? "path" : "route").id %}
+    @[Share(serial: workers)]
+    pub def {{ method.id }}({{ route }} : String, *, {% for kind in chosen %}{% if kind[0] == "deps" %}deps : Dep(V, E), {% else %}{{ kind[0].id }} {{ kind[2].id }} : {{ kind[1].id }}.class, {% end %}{% end %}workers : Int32? = nil, response : M.class = Nil, status : Int32 = 200, summary : String? = nil, description : String? = nil, tags : Array(String) = [] of String, &block : Context{% for kind in chosen %}, {{ kind[1].id }}{% end %} -> B) : Nil forall B, M{% for kind in chosen %}, {{ kind[1].id }}{% end %}{% if names.includes?("deps") %}, E{% end %}
+      APP.{{ method.id }}({{ route }}, {% for kind in chosen %}{{ kind[0].id }}: {{ kind[2].id }}, {% end %}workers: workers, response: response, status: status, summary: summary, description: description, tags: tags, &block)
+    end
+  {% end %}
 {% end %}
+
+# Serves the application's OpenAPI document and its Swagger UI page; see
+# `Router#openapi`.
+pub def openapi(title : String, version : String, description : String? = nil, path : String = "/openapi.json", docs : String? = "/docs") : Nil
+  APP.openapi(title, version, description, path, docs)
+end
 
 # One path or several, as `Router#before` takes them.
 {% for name in ["before_all", "after_all"] + FILTER_METHODS.map { |m| "before_" + m } + FILTER_METHODS.map { |m| "after_" + m } %}
@@ -256,15 +279,25 @@ pub def on_start(*, workers : Int32? = nil, file : String = __FILE__, line : Int
   LIFECYCLE.add_start(hook, site)
 end
 
-# Runs once the server has stopped: after the requests in flight have
-# finished, or `shutdown_timeout` ran out. Several run the last written
-# first; one that fails is reported and the rest still run.
+# Runs once the server has stopped: after the requests in flight and the
+# background tasks have finished, or `shutdown_timeout` ran out. Several
+# run the last written first; one that fails is reported and the rest
+# still run.
 @[Share(serial: workers)]
 pub def on_stop(*, workers : Int32? = nil, file : String = __FILE__, line : Int32 = __LINE__, &block : -> B) : Nil forall B
   site = File.basename(file) + ":" + line.to_s
   what = "on_stop " + site
   hook = kept_serial?(workers, what) ? LifecycleHook.new(->(_none : Nil) { hook_outcome(block.call) }, what) : lifecycle_hook { block.call }
   LIFECYCLE.add_stop(hook, site)
+end
+
+# Work to do off the request path, on a worker of its own; see
+# `iyi_web/background`. Inside a route, `env.background { }` is the same.
+# The block may capture only `Share` values: copy what it needs from the
+# request into locals first.
+@[Share]
+pub def background(&block : -> Nil) : Nil
+  BACKGROUND.submit(BackgroundJob.of { |_| block.call })
 end
 
 class Holder
@@ -345,7 +378,8 @@ private def start(port : Int32 | Nil) : Nil
 
   server = build_server(app, cfg)
   address = ""
-  tls = cfg.ssl
+  tls = cfg.tls_config
+  server.autocert = cfg.autocert if cfg.ssl.nil?
   if path = cfg.unix_socket
     server.bind_unix(path, tls)
     address = "unix://" + path
@@ -375,7 +409,9 @@ private def start_hooks(cfg : Config) : Nil
   end
 end
 
-# Once the listener has drained, the `on_stop` hooks run.
+# Beside the listener, the background runner (`iyi_web/background`); once
+# the listener has drained, the background tasks get up to
+# `shutdown_timeout` to finish, and then the `on_stop` hooks run.
 private def serve(server : Server, cfg : Config) : Nil
   group do |g|
     g.spawn do
@@ -383,7 +419,12 @@ private def serve(server : Server, cfg : Config) : Nil
       0
     end
     g.spawn do
+      BACKGROUND.run
+      0
+    end
+    g.spawn do
       server.listen
+      BACKGROUND.close(Span.seconds(cfg.shutdown_timeout.to_i64))
       LIFECYCLE.run_stop.each { |failure| puts "[" + cfg.env + "] " + cfg.app_name + ": " + failure }
       STDOUT.flush
       # Stopped some other way, or drained: nobody waits for a signal now.

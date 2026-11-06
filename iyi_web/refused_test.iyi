@@ -5,7 +5,8 @@
 # iyi_web, and name both ways past it, a lock and `workers: 1`.
 # `serial.iyi`, every one of those registrations with `workers: 1`, must
 # compile with no error and no warning: the harness can tell a refusal
-# from a program that compiles.
+# from a program that compiles. `dep_type.iyi` is a provider whose type is
+# not what its block answers, refused where `Dep.new` is written.
 #
 # The compiler is `iyi` on the `PATH`, or the one `IYI` names.
 module iyi_web/refused_test
@@ -114,9 +115,27 @@ describe "A block or handler that may not run on every worker" do
     assert_eq "the block Dsl.on_start keeps, which may run on other threads captures `names : Array(String)`, which is not Share: Array(String)'s field @size is assigned in `append`. Put it behind a lock, a `Mutex(Array(String))` (std/mutex), or pass `workers: 1` so the block runs on one thread (SPEC.md III.4.4)", frame.message
   end
 
+  it "is refused at background work's capture, with no workers: 1 way past" do
+    frame = refusal("background_capture.iyi")
+    assert at?(frame, "background_capture.iyi", 11, 5)
+    assert frame.message.starts_with?("the block Context#background keeps, which may run on other threads captures `done : Array(String)`, which is not Share: ")
+    assert !frame.message.includes?("workers: 1"), frame.message
+  end
+
   it "compiles, with no warning, given workers: 1 on every registration" do
     result = check("serial.iyi")
     said = result[1].map { |frame| frame.file + ":" + frame.line.to_s + ": " + frame.message }
     raise "iyi check serial.iyi: " + said.join("\n") unless result[0] && said.empty?
+  end
+end
+
+describe "A provider whose type is not what its block answers" do
+  it "is refused at the Dep.new, naming the type the block gives" do
+    result = check("dep_type.iyi")
+    assert !result[0]
+    frame = result[1].find { |found| found.file.ends_with?("dep_type.iyi") }
+    raise "iyi check dep_type.iyi: no frame on the application's line" unless frame
+    assert at?(frame, "dep_type.iyi", 17, 12)
+    assert_eq "Dep.new(String): the block answers (IyiWeb::Auth::AuthError | String | Nil), whose value without its errors is String | Nil, not String. Name that type, Dep.new(String | Nil), or have the block answer String or an error", frame.message
   end
 end

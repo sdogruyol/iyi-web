@@ -1,11 +1,9 @@
 # Lifecycle hooks: start hooks in order and the first failure ending the
 # start, stop hooks in reverse with every one run, and the DSL's `run`
-# calling them around a real server - after the drain - and refusing to
-# start when a hook fails.
+# calling them around a real server - after the background work a request
+# started has finished - and refusing to start when a hook fails.
 module iyi_web/lifecycle_test
 
-import std/list::{List}
-import std/mutex::{Mutex}
 import std/process::{Process, ProcessResult}
 import std/shared_proc::{SharedProc}
 import std/socket::{IyiSocket}
@@ -13,6 +11,7 @@ import iyi_web/dsl::*
 import iyi_web/config::{config}
 import iyi_web/kept::{Kept}
 import iyi_web/lifecycle::{Lifecycle, LifecycleHook, hook_outcome, lifecycle_hook}
+import iyi_web/store::{ArrayStore}
 import iyi_web/harness::{http_body}
 import iyi_web/spec::*
 
@@ -26,18 +25,10 @@ end
 impl Error for Refusal
 end
 
-EVENTS = Mutex.new { [] of String }
+EVENTS = ArrayStore(String).new
 
 def note(event : String) : Nil
-  EVENTS.lock { |events| events << event; nil }.or_panic
-end
-
-def events : Array(String)
-  EVENTS.get { |list| List.new(list) }.or_panic.to_a
-end
-
-def clear_events : Nil
-  EVENTS.lock { |list| list.size.times { list.pop }; nil }.or_panic
+  EVENTS.update { |events| events << event; nil }
 end
 
 def hook(event : String) : LifecycleHook
@@ -67,7 +58,7 @@ end
 
 describe "Lifecycle" do
   it "runs start hooks in order and stop hooks in reverse" do
-    clear_events
+    EVENTS.update { |e| e.size.times { e.pop }; nil }
     hooks = Lifecycle.new
     hooks.add_start(hook("start 1"), "a.iyi:1")
     hooks.add_start(hook("start 2"), "a.iyi:2")
@@ -75,17 +66,17 @@ describe "Lifecycle" do
     hooks.add_stop(hook("stop 2"), "a.iyi:4")
     assert_nil hooks.run_start
     assert_eq [] of String, hooks.run_stop
-    assert_eq ["start 1", "start 2", "stop 2", "stop 1"], events
+    assert_eq ["start 1", "start 2", "stop 2", "stop 1"], EVENTS.to_a
   end
 
   it "stops the start at the first hook that answers an error or panics" do
-    clear_events
+    EVENTS.update { |e| e.size.times { e.pop }; nil }
     hooks = Lifecycle.new
     hooks.add_start(hook("first"), "a.iyi:1")
     hooks.add_start(lifecycle_hook { Refusal.new("no database") }, "a.iyi:2")
     hooks.add_start(hook("never"), "a.iyi:3")
     assert_eq "on_start (a.iyi:2) failed: no database", hooks.run_start
-    assert_eq ["first"], events
+    assert_eq ["first"], EVENTS.to_a
 
     panicking = Lifecycle.new
     panicking.add_start(lifecycle_hook { raise "bad config" }, "b.iyi:7")
@@ -93,13 +84,13 @@ describe "Lifecycle" do
   end
 
   it "runs every stop hook when one of them fails" do
-    clear_events
+    EVENTS.update { |e| e.size.times { e.pop }; nil }
     hooks = Lifecycle.new
     hooks.add_stop(hook("closed pool"), "a.iyi:1")
     hooks.add_stop(lifecycle_hook { raise "flush failed" }, "a.iyi:2")
     hooks.add_stop(lifecycle_hook { Refusal.new("socket gone") }, "a.iyi:3")
     assert_eq ["on_stop (a.iyi:3) failed: socket gone", "on_stop (a.iyi:2) panicked: flush failed"], hooks.run_stop
-    assert_eq ["closed pool"], events
+    assert_eq ["closed pool"], EVENTS.to_a
   end
 
   it "treats an answer that is not an error as success" do
@@ -110,8 +101,8 @@ describe "Lifecycle" do
 end
 
 describe "run" do
-  it "calls on_start before serving and on_stop after the drain" do
-    clear_events
+  it "calls on_start before serving and on_stop after the drain and the background work" do
+    EVENTS.update { |e| e.size.times { e.pop }; nil }
     logging false
     config.shutdown_message = false
 
@@ -123,6 +114,15 @@ describe "run" do
     get "/hello" do |env|
       note("request")
       "hello"
+    end
+
+    get "/later" do |env|
+      env.background do
+        sleep(200)
+        note("background done")
+      end
+      note("answered")
+      "queued"
     end
 
     bodies = [] of String
@@ -137,12 +137,13 @@ describe "run" do
         end
         port = config.port
         bodies << fetch(port, "/hello")
+        bodies << fetch(port, "/later")
         stop
         0
       end
     end
-    assert_eq ["hello"], bodies
-    assert_eq ["start 1", "start 2", "request", "stop 2", "stop 1"], events
+    assert_eq ["hello", "queued"], bodies
+    assert_eq ["start 1", "start 2", "request", "answered", "background done", "stop 2", "stop 1"], EVENTS.to_a
   end
 
   it "exits naming the on_start hook that answered an error, before serving" do

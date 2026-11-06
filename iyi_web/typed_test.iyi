@@ -1,0 +1,274 @@
+# Typed routes: what a request is read into before the block runs, the
+# errors that answer instead of it, and the response model.
+module iyi_web/typed_test
+
+import std/atomic
+import std/json::{JSON, serializable}
+import iyi_web/router::{Router, RouteHandler}
+import iyi_web/harness::*
+import iyi_web/context::{Context}
+import iyi_web/request::{Request}
+import iyi_web/failure::{StatusError}
+import iyi_web/validation::{Validate, Validator}
+import iyi_web/spec::*
+
+enum Sort
+  Newest
+  Oldest
+end
+
+struct Page
+  getter page : Int32 = 1
+  getter per_page : Int32 = 20
+  getter q : String?
+  getter sort : Sort = Sort::Newest
+  getter tag : Array(String) = [] of String
+  derive serializable
+end
+
+struct Needs
+  getter limit : Int32
+  derive serializable
+end
+
+struct NoteRef
+  getter user : String
+  getter id : Int64
+  derive serializable
+end
+
+struct Trace
+  getter x_request_id : String
+  getter x_retry : Int32 = 0
+  derive serializable
+end
+
+struct NoteInput
+  getter title : String
+  getter stars : Int32 = 3
+  derive serializable
+end
+
+impl Validate for NoteInput
+  def validate(v : Validator) : Nil
+    v.length("title", title, min: 2)
+    v.range("stars", stars, min: 1, max: 5)
+  end
+end
+
+struct Note
+  getter id : Int32
+  getter title : String
+  derive serializable
+
+  def initialize(@id : Int32, @title : String)
+  end
+end
+
+# How many times a block that must not run did.
+RAN = Atomic(Int32).new(0)
+
+def json_post(path : String, body : String, content_type : String = "application/json") : Request
+  http_request("POST", path, "", body, content_type)
+end
+
+def get(handler : RouteHandler, path : String, query : String = "") : Context
+  dispatch(handler, http_request("GET", path, query))
+end
+
+def notes_app : RouteHandler
+  routes do |r|
+    r.get "/notes", query: Page do |env, page|
+      "page=#{page.page} per=#{page.per_page} q=#{page.q || "-"} sort=#{page.sort} tags=#{page.tag.join("+")}"
+    end
+    r.get "/needs", query: Needs do |env, needs|
+      RAN.add(1)
+      "limit=#{needs.limit}"
+    end
+    r.get "/notes/:id", path: Int32 do |env, id|
+      "note #{id + 1}"
+    end
+    r.get "/users/:user/notes/:id", path: NoteRef, query: Page do |env, ref, page|
+      "#{ref.user}/#{ref.id} page=#{page.page}"
+    end
+    r.get "/trace", headers: Trace do |env, trace|
+      "#{trace.x_request_id} #{trace.x_retry}"
+    end
+    r.post "/notes", body: NoteInput, response: Note, status: 201 do |env, input|
+      RAN.add(1)
+      Note.new(7, input.title)
+    end
+    r.put "/notes/:id", path: Int32, body: NoteInput, response: Note do |env, id, input|
+      RAN.add(1)
+      id == 404 ? StatusError.new(404) : Note.new(id, input.title)
+    end
+  end
+end
+
+describe "typed query" do
+  app = notes_app
+
+  it "keeps every default when nothing is sent" do
+    ctx = get(app, "/notes")
+    assert ctx.response.status_code == 200
+    assert ctx.response.body == "page=1 per=20 q=- sort=Newest tags="
+  end
+
+  it "reads each field as its type, and every value of a repeated key" do
+    ctx = get(app, "/notes", "page=3&q=milk&sort=oldest&tag=a&tag=b%20c")
+    assert ctx.response.body == "page=3 per=20 q=milk sort=Oldest tags=a+b c"
+  end
+
+  it "answers 422 naming every wrong parameter, before the block runs" do
+    request = http_request("GET", "/notes", "page=two&per_page=1.5&sort=sideways")
+    request.headers["Accept"] = "application/json"
+    ctx = dispatch(app, request)
+    assert ctx.response.status_code == 422
+    body = JSON.parse(ctx.response.body)
+    assert body["fields"]["page"].as_s == "must be an integer"
+    assert body["fields"]["per_page"].as_s == "must be an integer"
+    assert body["fields"]["sort"].as_s == "must be one of: newest, oldest"
+    assert body["error"].as_s.starts_with?("invalid query parameters: ")
+  end
+
+  it "refuses a missing required parameter without running the block" do
+    before = RAN.get
+    ctx = get(app, "/needs")
+    assert ctx.response.status_code == 422
+    assert ctx.response.body == "invalid query parameters: limit is required\n"
+    assert get(app, "/needs", "limit=").response.status_code == 422
+    assert get(app, "/needs", "limit=%2010").response.status_code == 422
+    assert RAN.get == before
+    assert get(app, "/needs", "limit=10").response.body == "limit=10"
+  end
+end
+
+describe "typed path" do
+  app = notes_app
+
+  it "reads a route's one capture as a scalar" do
+    assert get(app, "/notes/41").response.body == "note 42"
+    wrong = get(app, "/notes/41x").response
+    assert wrong.status_code == 422
+    assert wrong.body == "invalid path parameters: id must be an integer\n"
+    assert get(app, "/notes/99999999999").response.status_code == 422
+  end
+
+  it "reads a struct of captures, beside a query" do
+    assert get(app, "/users/ada/notes/9000000000", "page=2").response.body == "ada/9000000000 page=2"
+    assert get(app, "/users/ada/notes/x").response.status_code == 422
+  end
+
+  it "refuses a scalar path: on a route with no or several captures" do
+    assert panics? { routes { |r| r.get("/notes", path: Int32) { |env, id| "x" } } }
+    assert panics? { routes { |r| r.get("/a/:x/:y", path: Int32) { |env, id| "x" } } }
+  end
+
+  it "refuses a path struct whose fields the full path does not capture" do
+    assert panics? { routes { |r| r.get("/users/:user/notes", path: NoteRef) { |env, ref| "x" } } }
+    # Captured by the namespace's prefix: the full path is what counts.
+    nested = routes do |r|
+      r.namespace "/users/:user" do |users|
+        users.get "/notes/:id", path: NoteRef do |env, ref|
+          ref.user + " " + ref.id.to_s
+        end
+      end
+    end
+    assert get(nested, "/users/bo/notes/5").response.body == "bo 5"
+  end
+end
+
+describe "typed headers" do
+  app = notes_app
+
+  it "matches a field to its header in any case" do
+    request = http_request("GET", "/trace")
+    request.headers["X-REQUEST-ID"] = "abc"
+    request.headers["x-retry"] = "2"
+    assert dispatch(app, request).response.body == "abc 2"
+  end
+
+  it "names a missing header as it is sent" do
+    ctx = get(app, "/trace")
+    assert ctx.response.status_code == 422
+    assert ctx.response.body == "invalid header parameters: x-request-id is required\n"
+  end
+end
+
+describe "typed body" do
+  app = notes_app
+
+  it "answers the response model as JSON with the route's status" do
+    ctx = dispatch(app, json_post("/notes", %({"title":"Milk"})))
+    assert ctx.response.status_code == 201
+    assert ctx.response.content_type == "application/json; charset=utf-8"
+    assert ctx.response.body == %({"id":7,"title":"Milk"})
+  end
+
+  it "answers 400, 415 and 422 before the block runs" do
+    before = RAN.get
+    malformed = dispatch(app, json_post("/notes", %({"title":)))
+    assert malformed.response.status_code == 400
+    form = dispatch(app, json_post("/notes", "title=Milk", "application/x-www-form-urlencoded"))
+    assert form.response.status_code == 415
+    shape = dispatch(app, json_post("/notes", %({"title":7})))
+    assert shape.response.status_code == 422
+    assert JSON.parse(shape.response.body)["fields"]["title"].as_s == "must be a string"
+    rules = dispatch(app, json_post("/notes", %({"title":"M","stars":9})))
+    assert rules.response.status_code == 422
+    fields = JSON.parse(rules.response.body)["fields"]
+    assert fields["title"].as_s == "must be at least 2 characters"
+    assert fields["stars"].as_s == "must be between 1 and 5"
+    assert RAN.get == before
+  end
+
+  it "reads the path before the body, and lets the block answer an error" do
+    before = RAN.get
+    bad_path = dispatch(app, http_request("PUT", "/notes/x", "", %({"title":7}), "application/json"))
+    assert bad_path.response.status_code == 422
+    assert bad_path.response.body.includes?("invalid path parameters")
+    assert RAN.get == before
+    ok = dispatch(app, http_request("PUT", "/notes/3", "", %({"title":"Eggs"}), "application/json"))
+    assert ok.response.status_code == 200
+    assert ok.response.body == %({"id":3,"title":"Eggs"})
+    missing = dispatch(app, http_request("PUT", "/notes/404", "", %({"title":"Eggs"}), "application/json"))
+    assert missing.response.status_code == 404
+  end
+end
+
+describe "typed routes beside plain ones" do
+  it "keep the plain block, filters, mounts and workers: 1" do
+    api = Router.new
+    api.get "/items/:id", path: Int64, workers: 1 do |env, id|
+      "item #{id}"
+    end
+    app = routes do |r|
+      r.before_get "/v1/*" do |env|
+        env.response.headers["X-Filter"] = "ran"
+      end
+      r.get "/" do |env|
+        "hi"
+      end
+      r.mount "/v1", api
+    end
+    assert get(app, "/").response.body == "hi"
+    ctx = get(app, "/v1/items/12")
+    assert ctx.response.body == "item 12"
+    assert ctx.response.headers["X-Filter"]? == "ran"
+    assert get(app, "/v1/items/twelve").response.status_code == 422
+  end
+
+  it "lets a plain route declare its status" do
+    app = routes do |r|
+      r.post "/jobs", status: 202 do |env|
+        "queued"
+      end
+      r.post "/now", status: 202 do |env|
+        env.status(200)
+        "done"
+      end
+    end
+    assert dispatch(app, json_post("/jobs", "{}")).response.status_code == 202
+    assert dispatch(app, json_post("/now", "{}")).response.status_code == 200
+  end
+end
