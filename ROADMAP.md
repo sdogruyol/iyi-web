@@ -185,7 +185,7 @@ walking into the kitchen.
 generated from it (e.g. openapi-generator) can call the real API.
 
 **Status:** done. `openapi(...)` serves `/openapi.json` and `/docs` with
-Swagger UI; the document of `examples/json_api.iyi` passes
+Swagger UI; the document of `examples/openapi_auth.iyi` passes
 openapi-spec-validator (see `docs/openapi.md`).
 
 ### Phase 3: Kitchen helpers (the `Depends` equivalent)
@@ -193,12 +193,16 @@ openapi-spec-validator (see `docs/openapi.md`).
 **ELI5:** "Wash your hands, warm the plate" should not be written out again
 before every dish. Define it once, attach it to whichever dish you like.
 
-- [ ] A function like `def current_user(env) : User | HttpError` is attached
+- [x] A function like `def current_user(env) : User | HttpError` is attached
       to a route with `deps: {user: current_user}` and reaches the block
       typed.
-- [ ] Ready-made pieces: Bearer/JWT, API key, OAuth2 password flow (iyi std
+- [x] Ready-made pieces: Bearer/JWT, API key, OAuth2 password flow (iyi std
       has pieces such as `password` and `otp`).
-- [ ] They show up in OpenAPI as `securitySchemes`.
+- [x] They show up in OpenAPI as `securitySchemes`.
+
+**Status:** done. `Dep.new(User) { |env| ... }` and `deps:`; `bearer_auth`,
+`api_key_auth`, `jwt_auth`, OAuth2 password flow (see
+`docs/dependencies-and-auth.md`).
 
 ### Phase 4: Move the kitchen into the new building (onto std/http)
 

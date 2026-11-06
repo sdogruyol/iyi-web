@@ -5,7 +5,8 @@
 # iyi_web, and name both ways past it, a lock and `workers: 1`.
 # `serial.iyi`, every one of those registrations with `workers: 1`, must
 # compile with no error and no warning: the harness can tell a refusal
-# from a program that compiles.
+# from a program that compiles. `dep_type.iyi` is a provider whose type is
+# not what its block answers, refused where `Dep.new` is written.
 #
 # The compiler is `iyi` on the `PATH`, or the one `IYI` names.
 module iyi_web/refused_test
@@ -118,5 +119,16 @@ describe "A block or handler that may not run on every worker" do
     result = check("serial.iyi")
     said = result[1].map { |frame| frame.file + ":" + frame.line.to_s + ": " + frame.message }
     raise "iyi check serial.iyi: " + said.join("\n") unless result[0] && said.empty?
+  end
+end
+
+describe "A provider whose type is not what its block answers" do
+  it "is refused at the Dep.new, naming the type the block gives" do
+    result = check("dep_type.iyi")
+    assert !result[0]
+    frame = result[1].find { |found| found.file.ends_with?("dep_type.iyi") }
+    raise "iyi check dep_type.iyi: no frame on the application's line" unless frame
+    assert at?(frame, "dep_type.iyi", 17, 12)
+    assert_eq "Dep.new(String): the block answers (IyiWeb::Auth::AuthError | String | Nil), whose value without its errors is String | Nil, not String. Name that type, Dep.new(String | Nil), or have the block answer String or an error", frame.message
   end
 end

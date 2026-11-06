@@ -82,12 +82,13 @@ its status. Inside a `def`, `env.params.int("id")!` does the same.
 | `query: T` | a `T` | the query string |
 | `headers: T` | a `T` | the request headers |
 | `body: T` | a `T` | the JSON body, as `env.params.json_as(T)` reads it |
+| `deps: D` | the provider's value | a provider ([Dependencies and auth](dependencies-and-auth.md)) |
 
 The block gets `env` first, then one value for each option given, always in
 the order of this table, whatever order the options are written in:
 
 ```iyi
-put "/users/:user/notes/:id", path: NoteRef, query: Options, headers: Trace, body: NoteInput do |env, ref, options, trace, input|
+put "/users/:user/notes/:id", path: NoteRef, query: Options, headers: Trace, body: NoteInput, deps: CURRENT_USER do |env, ref, options, trace, input, user|
   # ...
 end
 ```
@@ -219,12 +220,13 @@ end
 
 ## The order things are read in, and what answers
 
-`path:`, `query:`, `headers:` and `body:` are read in that order. The first
-that fails answers the request and the rest are not read: a request whose
-path capture is wrong gets `422` for it even when its body is also wrong.
+Providers (`deps:`) run first, then `path:`, `query:`, `headers:` and
+`body:`. The first that fails answers the request and the rest are not read:
+a request without its token gets `401` even when its body is also wrong.
 
 | Failure | Status | Error | Message starts |
 |---|---|---|---|
+| a provider refused | the provider's | its own (`AuthError`, ...) | its own |
 | a path capture | `422` | `ParamError` | `invalid path parameters:` |
 | a query parameter | `422` | `ParamError` | `invalid query parameters:` |
 | a header | `422` | `ParamError` | `invalid header parameters:` |
@@ -293,3 +295,5 @@ its store behind a `Mutex` and serves typed routes on every core.
 
 - `examples/typed_json.iyi`: `body:`, `query:` and `path:` with `response:`.
 - `examples/json_api.iyi`: a CRUD API, every route typed, with `/openapi.json`.
+- `examples/openapi_auth.iyi`: typed routes behind JWT, OAuth2 and API-key
+  providers.

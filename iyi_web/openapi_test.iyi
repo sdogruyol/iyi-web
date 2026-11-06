@@ -1,6 +1,6 @@
 # The OpenAPI document of a sample application, read back as JSON: paths
 # in `{param}` form from every mount, parameters from the typed structs,
-# schemas with what is required, and the errors the framework answers.
+# schemas with what is required, and the security each route depends on.
 module iyi_web/openapi_test
 
 import std/json::{JSON, Any, serializable}
@@ -8,6 +8,8 @@ import iyi_web/router::{Router, RouteHandler}
 import iyi_web/harness::*
 import iyi_web/context::{Context}
 import iyi_web/openapi::*
+import iyi_web/deps::{Dep}
+import iyi_web/auth::*
 import iyi_web/spec::*
 
 enum Status
@@ -66,18 +68,22 @@ struct Trace
   derive serializable
 end
 
+SECRET = "openapi-test-secret-of-32-bytes-or-more"
+USER   = jwt_auth(SECRET)
+KEY    = api_key_auth("X-API-Key")
+
 def sample : Router
   api = Router.new
   api.get "/notes", query: Page, response: Array(Note), summary: "List notes", tags: ["notes"] do |env, page|
     [] of Note
   end
-  api.post "/notes", body: NoteInput, response: Note, status: 201, tags: ["notes"], description: "Creates a note." do |env, input|
+  api.post "/notes", body: NoteInput, response: Note, status: 201, deps: USER, tags: ["notes"], description: "Creates a note." do |env, input, claims|
     Note.new(1, input.title)
   end
   api.get "/notes/:id", path: Int64, response: Note do |env, id|
     Note.new(id, "x")
   end
-  api.delete "/users/:user/notes/:id", path: NoteRef, headers: Trace, status: 204 do |env, ref, trace|
+  api.delete "/users/:user/notes/:id", path: NoteRef, headers: Trace, deps: Dep.all(user: USER, key: KEY), status: 204 do |env, ref, trace, deps|
     nil
   end
   api.query "/search" do |env|
@@ -177,7 +183,7 @@ describe "openapi document" do
     assert create["requestBody"]["required"].as_bool
     assert create["requestBody"]["content"]["application/json"]["schema"]["$ref"].as_s == "#/components/schemas/NoteInput"
     assert create["responses"]["201"]["content"]["application/json"]["schema"]["$ref"].as_s == "#/components/schemas/Note"
-    assert create["responses"].as_h.keys.sorted == ["201", "400", "415", "422"]
+    assert create["responses"].as_h.keys.sorted == ["201", "400", "401", "415", "422"]
 
     input = schemas["NoteInput"]
     assert input["type"].as_s == "object"
@@ -196,6 +202,19 @@ describe "openapi document" do
     assert note["properties"]["created"]["readOnly"].as_bool
     assert names(schemas["Author"]["required"]) == ["name"]
     assert schemas["Error"]["properties"]["fields"]["type"].as_s == "object"
+  end
+
+  it "lists the security schemes and each route's requirement" do
+    schemes = doc["components"]["securitySchemes"]
+    assert schemes["bearerAuth"]["type"].as_s == "http"
+    assert schemes["bearerAuth"]["scheme"].as_s == "bearer"
+    assert schemes["bearerAuth"]["bearerFormat"].as_s == "JWT"
+    assert schemes["apiKeyAuth"]["type"].as_s == "apiKey"
+    assert schemes["apiKeyAuth"]["in"].as_s == "header"
+    assert schemes["apiKeyAuth"]["name"].as_s == "X-API-Key"
+    assert paths["/v1/api/notes"]["post"]["security"][0].as_h.keys == ["bearerAuth"]
+    assert paths["/v1/api/users/{user}/notes/{id}"]["delete"]["security"][0].as_h.keys.sorted == ["apiKeyAuth", "bearerAuth"]
+    assert !paths["/v1/api/notes"]["get"].as_h.has_key?("security")
   end
 end
 

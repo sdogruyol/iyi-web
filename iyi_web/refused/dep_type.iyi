@@ -1,0 +1,21 @@
+# Refused: a provider whose type is not what its block answers.
+# iyi_web/refused_test.iyi checks the refusal's place and what it names.
+module iyi_web/refused/dep_type
+
+import iyi_web/dsl::*
+import iyi_web/context::{Context}
+import iyi_web/deps::{Dep}
+import iyi_web/auth::{AuthError}
+
+# No header is nil, not an error: the value is a `String?`.
+def user_name(env : Context) : String? | AuthError
+  name = env.request.headers["X-User"]?
+  return AuthError.new(401, "unknown user") if name == "nobody"
+  name
+end
+
+USER = Dep.new(String) { |env| user_name(env) }
+
+get "/me", deps: USER do |env, name|
+  name
+end
