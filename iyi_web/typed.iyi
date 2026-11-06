@@ -4,11 +4,12 @@
 #     post "/notes", body: NoteInput, response: Note, status: 201 do |env, input|
 #
 # A route registered with `path:`, `query:`, `headers:` or `body:` gets
-# each as a value of the type named, after `env`, in that order. Each is
-# read here, in that same order, and the first that cannot be read ends
-# the request with its error before the block runs: a `ParamError` (422)
-# naming every parameter that is wrong, or the body's `BodyError` (400,
-# 415 or 422). The block never sees a value that is not its type.
+# each as a value of the type named, after `env`, in that order (and the
+# value of `deps:` last, `iyi_web/deps`). Each is read here, in that same
+# order, and the first that cannot be read ends the request with its
+# error before the block runs: a `ParamError` (422) naming every
+# parameter that is wrong, or the body's `BodyError` (400, 415 or 422).
+# The block never sees a value that is not its type.
 #
 # `path:` is a struct whose fields are the path's captures, or one scalar
 # (`path: Int32`) for a route that captures exactly one. `query:` and
