@@ -14,3 +14,10 @@
 # Benchmark builds and results (bench/run.sh)
 /bench/.build/
 /bench/results*.json
+
+# iyi-web dev builds (cmd/dev.iyi)
+.iyi-web/
+/examples/postgres/app
+/examples/postgres/app.exe
+/examples/postgres/app.pdb
+
