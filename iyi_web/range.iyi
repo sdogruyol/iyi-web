@@ -16,6 +16,7 @@
 # adding up to more bytes than the body holds. RFC 9110 lets a server
 # ignore such a set instead of amplifying a small request into a large
 # response.
+@[Unsafe("a range's positions are parsed by reading their digits through the string's buffer")]
 module iyi_web/range
 
 import iyi_web/response::{Response}

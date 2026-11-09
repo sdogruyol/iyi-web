@@ -1,6 +1,7 @@
 # Request cookies as a table, parsed from the `Cookie` header. Setting a
 # cookie is on Context (`set_cookie`), because that writes `Set-Cookie`
 # onto the response rather than mutating what the client sent.
+@[Unsafe("a cookie value is percent-encoded by reading its bytes through the string's buffer")]
 module iyi_web/cookies
 
 import iyi_web/codec::*

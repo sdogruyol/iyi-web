@@ -159,8 +159,8 @@ end
 
 private def padded?(text : String) : Bool
   return true if text.empty?
-  first = text.to_unsafe[0]
-  last = text.to_unsafe[text.bytesize - 1]
+  first = text.byte_at(0)
+  last = text.byte_at(text.bytesize - 1)
   space?(first) || space?(last)
 end
 

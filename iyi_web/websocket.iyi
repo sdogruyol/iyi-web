@@ -26,6 +26,7 @@
 # each socket lets one frame out at a time. A send to a
 # socket that has closed, or whose client has gone, answers false and
 # touches nothing else; the task that called it carries on.
+@[Unsafe("frames are encoded and decoded through raw pointers into the strings' buffers, masking the payload a byte at a time, and the handshake writes its digest straight into a new string's buffer")]
 module iyi_web/websocket
 
 import std/socket::{IyiSocket, SocketError}

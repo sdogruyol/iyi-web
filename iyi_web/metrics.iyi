@@ -31,6 +31,7 @@
 # name twice answers the family already there when the kind and labels
 # agree, and panics when they do not. Giving a family the wrong number of
 # label values panics: that is a bug where the metric is used.
+@[Unsafe("metric and label names are checked by reading their bytes through the string's buffer")]
 module iyi_web/metrics
 
 import std/float

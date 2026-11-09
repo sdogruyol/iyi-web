@@ -12,6 +12,7 @@
 # all of them rather than the first. Only a body that passes is read, and
 # that read still runs in a task of its own, so whatever the check does not
 # model (a field `converter:`) is a 422 too and never a panic in the route.
+@[Unsafe("an enum's name is rewritten by reading its bytes through the string's buffer")]
 module iyi_web/validation
 
 import std/json::{JSON, Any, Parser}

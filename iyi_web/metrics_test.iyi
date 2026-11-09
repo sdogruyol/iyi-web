@@ -197,7 +197,7 @@ describe "MetricsRegistry" do
     hits = registry.counter("par_total", "x", ["w"])
     group do |g|
       8.times do
-        g.spawn_parallel do
+        g.spawn(unit: :new) do
           500.times { hits.inc(["same"]) }
           0
         end

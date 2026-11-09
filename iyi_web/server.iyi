@@ -61,6 +61,7 @@
 # that is waiting for a request, and when the deadline passes it cuts it
 # off. A `close` from a request, on a worker, is sent to the accepting
 # thread, which drains.
+@[Unsafe("a connection's socket reads and writes through the caller's byte buffers to time each request, and reads HTTP/2's preface from the first bytes that arrive")]
 module iyi_web/server
 
 import std/http
@@ -286,7 +287,7 @@ pub class Server
   # socket is made again from on the worker (the accepting thread never
   # touches its own object again), and the frozen TLS config, all `Share`.
   def self.spawn_parallel(g : IyiGroup, site : ParallelSite, fd : Int32, family : Int32, tls : TlsFrozenServerConfig?, unix : Bool) : Nil
-    g.spawn_parallel do
+    g.spawn(unit: :new) do
       site.serve(fd, family, tls, unix)
       0
     end
@@ -295,9 +296,12 @@ pub class Server
   # A method of its own because a `while` body is not a scope: a block
   # spawned in the accept loop captures the loop's one `client`, which the
   # next accept overwrites before the task runs. A parameter is bound per
-  # call.
+  # call. `unit: :same` because `workers: 1` promises one thread: a plain
+  # `spawn` is placed by the compiler (iyi 0.21, SPEC.md III.4.16), and
+  # would go to the pool the day everything this block captures became
+  # `Share`.
   def self.spawn_serial(g : IyiGroup, site : SerialSite, fd : Int32, family : Int32, tls : TlsServerConfig?, unix : Bool) : Nil
-    g.spawn do
+    g.spawn(unit: :same) do
       site.serve(fd, family, tls, unix)
       0
     end

@@ -24,7 +24,7 @@ The state at the time of the review:
 |---|---|
 | Routing | Radix tree, `:id` and `*path`, automatic 404/405, an error at startup for a route defined twice, tolerance of a trailing `/` |
 | Type safety | The type a route returns is checked at compile time (`IntoBody`); Kemal has nothing like it |
-| Every core | Every core is used through `spawn_parallel`; writing a data race is a compile error, and the message shows both ways out. Neither Express nor FastAPI has this: the strongest card |
+| Every core | Every core is used through `spawn(unit: :new)`; writing a data race is a compile error, and the message shows both ways out. Neither Express nor FastAPI has this: the strongest card |
 | JSON | `json_as(T)` + `Validate`: 400/415/422 answers and field paths like `tags[1]`; the closest piece to FastAPI/Pydantic |
 | Security | Header injection blocked, CSRF, encrypted cookie sessions, rate limiting, basic auth, security headers, the `%5C` path traversal fix on Windows |
 | Protocols | WebSocket, SSE, streaming, TLS, IPv6, unix sockets, graceful shutdown, timeouts |

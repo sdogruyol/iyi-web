@@ -2,10 +2,13 @@
 
 ## Requirements
 
-[iyi](https://iyi-lang.com) 0.20.1 or later: `spawn_parallel`, the pool
-every connection is served on, and the `@[Share(serial: workers, crossing: ...)]` mark every
-registration carries, so a refusal is made on your line and names both
-ways past it.
+[iyi](https://iyi-lang.com) 0.21.0 or later: `spawn(unit: :new)`, the pool
+every connection is served on (0.20 spelled it `spawn_parallel`, which 0.21.0
+removed), the `@[Share(serial: workers, crossing: ...)]` mark every
+registration carries, so a refusal is made on your line and names both ways
+past it, and `@[Unsafe("...")]` above a `module` header (SPEC.md III.13),
+which every iyi-web module that handles raw memory carries and 0.20.x
+refuses.
 TLS (`std/tls`'s server), the streaming compressor (`std/compress`'s
 `Deflater`) and the media-type table (`std/mime`) arrived in 0.18.0.
 

@@ -9,7 +9,7 @@ Prometheus metrics.
 Every step's code was compiled, and its test run, against this version of
 iyi-web; the answers shown are what the program printed.
 
-You need [iyi](https://iyi-lang.com) 0.20.1 or later and the `iyi-web`
+You need [iyi](https://iyi-lang.com) 0.21.0 or later and the `iyi-web`
 command ([installing it](cli.md#installing)).
 
 ## 1. A new project

@@ -39,6 +39,7 @@
 # send what is left; `flush` sends it at once from wherever it is called.
 # Exporters are a trait: `JsonLinesExporter` writes one JSON object per
 # span per line, `OtlpHttpExporter` posts OTLP/HTTP JSON to a collector.
+@[Unsafe("trace context headers are checked by reading their bytes through the string's buffer")]
 module iyi_web/tracing
 
 import std/json::{JSON, Builder}

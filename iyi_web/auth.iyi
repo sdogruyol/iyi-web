@@ -28,6 +28,7 @@
 #
 # and, for OAuth2's password flow, a token route that checks the password
 # `password_grant` read and answers `token_response`.
+@[Unsafe("a bearer token is checked by reading its bytes through the string's buffer")]
 module iyi_web/auth
 
 import std/time::{Span}

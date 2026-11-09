@@ -15,7 +15,7 @@
 # so work that must outlive it needs a group that lives longer: the
 # runner's. `run` holds that group for as long as the server serves (the
 # DSL's `run` starts it beside the listener), takes each job from a queue
-# and starts it with `spawn_parallel`, on whichever worker is free.
+# and starts it with `spawn(unit: :new)`, on whichever worker is free.
 #
 # **Isolation.** Each job runs inside a task of its own whose value the
 # runner reads, which is where iyi catches a panic (SPEC.md III.1.4): a
@@ -238,7 +238,7 @@ pub class Background
   private def launch(g : IyiGroup, job : BackgroundJob) : Nil
     me = self
     @active.add(1)
-    g.spawn_parallel do
+    g.spawn(unit: :new) do
       me.isolated(job)
       0
     end

@@ -18,6 +18,7 @@
 # and either way every temporary file already written is deleted before
 # the error is returned. On success the caller owns the files and calls
 # `delete` when the request is over.
+@[Unsafe("header parameters are scanned through the string's buffer, and a quoted value is unescaped into a buffer it allocates and copies into the string")]
 module iyi_web/multipart
 
 import std/file::{File}

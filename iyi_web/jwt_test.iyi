@@ -31,8 +31,7 @@ end
 # A token with this header and payload, signed with SECRET as given.
 def forged(header : String, payload : String) : String
   signing = encode_base64url(header) + "." + encode_base64url(payload)
-  bytes = HMAC.digest(SHA256, SECRET, signing)
-  signing + "." + encode_base64url(String.new(bytes.size) { |target| target.copy_from(bytes.to_unsafe, bytes.size) })
+  signing + "." + encode_base64url(String.new(HMAC.digest(SHA256, SECRET, signing)))
 end
 
 describe "JWT" do

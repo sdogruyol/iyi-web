@@ -1,6 +1,7 @@
 # RFC 9110 HTTP-date (`IMF-fixdate`). The prelude has UTC civil time and
 # no strftime, so the weekday and month tables live here. Parsing reads
 # `IMF-fixdate` only, the one form a sender is allowed to generate.
+@[Unsafe("a date's fixed-width digits are read through the string's buffer")]
 module iyi_web/http_date
 
 import std/time::{Time, DayOfWeek}
