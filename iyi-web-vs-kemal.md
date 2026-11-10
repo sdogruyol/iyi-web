@@ -195,7 +195,7 @@ Found later and fixed:
 | Command line | `-b` (IPv4 or IPv6), `-p`, `-s`, `--ssl-key-file`, `--ssl-cert-file`, `-h`, `extra_options`; also `--ssl-min-version 1.2` and `--ssl-client-ca FILE` (not in Kemal) |
 | TLS | `config.ssl` (a `TlsServerConfig`), `bind_tls`, `wss://`; TLS 1.3 and 1.2 over iyi's own std/tls, with mutual TLS (`client_roots`, `env.request.peer_certificates`) |
 | Listening options | IPv6 and `unix_socket` (with TLS too); `read_timeout`, `write_timeout` and `idle_timeout` (not in Kemal) |
-| Installation | `iyi get github.com/sdogruyol/iyi-web` writes `require github.com/sdogruyol/iyi-web v0.6.0` to `iyi.mod`, and files write `import github.com/sdogruyol/iyi-web/iyi_web/dsl::*`; with `--as web` the line ends `as web` and files write `import web/iyi_web/dsl::*` (iyi 0.18.0 and later); `iyi-web new` writes a project that already requires it |
+| Installation | `iyi get github.com/sdogruyol/iyi-web` writes `require github.com/sdogruyol/iyi-web v0.7.0` to `iyi.mod`, and files write `import github.com/sdogruyol/iyi-web/iyi_web/dsl::*`; with `--as web` the line ends `as web` and files write `import web/iyi_web/dsl::*` (iyi 0.18.0 and later); `iyi-web new` writes a project that already requires it |
 | Examples | Fifteen programs and a PostgreSQL project, from `hello` to a JSON API, typed routes with OpenAPI and JWT sign-in, uploads, templates, routers, middleware, SSE, a WebSocket chat room, cookies, metrics and tracing, and in-process testing |
 
 ### Beyond Kemal

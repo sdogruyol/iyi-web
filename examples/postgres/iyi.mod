@@ -3,8 +3,8 @@
 # checkout; outside the repository, delete that line.
 module todos-pg
 
-require github.com/sdogruyol/iyi-web v0.6.0 as web
-require github.com/iyilang/db v0.4.0 as db
-require github.com/iyilang/pg v0.4.0 as pg
+require github.com/sdogruyol/iyi-web v0.7.0 as web
+require github.com/iyilang/db v0.5.0 as db
+require github.com/iyilang/pg v0.5.0 as pg
 
 replace github.com/sdogruyol/iyi-web => ../..
