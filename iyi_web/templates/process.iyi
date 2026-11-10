@@ -24,6 +24,7 @@
 # Not a module: it declares no `iyi_web/` path, so `import` cannot reach it,
 # and `run` finds it by this file's place beside `templates.iyi`.
 
+@[Unsafe("the generator walks a template's text through the string's buffer to escape it and to trim blanks, as std/eiy's does, for speed")]
 module iyi_web_templates_process
 
 import std/eiy::{Eiy}

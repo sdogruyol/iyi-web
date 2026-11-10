@@ -4,6 +4,7 @@
 # Crystal's Kemal reopens `HTTP::Server::Context`. That is the open-class
 # move R-3 exists to forbid, so this type lives here and is the whole of
 # what a handler sees.
+@[Unsafe("the RFC 8187 filename encoder reads the name's bytes through the string's buffer")]
 module iyi_web/context
 
 import std/file::{File}

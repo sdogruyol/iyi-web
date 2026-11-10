@@ -21,6 +21,7 @@
 # every request: serve them over TLS.
 #
 # Not in the default stack: `use BasicAuthHandler.new(...)`.
+@[Unsafe("the strict base64 check reads the credentials' bytes through the string's buffer")]
 module iyi_web/basic_auth
 
 import std/base64::{Base64}

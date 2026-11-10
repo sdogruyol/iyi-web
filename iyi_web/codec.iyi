@@ -5,6 +5,7 @@
 # is not a place to 400 over `%GG`, so the decoder lives here. Query
 # tables are last-wins `Hash`, which is what `env.params` is; the pairs
 # they are built from keep every value, in order.
+@[Unsafe("percent-decoding writes the decoded bytes into a buffer it allocates and indexes itself, then copies them into the string it answers")]
 module iyi_web/codec
 
 import std/text

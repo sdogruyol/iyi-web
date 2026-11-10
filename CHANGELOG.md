@@ -6,6 +6,33 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
+Requires iyi 0.21.0 or later. iyi 0.21.0 made `spawn` one verb (SPEC.md
+III.4.16/18) and removed `spawn_parallel`, and it refuses raw memory in a
+module that is not marked `@[Unsafe("why")]` (SPEC.md III.13); 0.20.x
+refuses both new spellings, so no source of this library compiles on both.
+
+### Changed
+
+- A connection on the pool, and a background job, is started with
+  `spawn(unit: :new)`, 0.21.0's spelling of `spawn_parallel`; nothing
+  else about either changed.
+- A server with `workers 1` starts each connection with
+  `spawn(unit: :same)`. On 0.21.0 a plain `spawn` is placed by the
+  compiler and runs on the pool where it can prove that safe, so the
+  promise that `workers 1` serves on the accepting thread is now said
+  at the spawn rather than left to what its block happens to capture.
+- The eighteen modules that read or write a string's bytes through its
+  buffer (`auth`, `basic_auth`, `codec`, `context`, `cookies`, `csrf`,
+  `headers`, `http_date`, `metrics`, `multipart`, `range`, `request_id`,
+  `server`, `token`, `tracing`, `validation`, `websocket` and the
+  template generator `templates/process`) are marked `@[Unsafe("why")]`
+  above their `module` header, each saying what it does with the raw
+  memory.
+- `coerce` reads a parameter's first and last byte with `byte_at`, and
+  `jwt` makes its HMAC's string with `String.new(Array(UInt8))`, so
+  neither handles raw memory and both stay checked. `websocket_test` and
+  `jwt_test` do the same.
+
 ## [0.6.0] - 2026-11-06
 
 Requires iyi 0.20.1 or later.

@@ -1,7 +1,7 @@
 # Every core
 
 `run` serves each connection as a parallel task on a pool of worker
-threads (iyi's `spawn_parallel`, SPEC.md III.4.13): whichever worker is
+threads (iyi's `spawn(unit: :new)`, SPEC.md III.4.13): whichever worker is
 free takes it, so a CPU-bound route - a bcrypt check, a template - uses
 the machine rather than one thread. The pool has one worker per core the
 process may run on; `IYI_WORKERS`, `workers 4`, `config.workers = 4` or
@@ -61,8 +61,9 @@ A constant the block names is checked as a capture is. One it reaches
 through the functions it calls is warned about, with the path (iyi's
 reach warning, #148): make it a `List` if it is only read, put it behind
 a `Mutex`, or say why every worker may reach it with `@[SafeReach("...")]`
-on the constant. iyi-web's own programs, tests and examples compile with
-no such warning.
+on the constant, which the compiler proves: every write before the first
+parallel task starts, or behind one `Mutex#lock`. iyi-web's own programs,
+tests and examples compile with no such warning.
 
 Settings are copied when a server on more than one worker starts
 (`Settings`); one changed on `config` afterwards does not reach it.

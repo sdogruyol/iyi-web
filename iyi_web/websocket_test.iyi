@@ -68,7 +68,7 @@ class Peer
     raise "the server kept the connection open after its close frame" unless frame.nil?
     payload = got.payload
     return {1005, ""} if payload.empty?
-    code = (payload.to_unsafe[0].to_i32 << 8) | payload.to_unsafe[1].to_i32
+    code = (payload.byte_at(0).to_i32 << 8) | payload.byte_at(1).to_i32
     {code, payload[2, payload.bytesize - 2]}
   end
 end
@@ -152,10 +152,9 @@ def settings(origins : Array(String) = [] of String) : Config
 end
 
 def uniform?(text : String, byte : UInt8) : Bool
-  bytes = text.to_unsafe
   index = 0
   while index < text.bytesize
-    return false unless bytes[index] == byte
+    return false unless text.byte_at(index) == byte
     index = index + 1
   end
   true
@@ -715,7 +714,7 @@ describe "WebSocket session" do
         assert frame.payload.bytesize == size
         index = 0
         while index < 3
-          counts[index] = counts[index] + 1 if uniform?(frame.payload, letters[index].to_unsafe[0])
+          counts[index] = counts[index] + 1 if uniform?(frame.payload, letters[index].byte_at(0))
           index = index + 1
         end
       end

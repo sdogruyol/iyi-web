@@ -19,7 +19,7 @@ describe "Store" do
     total = Store.new { 0 }
     group do |g|
       8.times do |worker|
-        g.spawn_parallel do
+        g.spawn(unit: :new) do
           1000.times do
             counts.update { |h| h["hits"] = (h["hits"]? || 0) + 1 }
             total.replace { |n| n + 1 }
@@ -38,7 +38,7 @@ describe "Store" do
     items = HashStore(Int32, Item).new
     group do |g|
       4.times do
-        g.spawn_parallel do
+        g.spawn(unit: :new) do
           250.times do
             items.update { |h| id = h.size + 1; h[id] = Item.new(id, "n"); id }
           end

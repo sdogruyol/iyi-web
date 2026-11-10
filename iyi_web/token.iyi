@@ -2,6 +2,7 @@
 # are spooled into, session ids and CSRF tokens. Tokens that travel in
 # cookies, headers and form fields are unpadded base64url, which needs no
 # escaping in any of the three.
+@[Unsafe("random bytes are copied straight into a new string's buffer, and base64url text is checked by reading its bytes through the string's buffer")]
 module iyi_web/token
 
 import std/base64::{Base64}

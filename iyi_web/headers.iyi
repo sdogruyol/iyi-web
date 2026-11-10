@@ -8,6 +8,7 @@
 # A name must be an RFC 9110 token and a value must not carry control
 # characters. Writing either is a panic: a CR or LF in a value is how a
 # `Location` built from a query string becomes a second, forged header.
+@[Unsafe("header names and values are validated by reading their bytes through the string's buffer")]
 module iyi_web/headers
 
 pub class Headers

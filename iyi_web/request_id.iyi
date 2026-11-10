@@ -15,6 +15,7 @@
 # hostile where this one replaces it.
 #
 # Not in the default stack: `use RequestIdHandler.new`.
+@[Unsafe("an incoming id is checked by reading its bytes through the string's buffer")]
 module iyi_web/request_id
 
 import std/uuid::{UUID}

@@ -169,8 +169,7 @@ pub struct JWT
   end
 
   private def self.mac(secret : String, data : String) : String
-    bytes = HMAC.digest(SHA256, secret, data)
-    String.new(bytes.size) { |target| target.copy_from(bytes.to_unsafe, bytes.size) }
+    String.new(HMAC.digest(SHA256, secret, data))
   end
 
   private def self.object_of(part : String) : Hash(String, Any)?

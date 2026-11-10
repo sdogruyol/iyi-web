@@ -24,6 +24,7 @@
 # bytes for the same token, so a compressed response (BREACH) gives away
 # nothing about it by its length. The comparison takes the same time
 # whichever byte differs.
+@[Unsafe("a masked token is unmasked by reading both halves through their strings' buffers and writing the xor straight into the new string's buffer")]
 module iyi_web/csrf
 
 import std/crypto::{Subtle}
