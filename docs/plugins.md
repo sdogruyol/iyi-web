@@ -222,7 +222,7 @@ iyi-web-timing/
 
 ```
 module github.com/you/iyi-web-timing
-require github.com/sdogruyol/iyi-web v0.6.0 as web
+require github.com/sdogruyol/iyi-web v0.7.0 as web
 ```
 
 - **The module path is the repository.** `iyi get` clones

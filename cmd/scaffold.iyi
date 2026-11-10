@@ -30,7 +30,7 @@ import cmd/usage::{UsageError}
 # The iyi-web release a new project requires. The newest published tag:
 # the line has to name a version `iyi get` can fetch, and `iyi get -u` in
 # the project moves it on from there.
-pub WEB_VERSION = "0.6.0"
+pub WEB_VERSION = "0.7.0"
 
 # The repository a new project requires, under the short name `web`.
 pub WEB_MODULE = "github.com/sdogruyol/iyi-web"

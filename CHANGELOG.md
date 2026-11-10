@@ -6,6 +6,8 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-10
+
 Requires iyi 0.21.0 or later. iyi 0.21.0 made `spawn` one verb (SPEC.md
 III.4.16/18) and removed `spawn_parallel`, and it refuses raw memory in a
 module that is not marked `@[Unsafe("why")]` (SPEC.md III.13); 0.20.x
@@ -745,7 +747,8 @@ The first release. Requires iyi 0.14.1 or later.
   `Content-Length` is read, before the body is buffered.
 - Static file paths with a `..` segment or a NUL byte are refused.
 
-[Unreleased]: https://github.com/sdogruyol/iyi-web/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/sdogruyol/iyi-web/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/sdogruyol/iyi-web/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/sdogruyol/iyi-web/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/sdogruyol/iyi-web/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/sdogruyol/iyi-web/compare/v0.4.0...v0.5.0
