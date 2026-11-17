@@ -966,7 +966,9 @@ end
 # its next request, and a write waits `write_timeout` for the client to
 # take bytes. A bound std/http or std/tls sets for a read of its own (a
 # handshake's, a lingering close's) holds too, the sooner of the two. A
-# connection taken over by an upgrade waits as its protocol likes. A
+# connection taken over by an upgrade waits as its protocol likes - a
+# WebSocket asks for each read's bound itself, what is left of
+# `websocket_idle_timeout` for its next frame (`iyi_web/websocket`). A
 # request that does not arrive in time is answered `408` when the
 # connection is HTTP/1 in the clear; under TLS or HTTP/2 it is closed
 # (std/http closes it, close_notify or GOAWAY first), since the bytes on

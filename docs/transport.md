@@ -139,6 +139,7 @@ alone. Off by default.
 | each write | `write_timeout` (60 s) | connection ends |
 | requests per connection | `max_keepalive_requests` (100) | `Connection: close` |
 | connections at once | `max_connections` (1024) | next one waits to be accepted |
+| next frame on an open WebSocket | `websocket_idle_timeout` (120 s) | close `1001` |
 
 A head that misses `read_timeout` gets its `408` over HTTP/1 in the clear;
 under TLS or HTTP/2 the connection is closed (close_notify or GOAWAY),

@@ -62,8 +62,16 @@ is.
 router. A `GET` with `Upgrade: websocket` runs the `before` filters for `GET`,
 then gets `101 Switching Protocols`. The block then receives the socket and the
 context and sets the callbacks, and the connection's fiber reads frames until
-the socket closes. The connection carries no more HTTP requests and has no read
-timeout.
+the socket closes. The connection carries no more HTTP requests. It is held to
+`websocket_idle_timeout` (120 seconds) instead of the HTTP timeouts: a client
+that has sent nothing of its next frame for half that time is pinged, and one
+that sends no whole frame - a message, a ping or a pong - for all of it, from
+the end of its last one, gets a close frame with `1001` and the connection
+ends. A browser answers the ping with a pong by itself, so a page that only
+listens (notifications, a live feed) stays open for as long as it is there,
+with no code of its own. Half a frame is not pinged: followed by silence, or
+trickled a byte at a time, it is closed at the timeout, its buffered bytes
+with it. `0` turns both off.
 
 - Callbacks: `on_message` (text), `on_binary` (the bytes as a `String`),
   `on_ping`, `on_pong` and `on_close(code, reason)`.

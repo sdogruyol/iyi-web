@@ -40,6 +40,7 @@ config.max_request_body_size = 1024 * 1024
 | `compress` | `false` | |
 | `websocket_allowed_origins` | `[] of String` (same-origin) | |
 | `websocket_max_message_size` | `8 * 1024 * 1024` | |
+| `websocket_idle_timeout` | `120` | |
 | `app_name` | `"iyi-web"` | |
 
 - `max_keepalive_requests` caps the requests served on one connection before
@@ -88,6 +89,14 @@ config.max_request_body_size = 1024 * 1024
 - `websocket_allowed_origins` lists origins such as `"https://example.com"`;
   `"*"` admits every request and `"null"` a sandboxed page.
 - `websocket_max_message_size` counts a fragmented message whole.
+- `websocket_idle_timeout` is how many seconds an open WebSocket waits for
+  the client's next whole frame - a message, a ping or a pong - before it
+  closes the connection with `1001`. The time runs from the end of the
+  last frame. Half way through it, a client that has sent nothing of its
+  next frame is pinged; a browser answers with a pong by itself, so a page
+  that only listens stays open. Half a frame followed by silence, or a
+  frame trickled a byte at a time, is not pinged and is closed at the
+  timeout. `0` turns both off.
 - `app_name` and `env` appear in the line printed at startup. With `env` set
   to `test`, `run` binds the port without serving requests.
 - `powered_by true` adds `X-Powered-By: iyi-web` to every response.

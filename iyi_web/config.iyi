@@ -83,6 +83,7 @@ pub class Config
   @compress : Bool
   @websocket_allowed_origins : Array(String)
   @websocket_max_message_size : Int32
+  @websocket_idle_timeout : Int32
 
   def initialize
     @app_name = "iyi-web"
@@ -131,6 +132,7 @@ pub class Config
     @compress = false
     @websocket_allowed_origins = [] of String
     @websocket_max_message_size = 8 * 1024 * 1024
+    @websocket_idle_timeout = 120
   end
 
   pub def app_name : String
@@ -604,6 +606,23 @@ pub class Config
     @websocket_max_message_size = value
   end
 
+  # Seconds an open WebSocket waits for the client's next whole frame
+  # before it closes the connection with 1001. Any frame counts - a ping
+  # or a pong as much as a message - and the time runs from the end of
+  # the last one, so a client that sends half a frame and stops is not
+  # held open, nor its half frame kept, for longer than this. Half way
+  # through, a client that has sent nothing of its next frame is pinged,
+  # and the pong a browser answers with by itself keeps a page that only
+  # listens open. 120 by default; 0 waits for as long as the client
+  # likes, and pings nobody.
+  pub def websocket_idle_timeout : Int32
+    @websocket_idle_timeout
+  end
+
+  pub def websocket_idle_timeout=(value : Int32) : Int32
+    @websocket_idle_timeout = value
+  end
+
   pub def development? : Bool
     @env == "development"
   end
@@ -653,6 +672,7 @@ pub class Settings
   @show_exceptions : Bool
   @websocket_allowed_origins : List(String)
   @websocket_max_message_size : Int32
+  @websocket_idle_timeout : Int32
   @max_file_uploads : Int32
   @max_multipart_form_field_size : Int32
   @max_form_fields : Int32
@@ -677,6 +697,7 @@ pub class Settings
     @show_exceptions = config.show_exceptions?
     @websocket_allowed_origins = List.new(config.websocket_allowed_origins)
     @websocket_max_message_size = config.websocket_max_message_size
+    @websocket_idle_timeout = config.websocket_idle_timeout
     @max_file_uploads = config.max_file_uploads
     @max_multipart_form_field_size = config.max_multipart_form_field_size
     @max_form_fields = config.max_form_fields
@@ -711,6 +732,10 @@ pub class Settings
 
   pub def websocket_max_message_size : Int32
     @websocket_max_message_size
+  end
+
+  pub def websocket_idle_timeout : Int32
+    @websocket_idle_timeout
   end
 
   pub def max_connections : Int32

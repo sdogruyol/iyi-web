@@ -40,18 +40,21 @@ describe "Config" do
     assert fresh.tls_config.nil?
     assert fresh.max_form_fields == 1000
     assert fresh.max_connections == 1024
+    assert fresh.websocket_idle_timeout == 120
   end
 
   it "carries max_form_fields to a request's params, and the new limits to Settings" do
     fresh = Config.new
     fresh.max_form_fields = 2
     fresh.max_connections = 7
+    fresh.websocket_idle_timeout = 9
     ctx = Context.for(http_request("GET", "/", "a=1&b=2&c=3"))
     fresh.prepare(ctx)
     assert ctx.params.body_error == 414
     assert ctx.params.query.empty?
     copied = Settings.new(fresh, fresh.log_requests.shared || raise "the default logger is shared")
     assert copied.max_connections == 7
+    assert copied.websocket_idle_timeout == 9
     shared = Context.for(http_request("GET", "/", "a=1&b=2&c=3"))
     copied.prepare(shared)
     assert shared.params.body_error == 414

@@ -782,7 +782,7 @@ pub class Routing(R, E, W, S)
       refuse_upgrade(ctx, status)
     else
       block = socket.block
-      WebSocket.accept(ctx, @settings.websocket_max_message_size, ->(ws : WebSocket, env : Context) { block.call({ws, env}) })
+      WebSocket.accept(ctx, @settings.websocket_max_message_size, ->(ws : WebSocket, env : Context) { block.call({ws, env}) }, @settings.websocket_idle_timeout)
     end
     run_filters(ctx, :after, "GET", path)
     true
