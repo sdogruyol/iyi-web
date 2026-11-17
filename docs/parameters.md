@@ -157,4 +157,7 @@ never join it to a directory path without cleaning it first.
 
 A malformed `multipart/form-data` body gets `400`. More file parts than
 `max_file_uploads`, or a text field larger than
-`max_multipart_form_field_size`, gets `413 Content Too Large`.
+`max_multipart_form_field_size`, gets `413 Content Too Large`. A body
+refused partway leaves none of its temporary files behind, and neither does
+one whose upload could not be written (a full disk panics the request): the
+files already accepted and the one half-written are deleted as it unwinds.

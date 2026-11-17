@@ -216,6 +216,30 @@ describe "parse_multipart" do
     assert result.fields == [{"big", "value"}, {"after", "1"}]
     assert elapsed < Span.seconds(2), "a byte-at-a-time header block took " + elapsed.total_milliseconds.to_s + "ms"
   end
+
+  # A full disk panics in `IyiIO#write`, which nothing can catch: the
+  # second part's file here is handed back closed after a few bytes, so
+  # its first write panics just as one past the disk's end would. The
+  # first part's accepted file and the second's half-written one must
+  # both be gone once the panic has unwound.
+  it "deletes every upload it made when writing one panics, the half-written one included" do
+    before = uploads_on_disk
+    opened = Atomic(Int32).new(0)
+    failing = ->(path : String) do
+      file = File.open(path, "w", 65536, 0o600)
+      if opened.add(1) == 1
+        file.write("partial")
+        file.close
+      end
+      file
+    end
+    body = file_part("f", "1.txt", "text/plain", "first") + file_part("f", "2.txt", "text/plain", "second") + closing
+    assert panics? { parse_multipart(RequestBody.text(body), BOUNDARY, 10, 1024, 65536, failing); nil }
+    assert opened.get == 2
+    after = uploads_on_disk
+    assert after.size == before.size
+    after.each { |entry| assert before.includes?(entry) }
+  end
 end
 
 describe "FileUpload#delete" do

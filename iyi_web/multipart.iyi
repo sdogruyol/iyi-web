@@ -167,15 +167,25 @@ end
 # closing boundary is read and dropped, so the connection's next request
 # starts where it should.
 # *piece* is the most read from *source* at once.
-pub def parse_multipart(source : RequestBody, boundary : String, max_files : Int32, max_field_size : Int32, piece : Int32 = 65536) : Multipart | MultipartError
+#
+# A panic partway leaves no temporary file behind either. A full disk
+# makes `File.open` or `IyiIO#write` panic, and iyi has no rescue to turn
+# that into an answer (SPEC.md III.1), so the files the parse made - the
+# ones already accepted and the one half-written - are deleted by
+# `defer`s, which run as a panic unwinds as on every return. *spool*
+# opens a file part's temporary file for writing, given its path; nil is
+# `File.open(path, "w", 65536, 0o600)`. It is how a test hands in a file
+# that fails, which a working disk never does.
+pub def parse_multipart(source : RequestBody, boundary : String, max_files : Int32, max_field_size : Int32, piece : Int32 = 65536, spool : Proc(String, IyiIO)? = nil) : Multipart | MultipartError
   return MultipartError.new(400, "multipart boundary is empty") if boundary.empty?
   fields = [] of Tuple(String, String)
   files = [] of FileUpload
-  outcome = read_parts(PartReader.new(source, piece), boundary, fields, files, max_files, max_field_size)
-  if outcome
-    discard(files)
-    return outcome
-  end
+  opener = spool || ->(path : String) { File.open(path, "w", 65536, 0o600) }
+  kept = false
+  defer discard(files, kept)
+  outcome = read_parts(PartReader.new(source, piece), boundary, fields, files, max_files, max_field_size, opener)
+  return outcome if outcome
+  kept = true
   Multipart.new(fields, files)
 end
 
@@ -184,7 +194,7 @@ end
 MAX_PART_HEADERS = 65536
 
 # Every part of the body into *fields* and *files*, or why not.
-private def read_parts(reader : PartReader, boundary : String, fields : Array(Tuple(String, String)), files : Array(FileUpload), max_files : Int32, max_field_size : Int32) : MultipartError?
+private def read_parts(reader : PartReader, boundary : String, fields : Array(Tuple(String, String)), files : Array(FileUpload), max_files : Int32, max_field_size : Int32, spool : Proc(String, IyiIO)) : MultipartError?
   dash = "--" + boundary
   delimiter = "\r\n" + dash
   # The first boundary opens the body or starts a line; anything before
@@ -212,7 +222,7 @@ private def read_parts(reader : PartReader, boundary : String, fields : Array(Tu
     line = reader.line(1024)
     return line if line.is_a?(MultipartError)
     return MultipartError.new(400, "malformed multipart boundary line") unless line && padding?(line)
-    if problem = read_part(reader, delimiter, fields, files, max_files, max_field_size)
+    if problem = read_part(reader, delimiter, fields, files, max_files, max_field_size, spool)
       return problem
     end
   end
@@ -221,7 +231,7 @@ end
 
 # One part: its headers, then its content up to the next delimiter, which
 # is taken with it.
-private def read_part(reader : PartReader, delimiter : String, fields : Array(Tuple(String, String)), files : Array(FileUpload), max_files : Int32, max_field_size : Int32) : MultipartError?
+private def read_part(reader : PartReader, delimiter : String, fields : Array(Tuple(String, String)), files : Array(FileUpload), max_files : Int32, max_field_size : Int32, spool : Proc(String, IyiIO)) : MultipartError?
   if failed = reader.want(2)
     return failed
   end
@@ -255,14 +265,19 @@ private def read_part(reader : PartReader, delimiter : String, fields : Array(Tu
     return MultipartError.new(413, "Too many file parts (max #{max_files})") if files.size >= max_files
     dir = spool_dir
     path = File.join(dir, "upload")
-    file = File.open(path, "w", 65536, 0o600)
+    # Until it is in *files* the upload is this part's to delete, on a
+    # refusal and on a panic alike; the file is closed before that, as
+    # the later `defer` runs first.
+    spooled = FileUpload.new(name, filename, path, headers, 0, dir)
+    kept = false
+    defer discard(spooled, kept)
+    file = spool.call(path)
+    defer file.close
     written = reader.content(delimiter, -1) { |piece| file.write(piece) }
+    return written if written.is_a?(MultipartError)
     file.close
-    if written.is_a?(MultipartError)
-      FileUpload.new(name, filename, path, headers, 0, dir).delete
-      return written
-    end
     files << FileUpload.new(name, filename, path, headers, written, dir)
+    kept = true
   else
     builder = String::Builder.new
     size = reader.content(delimiter, max_field_size) { |piece| builder << piece }
@@ -481,8 +496,16 @@ private def part_headers(block : String) : Headers?
   headers
 end
 
-private def discard(files : Array(FileUpload)) : Nil
-  files.each { |upload| upload.delete }
+# A `defer`'s cleanup: *files* deleted unless they were *kept*, which is
+# read as the scope ends. `defer x unless kept` is not that: the
+# modifier makes the `defer` itself conditional, and its scope the
+# `unless`'s body, so the upload was deleted the moment it was made.
+private def discard(files : Array(FileUpload), kept : Bool) : Nil
+  files.each { |upload| discard(upload, kept) }
+end
+
+private def discard(upload : FileUpload, kept : Bool) : Nil
+  upload.delete unless kept
 end
 
 # Splits `kind; key=value; key="quoted value"` into the leading token and
