@@ -108,6 +108,20 @@ describe "JWT" do
     assert refusal(JWT.verify(issued, SECRET, audience: "admin")) == "token audience is not accepted"
   end
 
+  it "refuses every other last character that decodes to the same signature" do
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    parts = token.split('.')
+    sig = parts[2]
+    head = sig[0, sig.bytesize - 1]
+    place = alphabet.index(sig[sig.bytesize - 1, 1]) || raise("not base64url")
+    group = place - place % 4
+    4.times do |offset|
+      next if group + offset == place
+      sibling = head + alphabet[group + offset, 1]
+      assert refusal(JWT.verify(parts[0] + "." + parts[1] + "." + sibling, SECRET, now: NOW)) == "invalid token signature"
+    end
+  end
+
   it "answers 401 and refuses a short secret" do
     assert JWTError.new("x").status == 401
     assert panics? { JWT.sign(Claims.new(sub: "ada"), "short"); nil }

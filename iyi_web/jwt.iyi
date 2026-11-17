@@ -137,9 +137,11 @@ pub struct JWT
     end
     return JWTError.new("unsupported token header: crit") if header.has_key?("crit")
 
-    sent = decode_base64url?(parts[2])
-    expected = mac(secret, parts[0] + "." + parts[1])
-    return JWTError.new("invalid token signature") unless sent && Subtle.constant_time_compare(sent, expected)
+    # The text sent against the canonical encoding of the expected MAC, not
+    # the decoded bytes: decoding ignores the unused low bits of the last
+    # character, so four different last characters would all pass.
+    expected = encode_base64url(mac(secret, parts[0] + "." + parts[1]))
+    return JWTError.new("invalid token signature") unless Subtle.constant_time_compare(parts[2], expected)
 
     text = decode_base64url?(parts[1])
     return JWTError.new("malformed token payload") unless text
