@@ -54,7 +54,11 @@ config.max_request_body_size = 1024 * 1024
   [Transport](transport.md).
 - A request line longer than 8 KiB gets `414 URI Too Long`, and header
   fields past 16 KiB `431 Request Header Fields Too Large`, the bounds
-  Crystal's server holds Kemal to. Neither is a setting.
+  Crystal's server holds Kemal to. Neither is a setting, and both are
+  checked once std/http has read the whole head, which it buffers up to
+  1 MiB (`Server::MAX_HEAD`) first: a client can make the server hold that
+  much of a head before the `431`. A head past 1 MiB std/http answers
+  `431` itself.
 - `max_form_fields` is the most fields the query string may carry, and as
   many again a form body (`application/x-www-form-urlencoded`, or a
   `multipart/form-data` body's text fields). Parsing stops at the field

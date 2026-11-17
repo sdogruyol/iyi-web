@@ -24,7 +24,8 @@
 # per connection, claimed before the accept and given back however the
 # connection ends. The handler each connection is given turns std/http's
 # request into a `Context`, holds the request line to 8 KiB (414) and the
-# fields to 16 KiB (431), the body to `max_request_body_size` (413),
+# fields to 16 KiB (431) once std/http has read the head - which it does
+# up to a megabyte first - and the body to `max_request_body_size` (413),
 # runs the chain and answers what it left.
 #
 # **On every core.** With more than one worker every connection is a
@@ -88,7 +89,7 @@ import iyi_web/failure::{render_error_type_page, render_failure_page}
 # The request line, and the fields after it: Crystal's
 # `HTTP::MAX_REQUEST_LINE_SIZE` and `HTTP::MAX_HEADERS_SIZE`, which Kemal
 # serves under. std/http reads a head of up to a megabyte; past these the
-# request is answered 414 or 431.
+# request is answered 414 or 431, once the whole head has been read.
 pub MAX_REQUEST_LINE =  8192
 pub MAX_HEADERS      = 16384
 
