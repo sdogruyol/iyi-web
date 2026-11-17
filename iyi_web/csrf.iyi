@@ -20,6 +20,9 @@
 # have checked nothing. `exclude ["/api/*"]` for an API that authenticates
 # with a bearer token rather than a cookie, and so has nothing to forge.
 #
+# `Session#regenerate` drops the token with the old id, so a token read
+# before sign-in is refused after it.
+#
 # The token a page carries is masked as Rails masks it: 32 fresh random
 # bytes and the session's token XORed with them. Every page gets different
 # bytes for the same token, so a compressed response (BREACH) gives away
@@ -32,11 +35,13 @@ import std/crypto::{Subtle}
 import std/html::{HTML}
 import iyi_web/handler::{Handler}
 import iyi_web/context::{Context}
-import iyi_web/session::{session}
+import iyi_web/session::{session, SESSION_CSRF_KEY}
 import iyi_web/token::{random_bytes, encode_base64url, decode_base64url?}
 
 # The session key the token is kept under.
-pub CSRF_SESSION_KEY = "_csrf_token"
+# The string lives in iyi_web/session, which drops it on `regenerate` and
+# cannot import this module.
+pub CSRF_SESSION_KEY = SESSION_CSRF_KEY
 
 # Where `CSRFHandler` leaves its field name for `csrf_tag`.
 CSRF_FIELD_KEY = "iyi_web.csrf_field"

@@ -149,6 +149,22 @@ describe "SessionHandler" do
     assert session_cookies(dispatch(app(handler), "POST", "/sign-out")).empty?
   end
 
+  it "drops the CSRF token on regenerate" do
+    handler = SessionHandler.new(SECRET)
+    chained = chain([handler, routes { |r|
+      r.post "/plant" do |env|
+        session(env)[SESSION_CSRF_KEY] = "old"
+        "planted"
+      end
+      r.post "/regenerate" do |env|
+        session(env).regenerate
+        session(env)[SESSION_CSRF_KEY]? || "gone"
+      end
+    }])
+    planted = issued_value(dispatch(chained, "POST", "/plant"))
+    assert dispatch(chained, with_cookie("POST", "/regenerate", planted)).response.body == "gone"
+  end
+
   it "gives a new id on regenerate and keeps the values" do
     handler = SessionHandler.new(SECRET)
     ctx = dispatch(app(handler), with_cookie("POST", "/regenerate", signed_in(handler)))

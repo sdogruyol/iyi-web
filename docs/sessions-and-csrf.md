@@ -45,8 +45,8 @@ the handler is made. `SessionHandler.new` also takes:
 strings, `set(key, value)` for anything `JSON.to_json` writes (read back as
 `JSON::Any` with `json?(key)`), `delete`, `has_key?`, `keys`, `clear`, and
 `id`, a random id for anything kept about the session elsewhere.
-`regenerate` gives the session a new id and keeps its values: call it at
-sign-in. A cookie that was altered, has lapsed, or was sealed under a secret
+`regenerate` gives the session a new id and keeps its values, except the
+CSRF token, which it drops: call it at sign-in. A cookie that was altered, has lapsed, or was sealed under a secret
 that is no longer listed is an empty session.
 
 The response sets the cookie only when the session changed, and deletes it
@@ -86,3 +86,5 @@ compressed response does not give it away. `CSRFHandler.new` takes `field`,
 `header` and the refusal's `message` (default `"Forbidden (CSRF)"`). `only`
 and `exclude` choose the requests it checks; their method defaults to `"*"`,
 every method (a plain handler's is `GET`, which this never checks).
+`Session#regenerate` drops the token, so one a page carried before sign-in
+is refused after it.

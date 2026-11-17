@@ -53,6 +53,11 @@ import iyi_web/headers::{Headers}
 import iyi_web/context::{Context}
 import iyi_web/token::{random_bytes, encode_base64url, decode_base64url?}
 
+# The session key iyi_web/csrf keeps its token under (it exports it as
+# `CSRF_SESSION_KEY`); here so `regenerate` can drop it without importing
+# the module that imports this one.
+pub SESSION_CSRF_KEY = "_csrf_token"
+
 # Most bytes of `name=value` a browser keeps for one cookie (RFC 6265
 # §6.1 asks for at least this many, and Chrome, Firefox and Safari keep no
 # more).
@@ -152,8 +157,10 @@ pub class Session
 
   # A new id and a new issue time, with the values kept. Call it when the
   # user signs in, so an id seen before then - planted, or read over a
-  # shoulder - is not the signed-in session's.
+  # shoulder - is not the signed-in session's. The CSRF token goes too, so
+  # one a page carried before sign-in is refused after it.
   pub def regenerate : Nil
+    @data.delete(SESSION_CSRF_KEY)
     @id = new_id
     @changed = true
   end

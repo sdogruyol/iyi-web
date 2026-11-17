@@ -35,6 +35,11 @@ def csrf_app(csrf : CSRFHandler) : Handler
     r.post "/api/hook" do |env|
       "hook"
     end
+    r.post "/sign-in" do |env|
+      session(env).regenerate
+      session(env)["user"] = "ada"
+      "in"
+    end
   }])
 end
 
@@ -170,6 +175,20 @@ describe "CSRFHandler" do
     app = csrf_app(csrf)
     assert dispatch(app, "POST", "/api/hook").response.body == "hook"
     assert dispatch(app, "POST", "/submit").response.status_code == 403
+  end
+
+  it "refuses a token from before regenerate" do
+    app = csrf_app
+    pair = session_and_token(app)
+    signed = dispatch(app, form_post(pair[0], "authenticity_token=" + pair[1], path: "/sign-in"))
+    assert signed.response.body == "in"
+    cookie = session_cookie(signed) || ""
+    assert !cookie.empty?
+    assert dispatch(app, form_post(cookie, "authenticity_token=" + pair[1])).response.status_code == 403
+    # The session gets a fresh token, which works.
+    fresh = dispatch(app, with_cookie(http_request("GET", "/token"), cookie))
+    renewed = session_cookie(fresh) || cookie
+    assert dispatch(app, form_post(renewed, "authenticity_token=" + fresh.response.body)).response.body == "accepted"
   end
 
   it "reads the field and header names it is given" do
