@@ -217,12 +217,16 @@ token route, and sends the token it gets as a bearer token.
 import std/password::{Bcrypt}
 
 TOKEN = jwt_auth(SECRET, security: SecurityScheme.oauth2_password("/token"))
+UNKNOWN = Bcrypt.hash("no account has this password", 10)
 
 post "/token" do |env|
   grant = password_grant(env)
   next grant if grant.is_a?(OAuthError)
   account = find_account(grant.username)
-  if account && Bcrypt.verify(grant.password, account.password_hash)
+  # Verify against a dummy hash for a name nobody has, so a wrong name takes
+  # as long as a wrong password and the timing does not list the accounts.
+  matched = Bcrypt.verify(grant.password, account ? account.password_hash : UNKNOWN)
+  if account && matched
     token = JWT.sign(Claims.new(sub: account.name, expires_in: Span.new(hours: 1)), SECRET)
     token_response(env, token, Span.new(hours: 1))
     nil
