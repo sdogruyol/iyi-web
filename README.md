@@ -261,13 +261,16 @@ runs the example test.
 
 `bench/compare/` serves the same four endpoints from iyi-web, FastAPI,
 Express, Kemal and Go's `net/http` on one machine, the fourth a PostgreSQL
-query through a connection pool. On a 12-core Windows virtual machine,
-iyi-web answered 71,000-78,000 requests a second on the plain endpoints,
-ahead of Go's `net/http` (65,000-74,000), FastAPI (27,000-33,000) and Kemal
-(about 11,000); on the database query iyi-web and Go were even (37,600 and
-38,000), FastAPI 14,300, Kemal 10,800. [Benchmarks](docs/benchmarks.md) has
-the tables, the setup and what the numbers do not say: an hour earlier the
-same machine gave every framework about a quarter more.
+query through a connection pool. On a 12-core Linux virtual machine, with
+the servers on 6 cores and oha and PostgreSQL on the others (median of
+three runs), iyi-web answered 230,000-255,000 requests a second on the
+plain endpoints: about 90% of Go's `net/http` (263,000-281,000), level with
+Express (220,000-263,000), and three times FastAPI and Kemal (57,000-87,000
+and 70,000-77,000). On the database query Go led with 120,000, then
+iyi-web 84,000, Express 74,000, FastAPI 28,000 and Kemal 24,000. On a
+Windows virtual machine the order of iyi-web and Go was reversed on the
+plain endpoints and even on the query. [Benchmarks](docs/benchmarks.md)
+has the tables, the setup and what the numbers do not say.
 
 `bench/run.sh` times iyi-web against itself, and CI compares every pull
 request with its base branch so a slower hot path fails the build.
