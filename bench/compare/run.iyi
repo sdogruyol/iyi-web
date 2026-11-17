@@ -34,7 +34,10 @@
 # core, Express with one `node:cluster` worker per core. `oha` runs on the
 # same machine and takes cores too, as does PostgreSQL for `/db`; the
 # numbers compare the frameworks with one another on this machine, not
-# with a dedicated load generator's.
+# with a dedicated load generator's. On Linux, `--server-cpus`,
+# `--client-cpus` and `--db-cpus` pin the servers, oha and the PostgreSQL
+# this run starts to separate cores with `taskset`, so they stop competing
+# for the same ones.
 module bench/compare/run
 
 import std/dir::{Dir}
@@ -60,6 +63,11 @@ USAGE = <<-TEXT
     --out DIR         where results.json and results.md go (bench/compare)
     --db URL          PostgreSQL for /db (DATABASE_URL; else one started from pgserver)
     --no-db           leave /db out
+    --server-cpus L   Linux: run every server on these CPUs only, e.g. 0-5
+                      (taskset -c); --workers then defaults to their count
+    --client-cpus L   Linux: run oha on these CPUs only, e.g. 6-7
+    --db-cpus L       Linux: run the PostgreSQL this run starts on these CPUs
+                      only, e.g. 8-11 (not one given by --db or DATABASE_URL)
   TEXT
 
 ROOT  = File.dirname(File.dirname(__DIR__))
@@ -81,11 +89,15 @@ class Options
   property warmup : Int32 = 3
   property connections : Int32 = 64
   property workers : Int32 = System.cpu_count
+  property workers_given : Bool = false
   property only : Array(String) = [] of String
   property port : Int32 = 3950
   property output_dir : String = HERE
   property db : Bool = true
   property database_url : String? = ENV["DATABASE_URL"]?
+  property server_cpus : String? = nil
+  property client_cpus : String? = nil
+  property db_cpus : String? = nil
 
   def initialize
   end
@@ -128,13 +140,15 @@ struct Machine
   getter warmup_s : Int32
   getter connections : Int32
   getter workers : Int32
+  # Which CPUs the servers, oha and PostgreSQL were held to, or "unpinned".
+  getter cpus : String
   getter date : String
   # The PostgreSQL `/db` ran against and the pool sizes, or why there was
   # no `/db`.
   getter database : String
   derive serializable
 
-  def initialize(@os : String, @cpu : String, @cores : Int32, @oha : String, @duration_s : Int32, @warmup_s : Int32, @connections : Int32, @workers : Int32, @date : String, @database : String)
+  def initialize(@os : String, @cpu : String, @cores : Int32, @oha : String, @duration_s : Int32, @warmup_s : Int32, @connections : Int32, @workers : Int32, @cpus : String, @date : String, @database : String)
   end
 end
 
@@ -181,6 +195,27 @@ def found?(command : String, args : Array(String) = ["--version"]) : Bool
   !output_of(command, args).nil?
 end
 
+# *command* with *args*, held to *cpus* by `taskset -c` when they are
+# given. taskset execs the command, so the process started is the command's
+# own (terminate reaches it), and every process it starts inherits the CPUs.
+def pinned(cpus : String?, command : String, args : Array(String)) : {String, Array(String)}
+  cpus ? {"taskset", ["-c", cpus, command] + args} : {command, args}
+end
+
+# How many CPUs a taskset list such as `0-5,8` names, or nil when it is
+# not one.
+def cpu_count_of(list : String) : Int32?
+  count = 0
+  list.split(",").each do |part|
+    bounds = part.strip.split("-")
+    first = bounds.empty? ? nil : bounds[0].to_i?
+    last = bounds.size == 2 ? bounds[1].to_i? : first
+    return nil unless bounds.size <= 2 && first && last && last >= first && first >= 0
+    count += last - first + 1
+  end
+  count > 0 ? count : nil
+end
+
 def first_line(text : String?) : String
   return "" unless text
   text.lines.first? || ""
@@ -219,7 +254,8 @@ class IyiWeb < Framework
 
   def start(port : Int32, options : Options) : ChildProcess | ProcessError
     env = with_db({"IYI_WEB_ENV" => "production"}, options, POOL_PER_WORKER * options.workers)
-    Process.spawn(File.join(BUILD, "iyiweb" + EXE), ["-p", port.to_s], output: Redirect::Null, env: env)
+    command, args = pinned(options.server_cpus, File.join(BUILD, "iyiweb" + EXE), ["-p", port.to_s])
+    Process.spawn(command, args, output: Redirect::Null, env: env)
   end
 end
 
@@ -246,7 +282,8 @@ class FastAPI < Framework
   def start(port : Int32, options : Options) : ChildProcess | ProcessError
     args = ["-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", port.to_s, "--workers", options.workers.to_s, "--no-access-log", "--log-level", "warning"]
     args = args + ["--http", "httptools"] if found?(@python, ["-c", "import httptools"])
-    Process.spawn(@python, args, chdir: File.join(HERE, "fastapi"), output: Redirect::Null, env: with_db({} of String => String, options, POOL_PER_WORKER))
+    command, args = pinned(options.server_cpus, @python, args)
+    Process.spawn(command, args, chdir: File.join(HERE, "fastapi"), output: Redirect::Null, env: with_db({} of String => String, options, POOL_PER_WORKER))
   end
 end
 
@@ -274,7 +311,8 @@ class Express < Framework
 
   def start(port : Int32, options : Options) : ChildProcess | ProcessError
     env = with_db({"PORT" => port.to_s, "WORKERS" => options.workers.to_s, "NODE_ENV" => "production"}, options, POOL_PER_WORKER)
-    Process.spawn("node", ["app.js"], chdir: File.join(HERE, "express"), output: Redirect::Null, env: env)
+    command, args = pinned(options.server_cpus, "node", ["app.js"])
+    Process.spawn(command, args, chdir: File.join(HERE, "express"), output: Redirect::Null, env: env)
   end
 end
 
@@ -327,7 +365,8 @@ class Kemal < Framework
 
   def start(port : Int32, options : Options) : ChildProcess | ProcessError
     env = with_db({"PORT" => port.to_s, "CRYSTAL_WORKERS" => options.workers.to_s, "KEMAL_ENV" => "production"}, options, POOL_PER_WORKER * options.workers)
-    Process.spawn(File.join(BUILD, "kemal" + EXE), [] of String, chdir: BUILD, output: Redirect::Null, env: env)
+    command, args = pinned(options.server_cpus, File.join(BUILD, "kemal" + EXE), [] of String)
+    Process.spawn(command, args, chdir: BUILD, output: Redirect::Null, env: env)
   end
 end
 
@@ -350,7 +389,8 @@ class GoNetHttp < Framework
 
   def start(port : Int32, options : Options) : ChildProcess | ProcessError
     env = with_db({"PORT" => port.to_s, "GOMAXPROCS" => options.workers.to_s}, options, POOL_PER_WORKER * options.workers)
-    Process.spawn(File.join(BUILD, "go" + EXE), [] of String, output: Redirect::Null, env: env)
+    command, args = pinned(options.server_cpus, File.join(BUILD, "go" + EXE), [] of String)
+    Process.spawn(command, args, output: Redirect::Null, env: env)
   end
 end
 
@@ -461,7 +501,8 @@ def check_db(port : Int32) : String?
 end
 
 def oha(url : String, seconds : Int32, options : Options) : Any?
-  text = output_of("oha", ["-z", seconds.to_s + "s", "-c", options.connections.to_s, "--no-tui", "--output-format", "json", url])
+  command, args = pinned(options.client_cpus, "oha", ["-z", seconds.to_s + "s", "-c", options.connections.to_s, "--no-tui", "--output-format", "json", url])
+  text = output_of(command, args)
   text ? JSON.parse?(text) : nil
 end
 
@@ -576,7 +617,9 @@ def parse_options(args : Array(String)) : Options
     when "--duration"    then options.duration = value.to_i? || abort_usage(flag)
     when "--warmup"      then options.warmup = value.to_i? || abort_usage(flag)
     when "--connections" then options.connections = value.to_i? || abort_usage(flag)
-    when "--workers"     then options.workers = value.to_i? || abort_usage(flag)
+    when "--workers"
+      options.workers = value.to_i? || abort_usage(flag)
+      options.workers_given = true
     when "--port"        then options.port = value.to_i? || abort_usage(flag)
     when "--only"        then options.only = value.split(",").map(&.strip)
     when "--out"         then options.output_dir = File.expand_path(value)
@@ -586,6 +629,9 @@ def parse_options(args : Array(String)) : Options
     when "--no-db"
       options.db = false
       index -= 1
+    when "--server-cpus" then options.server_cpus = cpu_list(value, flag)
+    when "--client-cpus" then options.client_cpus = cpu_list(value, flag)
+    when "--db-cpus"     then options.db_cpus = cpu_list(value, flag)
     when "--help", "-h"
       print USAGE
       exit 0
@@ -595,7 +641,28 @@ def parse_options(args : Array(String)) : Options
     index += 2
   end
   options.database_url = nil unless options.db
+  if (cpus = options.server_cpus) && !options.workers_given
+    options.workers = cpu_count_of(cpus) || options.workers
+  end
+  if (options.server_cpus || options.client_cpus || options.db_cpus) && !found?("taskset", ["-V"])
+    STDERR.puts "run: --server-cpus, --client-cpus and --db-cpus need taskset (Linux, util-linux)"
+    exit 2
+  end
   options
+end
+
+# *value* when it is a CPU list taskset takes, else the usage and exit.
+def cpu_list(value : String, flag : String) : String
+  cpu_count_of(value) ? value : (abort_usage(flag); value)
+end
+
+# What the results say about where each part ran.
+def cpu_layout(options : Options) : String
+  parts = [] of String
+  parts << "servers on CPUs " + (options.server_cpus || "any")
+  parts << "oha on CPUs " + (options.client_cpus || "any")
+  parts << "PostgreSQL on CPUs " + (options.db_cpus || "any") if options.database_url
+  options.server_cpus || options.client_cpus || options.db_cpus ? parts.join(", ") : "unpinned"
 end
 
 # The paths timed, in order: `/db` last, when there is a database.
@@ -656,8 +723,9 @@ def start_local_postgres(bin : String, options : Options) : String?
   end
   return nil if output_of(pg_ctl, ["status", "-D", PG_DATA])
   max_connections = [100, POOL_PER_WORKER * options.workers + 20].max
-  step("start PostgreSQL", pg_ctl, ["start", "-D", PG_DATA, "-l", File.join(BUILD, "pg.log"), "-w",
-    "-o", "-p " + PG_PORT.to_s + " -h 127.0.0.1 -c max_connections=" + max_connections.to_s], BUILD)
+  command, args = pinned(options.db_cpus, pg_ctl, ["start", "-D", PG_DATA, "-l", File.join(BUILD, "pg.log"), "-w",
+    "-o", "-p " + PG_PORT.to_s + " -h 127.0.0.1 -c max_connections=" + max_connections.to_s])
+  step("start PostgreSQL", command, args, BUILD)
 end
 
 # Gets `/db` its database: DATABASE_URL or `--db` as given, else a
@@ -727,8 +795,8 @@ def markdown(results : Results, paths : Array(String)) : String
     lines << "- " + outcome.name + ": " + (outcome.version.empty? ? outcome.status : outcome.version)
   end
   lines << ""
-  lines << sprintf("%s; %s, %d logical cores; oha %s, %d connections, %d s per endpoint after %d s of warm-up; %d workers per server; %s.",
-    m.os, m.cpu, m.cores, m.oha, m.connections, m.duration_s, m.warmup_s, m.workers, m.date)
+  lines << sprintf("%s; %s, %d logical cores; oha %s, %d connections, %d s per endpoint after %d s of warm-up; %d workers per server; %s; %s.",
+    m.os, m.cpu, m.cores, m.oha, m.connections, m.duration_s, m.warmup_s, m.workers, m.cpus, m.date)
   lines << ""
   lines << "Database for `/db`: " + m.database + "."
   lines.join("\n") + "\n"
@@ -758,7 +826,7 @@ else
 end
 
 machine = Machine.new(os_name, cpu_name, System.cpu_count, first_line(output_of("oha", ["--version"])).sub("oha ", ""),
-  options.duration, options.warmup, options.connections, options.workers, Time.utc.to_s("%Y-%m-%d"), database)
+  options.duration, options.warmup, options.connections, options.workers, cpu_layout(options), Time.utc.to_s("%Y-%m-%d"), database)
 say "bench/compare: " + machine.os + ", " + machine.cpu + ", " + machine.cores.to_s + " cores"
 
 outcomes = [] of Outcome

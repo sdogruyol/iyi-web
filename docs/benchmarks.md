@@ -19,6 +19,8 @@ bash bench/compare/run.sh                               # every framework, 10 s 
 bash bench/compare/run.sh --duration 5 --only iyi-web,go
 bash bench/compare/run.sh --db postgres://user:pw@host/bench   # an existing PostgreSQL
 bash bench/compare/run.sh --no-db                       # leave /db out
+bash bench/compare/run.sh --server-cpus 0-5 --client-cpus 6-7 --db-cpus 8-11
+                                                        # Linux: servers, oha and PostgreSQL on their own cores
 bash bench/compare/run.sh --help                        # warm-up, connections, workers, port, output
 ```
 
@@ -63,8 +65,11 @@ For each framework in turn:
 3. Starts it on its own port, serving on every core the way each is
    deployed: iyi-web, Kemal (Crystal's default execution context resized to
    the core count) and Go with threads; FastAPI under uvicorn with one
-   worker process per core and `httptools`; Express with one `node:cluster`
-   worker per core. Request logging is off everywhere.
+   worker process per core and `httptools`; Express with one
+   `node:cluster` worker per core. Request logging is off everywhere. On
+   Linux, `--server-cpus`, `--client-cpus` and `--db-cpus` hold the servers,
+   oha and the PostgreSQL the runner starts to the CPUs named, with
+   `taskset -c`; `--workers` then defaults to the number of server CPUs.
 4. Checks every endpoint's status, `Content-Type` and body, and that
    `/users/abc` is refused with a 4xx; `/db` is asked eight times and must
    answer `200`, JSON with exactly `id` and `randomNumber`, both from 1 to
