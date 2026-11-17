@@ -137,6 +137,17 @@ pub class RateLimitHandler < Handler
     @limit
   end
 
+  # Narrowed by path, the method defaults to every method rather than
+  # `Handler`'s GET: a guard named for `/admin` that let POST through
+  # would fail open.
+  pub def only(paths : Array(String), method : String = "*") : Nil
+    super(paths, method)
+  end
+
+  pub def exclude(paths : Array(String), method : String = "*") : Nil
+    super(paths, method)
+  end
+
   # Keys with a window currently held.
   pub def tracked : Int32
     held = @windows.get { |table| table.size }

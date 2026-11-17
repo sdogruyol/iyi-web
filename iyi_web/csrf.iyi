@@ -14,10 +14,11 @@
 #     "<form method='post'>" + csrf_tag(env) + "<button>Send</button></form>"
 #   end
 #
-# `only` and `exclude` choose the requests it checks, as for any handler;
-# their method defaults to GET, which this never checks, so name the method
-# or `"*"`: `exclude ["/api/*"], "*"` for an API that authenticates with a
-# bearer token rather than a cookie, and so has nothing to forge.
+# `only` and `exclude` choose the requests it checks, as for any handler,
+# but their method defaults to `"*"`, every method, where a plain
+# `Handler`'s is GET - which this never checks, so `only ["/form"]` would
+# have checked nothing. `exclude ["/api/*"]` for an API that authenticates
+# with a bearer token rather than a cookie, and so has nothing to forge.
 #
 # The token a page carries is masked as Rails masks it: 32 fresh random
 # bytes and the session's token XORed with them. Every page gets different
@@ -49,6 +50,17 @@ pub class CSRFHandler < Handler
 
   def initialize(@field : String = "authenticity_token", @header : String = "X-CSRF-Token", @message : String = "Forbidden (CSRF)")
     super()
+  end
+
+  # Narrowed by path, the method defaults to every method rather than
+  # `Handler`'s GET: a guard named for `/admin` that let POST through
+  # would fail open.
+  pub def only(paths : Array(String), method : String = "*") : Nil
+    super(paths, method)
+  end
+
+  pub def exclude(paths : Array(String), method : String = "*") : Nil
+    super(paths, method)
   end
 
   pub def call(ctx : Context) : Nil

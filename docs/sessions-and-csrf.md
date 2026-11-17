@@ -71,7 +71,7 @@ import web/iyi_web/csrf::{CSRFHandler, csrf_tag}
 
 use SessionHandler.new(secret)
 csrf = CSRFHandler.new
-csrf.exclude ["/api/*"], "*"
+csrf.exclude ["/api/*"]
 use csrf
 
 get "/note" do |env|
@@ -84,5 +84,5 @@ token alone, for a script to send in the header. Each call masks the token
 with fresh random bytes, so no two pages carry the same string and a
 compressed response does not give it away. `CSRFHandler.new` takes `field`,
 `header` and the refusal's `message` (default `"Forbidden (CSRF)"`). `only`
-and `exclude` choose the requests it checks; their method defaults to `GET`,
-which is never checked, so name the method or `"*"`.
+and `exclude` choose the requests it checks; their method defaults to `"*"`,
+every method (a plain handler's is `GET`, which this never checks).

@@ -1,7 +1,10 @@
 # Security
 
 Four handlers from the [Middleware](middleware.md) table guard an application.
-None is in the default stack; each honours `only` and `exclude`.
+None is in the default stack; each honours `only` and `exclude`. For
+`BasicAuthHandler`, `RateLimitHandler` and `CSRFHandler` their method
+defaults to `"*"`, every method, so `only ["/admin"]` guards a `POST` there
+too; a plain `Handler`'s default stays `GET`.
 
 Bearer tokens, JWTs, API keys and OAuth2's password flow are
 [dependencies](dependencies-and-auth.md) a route names, rather than
@@ -18,7 +21,7 @@ use SecurityHeadersHandler.new(content_security_policy: "default-src 'self'")
 use RateLimitHandler.new(limit: 60, period: 60)
 
 admin = BasicAuthHandler.new("admin", Program.env("ADMIN_PASSWORD") || raise "ADMIN_PASSWORD is not set")
-admin.only ["/admin", "/admin/*"], "*"
+admin.only ["/admin", "/admin/*"]
 use admin
 
 get "/admin" do |env|

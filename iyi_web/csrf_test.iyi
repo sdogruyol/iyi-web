@@ -156,7 +156,17 @@ describe "CSRFHandler" do
 
   it "checks only the paths given with only" do
     csrf = CSRFHandler.new
-    csrf.only ["/submit"], "*"
+    csrf.only ["/submit"]
+    app = csrf_app(csrf)
+    assert dispatch(app, "POST", "/api/hook").response.body == "hook"
+    # `only` with no method checks every method, not only GET.
+    assert dispatch(app, "POST", "/submit").response.status_code == 403
+    assert dispatch(app, "DELETE", "/submit").response.status_code == 403
+  end
+
+  it "checks every method off a path left out with exclude, given no method" do
+    csrf = CSRFHandler.new
+    csrf.exclude ["/api/*"]
     app = csrf_app(csrf)
     assert dispatch(app, "POST", "/api/hook").response.body == "hook"
     assert dispatch(app, "POST", "/submit").response.status_code == 403
