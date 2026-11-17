@@ -23,6 +23,7 @@ config.max_request_body_size = 1024 * 1024
 | `max_request_body_size` | `8 * 1024 * 1024` | |
 | `max_file_uploads` | `128` | |
 | `max_multipart_form_field_size` | `8 * 1024 * 1024` | |
+| `max_form_fields` | `1000` | |
 | `max_ranges` | `16` | |
 | `reject_unreadable_body` | `true` | |
 | `route_on_raw_path` | `false` | |
@@ -52,6 +53,15 @@ config.max_request_body_size = 1024 * 1024
 - A request line longer than 8 KiB gets `414 URI Too Long`, and header
   fields past 16 KiB `431 Request Header Fields Too Large`, the bounds
   Crystal's server holds Kemal to. Neither is a setting.
+- `max_form_fields` is the most fields the query string may carry, and as
+  many again a form body (`application/x-www-form-urlencoded`, or a
+  `multipart/form-data` body's text fields). Parsing stops at the field
+  after the limit, which is never filed, and the request gets `414` for
+  the query or `413` for the body before the route runs (with
+  `reject_unreadable_body` off, the route finds that table empty and the
+  status in `params.body_error`). The limit is what keeps a body of names
+  whose hashes collide from making the tables quadratic to build: iyi's
+  `String#hash` is unseeded.
 - `max_ranges` is the most ranges one `Range` header may ask for; `0` turns
   range requests off.
 - `reject_unreadable_body` answers a JSON body that does not parse with `400`,

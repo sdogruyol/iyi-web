@@ -133,6 +133,7 @@ alone. Off by default.
 | request line | 8 KiB | `414` |
 | header fields | 16 KiB | `431` |
 | body | `max_request_body_size` (8 MiB) | `413` |
+| fields in the query / a form body | `max_form_fields` (1000) | `414` / `413` |
 | whole request, from its first byte | `read_timeout` (60 s) | `408` |
 | next request on a kept connection | `idle_timeout` (75 s) | closed |
 | each write | `write_timeout` (60 s) | connection ends |

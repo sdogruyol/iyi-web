@@ -208,6 +208,44 @@ describe "Params" do
     assert limited.body_error == 413
     assert limited.files.empty?
   end
+
+  it "holds a form body, a query and multipart text fields to max_form_fields, filling no table past it" do
+    headers = Headers.new
+    headers["Content-Type"] = "application/x-www-form-urlencoded"
+    form = (1..1001).map { |index| "f#{index}=v" }.join("&")
+    flooded = Params.from(Request.new("POST", "/", "q=1", "HTTP/1.1", headers, form), {} of String => String)
+    # The default, before the server gives the config's.
+    assert flooded.body_error == 413
+    assert flooded.body.empty?
+    assert flooded.body_all("f1").empty?
+    assert flooded.query["q"] == "1"
+
+    within = Params.from(Request.new("POST", "/", "", "HTTP/1.1", headers, (1..1000).map { |index| "f#{index}=v" }.join("&")), {} of String => String)
+    assert within.body_error.nil?
+    assert within.body.size == 1000
+
+    # Set after the params are made and before a table is read, as the
+    # server does.
+    query = Params.from(Request.new("GET", "/", "a=1&b=2&c=3", "HTTP/1.1", Headers.new, ""), {} of String => String)
+    query.limit_fields(2)
+    assert query.body_error == 414
+    assert query.query.empty?
+    assert query["a"]?.nil?
+    assert query.query_pairs.empty?
+
+    parts = "--XyZ\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n" +
+            "--XyZ\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\n2\r\n" +
+            "--XyZ\r\nContent-Disposition: form-data; name=\"c\"\r\n\r\n3\r\n" +
+            "--XyZ--\r\n"
+    multipart = Params.from(typed("multipart/form-data; boundary=XyZ", parts), {} of String => String)
+    multipart.limit_fields(2)
+    assert multipart.body_error == 413
+    assert multipart.body.empty?
+    enough = Params.from(typed("multipart/form-data; boundary=XyZ", parts), {} of String => String)
+    enough.limit_fields(3)
+    assert enough.body_error.nil?
+    assert enough.body_all("c") == ["3"]
+  end
 end
 
 def upload_body : String

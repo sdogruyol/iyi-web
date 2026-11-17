@@ -634,6 +634,17 @@ group do |g|
         # Off, the default: the same client gets the body as it is.
         assert http_header(exchange(port, close_request("GET", "/", "Accept-Encoding: zstd, gzip\r\n")), "Content-Encoding").nil?
       end
+
+      it "refuses a form body or a query past max_form_fields, 413 and 414, before the route" do
+        flood = "n=1&" * 1001
+        form = exchange(port, close_request("POST", "/form", "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: #{flood.bytesize}\r\n") + flood)
+        assert status_line(form) == "HTTP/1.1 413 Content Too Large"
+        query = exchange(port, close_request("GET", "/go-to?" + "to=/&" * 1001))
+        assert status_line(query) == "HTTP/1.1 414 URI Too Long"
+        within = "name=iyi&" + "n=1&" * 998
+        fine = exchange(port, close_request("POST", "/form", "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: #{within.bytesize}\r\n") + within)
+        assert http_body(fine) == "iyi"
+      end
     end
 
     server.close

@@ -89,6 +89,17 @@ describe "parse_query_pairs" do
     assert pairs[1] == {"tag[]", "b c"}
     assert parse_query_pairs("").empty?
   end
+
+  it "stops at the pair past max_pairs, decoding nothing after it" do
+    many = (1..5000).map { |index| "k#{index}=v" }.join("&")
+    bounded = parse_query_pairs(many, 1000)
+    assert bounded.size == 1001
+    assert bounded[1000] == {"k1001", "v"}
+    assert parse_query_pairs("a=1&b=2", 2).size == 2
+    # Empty pieces are not fields and do not count.
+    assert parse_query_pairs("&&a=1&&&b=2&&", 2).size == 2
+    assert parse_query_pairs(many).size == 5000
+  end
 end
 
 describe "join_paths" do

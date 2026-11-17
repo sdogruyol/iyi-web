@@ -63,6 +63,7 @@ pub class Config
   @show_exceptions : Bool?
   @max_file_uploads : Int32
   @max_multipart_form_field_size : Int32
+  @max_form_fields : Int32
   @reject_unreadable_body : Bool
   @route_on_raw_path : Bool
   @max_ranges : Int32
@@ -109,6 +110,7 @@ pub class Config
     @show_exceptions = nil
     @max_file_uploads = 128
     @max_multipart_form_field_size = 8 * 1024 * 1024
+    @max_form_fields = 1000
     @reject_unreadable_body = true
     @route_on_raw_path = false
     @max_ranges = 16
@@ -460,6 +462,23 @@ pub class Config
     @max_multipart_form_field_size = value
   end
 
+  # Most fields the query string may carry, and as many again a form body:
+  # an `application/x-www-form-urlencoded` one, or a `multipart/form-data`
+  # one's text fields. One more is refused - 414 for the query, 413 for the
+  # body, before the route runs unless `reject_unreadable_body` is off -
+  # and the field past the limit is the last one parsed. 1000 by default,
+  # Rack's and Go's figure. The bound is there because std's `String#hash`
+  # is unseeded: names that collide are cheap to make, and each one a
+  # table takes costs as much as every one before it, so a body of a
+  # hundred thousand would take a worker quadratic time to file.
+  pub def max_form_fields : Int32
+    @max_form_fields
+  end
+
+  pub def max_form_fields=(value : Int32) : Int32
+    @max_form_fields = value
+  end
+
   # Whether a request whose body cannot be read - a JSON body that does not
   # parse, a malformed `multipart/form-data` one, more files or a larger
   # field than the upload limits allow - gets its 400 or 413 before its
@@ -495,6 +514,7 @@ pub class Config
   # in-process is handled as one over a socket.
   pub def prepare(ctx : Context) : Nil
     ctx.params.limit_uploads(@max_file_uploads, @max_multipart_form_field_size)
+    ctx.params.limit_fields(@max_form_fields)
     ctx.max_ranges = @max_ranges
     ctx.static_gzip = @serve_static && @static_gzip
     ctx.route_on_raw_path = @route_on_raw_path
@@ -617,6 +637,7 @@ pub class Settings
   @websocket_max_message_size : Int32
   @max_file_uploads : Int32
   @max_multipart_form_field_size : Int32
+  @max_form_fields : Int32
   @max_ranges : Int32
   @static_gzip : Bool
   @route_on_raw_path : Bool
@@ -639,6 +660,7 @@ pub class Settings
     @websocket_max_message_size = config.websocket_max_message_size
     @max_file_uploads = config.max_file_uploads
     @max_multipart_form_field_size = config.max_multipart_form_field_size
+    @max_form_fields = config.max_form_fields
     @max_ranges = config.max_ranges
     @static_gzip = config.serve_static && config.static_gzip
     @route_on_raw_path = config.route_on_raw_path
@@ -718,6 +740,7 @@ pub class Settings
   # `Config#prepare`, from the copy.
   pub def prepare(ctx : Context) : Nil
     ctx.params.limit_uploads(@max_file_uploads, @max_multipart_form_field_size)
+    ctx.params.limit_fields(@max_form_fields)
     ctx.max_ranges = @max_ranges
     ctx.static_gzip = @static_gzip
     ctx.route_on_raw_path = @route_on_raw_path
