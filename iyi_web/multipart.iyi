@@ -345,19 +345,43 @@ private class PartReader
   # A part's header block, up to the blank line that ends it, taken with
   # it. Refused when *delimiter* comes first, when *limit* bytes pass
   # without the blank line, or when the body ends.
+  #
+  # Searched a read at a time: only the newest read's bytes, behind the
+  # few before them that could begin either needle, and the reads are
+  # gathered into one buffer joined once at the end. Searching all that
+  # is pending again after every read, and copying it onto the next read
+  # with `+`, made a block sent a byte at a time quadratic: 60 KiB of
+  # header in one-byte chunks took 16 seconds of CPU per part.
   def head(delimiter : String, limit : Int32) : String | MultipartError
+    first = @pending
+    gathered = String::Builder.new
+    total = first.bytesize
+    # The bytes not yet searched, after the last *keep* of those that
+    # were, and where they start among all *total* read. The delimiter
+    # is at least five bytes ("\r\n--" and a boundary that is not
+    # empty), so *keep* covers the blank line's three as well.
+    window = first
+    window_at = 0
+    keep = delimiter.bytesize - 1
     while true
-      at = @pending.index("\r\n\r\n")
-      ends = @pending.index(delimiter)
+      at = window.index("\r\n\r\n")
+      ends = window.index(delimiter)
       if at && (ends.nil? || at + 4 <= ends)
-        text = @pending[0, at]
-        skip(at + 4)
-        return text
+        whole = total == first.bytesize ? first : gathered.to_s
+        start = window_at + at
+        @pending = whole[start + 4, total - start - 4]
+        return whole[0, start]
       end
-      return MultipartError.new(400, "multipart part headers are not terminated") if ends || @pending.bytesize > limit
-      got = fill
-      return got if got.is_a?(MultipartError)
-      return MultipartError.new(400, "multipart body has no closing boundary") unless got
+      return MultipartError.new(400, "multipart part headers are not terminated") if ends || total > limit
+      piece = take
+      return piece if piece.is_a?(MultipartError)
+      return MultipartError.new(400, "multipart body has no closing boundary") if piece.empty?
+      gathered << first if total == first.bytesize
+      gathered << piece
+      tail = window.bytesize > keep ? window[window.bytesize - keep, keep] : window
+      window_at = total - tail.bytesize
+      window = tail + piece
+      total = total + piece.bytesize
     end
     MultipartError.new(400, "multipart part headers are not terminated")
   end
@@ -407,18 +431,24 @@ private class PartReader
   # One more piece onto what is pending: false at the body's end, and the
   # source's failure as the refusal it earns.
   private def fill : Bool | MultipartError
-    return false if @ended
+    piece = take
+    return piece if piece.is_a?(MultipartError)
+    return false if piece.empty?
+    @pending = @pending.empty? ? piece : @pending + piece
+    true
+  end
+
+  # The next piece from the source, kept nowhere: "" at the body's end,
+  # and the source's failure as the refusal it earns.
+  private def take : String | MultipartError
+    return "" if @ended
     piece = @source.read(@piece)
     case piece
     in BodyFailure
       MultipartError.new(piece.status, piece.reason)
     in String
-      if piece.empty?
-        @ended = true
-        return false
-      end
-      @pending = @pending.empty? ? piece : @pending + piece
-      true
+      @ended = true if piece.empty?
+      piece
     end
   end
 end

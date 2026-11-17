@@ -6,6 +6,7 @@ module iyi_web/multipart_test
 import std/file::{File}
 import std/dir::{Dir}
 import std/text
+import std/time::{Time, Span}
 import std/http::{BodyReader}
 import iyi_web/multipart::*
 import iyi_web/request::{RequestBody}
@@ -197,6 +198,23 @@ describe "parse_multipart" do
     raise "expected a parsed body" unless within.is_a?(Multipart)
     assert within.files[0].size == 5000
     within.delete
+  end
+
+  # A header block that arrives a byte at a time is searched a byte at a
+  # time: each read's bytes once, not everything pending again after
+  # every read, and joined once rather than copied onto at every read.
+  # Searched and copied whole, 60 KiB a byte at a time is ~1.8e9 bytes
+  # copied and as many compared per needle - seconds - where read once it
+  # is milliseconds; the bound is generous either way.
+  it "reads a 60 KiB part header block arriving a byte at a time, in linear time" do
+    filler = "X-Filler: " + ("a" * 61440)
+    body = "--" + BOUNDARY + "\r\n" + filler + "\r\nContent-Disposition: form-data; name=\"big\"\r\n\r\nvalue\r\n" + field_part("after", "1") + closing
+    started = Time.monotonic
+    result = parse_multipart(RequestBody.text(body), BOUNDARY, 10, 1024, 1)
+    elapsed = Time.monotonic - started
+    raise "expected a parsed body" unless result.is_a?(Multipart)
+    assert result.fields == [{"big", "value"}, {"after", "1"}]
+    assert elapsed < Span.seconds(2), "a byte-at-a-time header block took " + elapsed.total_milliseconds.to_s + "ms"
   end
 end
 
