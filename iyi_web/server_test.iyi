@@ -6,7 +6,7 @@ module iyi_web/server_test
 
 import std/list::{List}
 import std/mutex::{Mutex}
-import std/socket::{IyiSocket}
+import std/socket::{IyiSocket, SocketError}
 import std/http::{HTTP, HTTPClient}
 import std/zstd::{Zstd}
 import std/compress::{Gzip}
@@ -242,6 +242,18 @@ stream_cfg.compress = true
 stream_cfg.max_request_body_size = 1000000
 stream_server = Server.new(chain([RouteHandler.new(streaming, stream_cfg)]), stream_cfg)
 stream_port = stream_server.bind("127.0.0.1", 0)
+
+# At most two connections at once.
+capped = Router.new
+capped.get "/" do |env|
+  "capped"
+end
+capped_cfg = Config.new
+capped_cfg.logging = false
+capped_cfg.serve_static = false
+capped_cfg.max_connections = 2
+capped_server = Server.new(chain([RouteHandler.new(capped, capped_cfg)]), capped_cfg)
+capped_port = capped_server.bind("127.0.0.1", 0)
 
 # *size* bytes of body as chunks of *each*, then the last chunk.
 def chunked_body(size : Int32, each : Int32) : String
@@ -645,17 +657,51 @@ group do |g|
         fine = exchange(port, close_request("POST", "/form", "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: #{within.bytesize}\r\n") + within)
         assert http_body(fine) == "iyi"
       end
+
+      it "serves at most max_connections at once, the next waiting until one closes" do
+        first = IyiSocket.connect("127.0.0.1", capped_port).or_panic
+        first.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+        assert http_body(read_frame(first)) == "capped"
+        second = IyiSocket.connect("127.0.0.1", capped_port).or_panic
+        second.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").or_panic
+        assert http_body(read_frame(second)) == "capped"
+
+        # Connected - the kernel queues it - but not accepted, so not served.
+        third = IyiSocket.connect("127.0.0.1", capped_port).or_panic
+        third.write(close_request("GET", "/")).or_panic
+        third.read_timeout_ms = 600
+        waited = third.read(4096)
+        assert waited.is_a?(SocketError) && waited.timed_out?
+
+        # The first one's place goes to it once the first one closes.
+        first.close
+        third.read_timeout_ms = 10000
+        answer = read_frame(third)
+        assert status_line(answer) == "HTTP/1.1 200 OK"
+        assert http_body(answer) == "capped"
+        third.close
+        # And the second is still served all the while.
+        second.write(close_request("GET", "/")).or_panic
+        assert http_body(read_frame(second)) == "capped"
+        second.close
+      end
     end
 
     server.close
     typed_server.close
     raw_server.close
     stream_server.close
+    capped_server.close
     0
   end
 
   g.spawn do
     stream_server.listen
+    0
+  end
+
+  g.spawn do
+    capped_server.listen
     0
   end
 

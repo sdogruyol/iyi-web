@@ -64,6 +64,7 @@ pub class Config
   @max_file_uploads : Int32
   @max_multipart_form_field_size : Int32
   @max_form_fields : Int32
+  @max_connections : Int32
   @reject_unreadable_body : Bool
   @route_on_raw_path : Bool
   @max_ranges : Int32
@@ -111,6 +112,7 @@ pub class Config
     @max_file_uploads = 128
     @max_multipart_form_field_size = 8 * 1024 * 1024
     @max_form_fields = 1000
+    @max_connections = 1024
     @reject_unreadable_body = true
     @route_on_raw_path = false
     @max_ranges = 16
@@ -479,6 +481,22 @@ pub class Config
     @max_form_fields = value
   end
 
+  # Most connections served at once, std/http's own `MAX_CONNECTIONS`
+  # (1024) by default; 0 for no limit. At the limit the server stops
+  # accepting until one ends, so the next client waits in the kernel's
+  # listen queue - queued, not refused - and is served in its turn. A
+  # connection holds its place until it closes: a kept-alive one between
+  # requests (`idle_timeout` bounds that) and an upgraded WebSocket too
+  # (`websocket_idle_timeout`). Read when the server starts.
+  pub def max_connections : Int32
+    @max_connections
+  end
+
+  pub def max_connections=(value : Int32) : Int32
+    raise "max_connections must be 0 or more, not #{value}" if value < 0
+    @max_connections = value
+  end
+
   # Whether a request whose body cannot be read - a JSON body that does not
   # parse, a malformed `multipart/form-data` one, more files or a larger
   # field than the upload limits allow - gets its 400 or 413 before its
@@ -638,6 +656,7 @@ pub class Settings
   @max_file_uploads : Int32
   @max_multipart_form_field_size : Int32
   @max_form_fields : Int32
+  @max_connections : Int32
   @max_ranges : Int32
   @static_gzip : Bool
   @route_on_raw_path : Bool
@@ -661,6 +680,7 @@ pub class Settings
     @max_file_uploads = config.max_file_uploads
     @max_multipart_form_field_size = config.max_multipart_form_field_size
     @max_form_fields = config.max_form_fields
+    @max_connections = config.max_connections
     @max_ranges = config.max_ranges
     @static_gzip = config.serve_static && config.static_gzip
     @route_on_raw_path = config.route_on_raw_path
@@ -691,6 +711,10 @@ pub class Settings
 
   pub def websocket_max_message_size : Int32
     @websocket_max_message_size
+  end
+
+  pub def max_connections : Int32
+    @max_connections
   end
 
   pub def powered_by_header : Bool
