@@ -187,7 +187,7 @@ failed:
 | `exp` still ahead | `token has expired` |
 | `nbf` passed | `token is not valid yet` |
 | `iat` not in the future | `token was issued in the future` |
-| `iss` / `aud`, when `issuer:` / `audience:` are given | `token issuer is not accepted`, `token audience is not accepted` |
+| `iss` / `aud`, when `issuer:` / `audience:` are given; a non-null `aud` when no `audience:` is (RFC 7519 §4.1.3) | `token issuer is not accepted`, `token audience is not accepted` |
 | the payload reads into the type asked for | `invalid token claims: ...` |
 
 `exp`, `nbf` and `iat` are optional, and checked when present, each give or

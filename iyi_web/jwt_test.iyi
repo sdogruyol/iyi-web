@@ -108,6 +108,15 @@ describe "JWT" do
     assert refusal(JWT.verify(issued, SECRET, audience: "admin")) == "token audience is not accepted"
   end
 
+  it "refuses a token naming an audience when none is expected" do
+    assert refusal(JWT.verify(forged(%({"alg":"HS256"}), %({"aud":"api"})), SECRET)) == "token audience is not accepted"
+    assert refusal(JWT.verify(forged(%({"alg":"HS256"}), %({"aud":["api"]})), SECRET)) == "token audience is not accepted"
+    assert refusal(JWT.verify(JWT.sign(Claims.new(aud: "api"), SECRET), SECRET)) == "token audience is not accepted"
+    # No aud, or a null one, names no audience.
+    JWT.verify(forged(%({"alg":"HS256"}), %({"aud":null})), SECRET).or_panic
+    JWT.verify(JWT.sign(Claims.new(sub: "ada"), SECRET), SECRET).or_panic
+  end
+
   it "refuses every other last character that decodes to the same signature" do
     alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
     parts = token.split('.')
