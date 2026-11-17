@@ -297,7 +297,7 @@ pub class SessionHandler < Handler
       return
     end
     if session.empty?
-      ctx.delete_cookie(@cookie_name, @path, @domain) if session.from_cookie?
+      ctx.delete_cookie(@cookie_name, @path, @domain, @secure) if session.from_cookie?
       session.written(0_i64, false)
       return
     end

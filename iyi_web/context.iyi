@@ -207,12 +207,16 @@ pub class Context
   end
 
   # Tells the client to drop a cookie. *path* and *domain* must match the
-  # ones it was set with.
-  pub def delete_cookie(name : String, path : String = "/", domain : String = "") : Nil
+  # ones it was set with. A `__Host-` or `__Secure-` cookie, or any set
+  # with *secure*, needs *secure* here too: a browser ignores a deletion
+  # without `Secure` for those.
+  pub def delete_cookie(name : String, path : String = "/", domain : String = "", secure : Bool = false) : Nil
     raise "invalid cookie name #{name.inspect}" unless Headers.valid_name?(name)
     cookie = name + "=; Path=" + path
     cookie = cookie + "; Domain=" + domain unless domain.empty?
-    @response.headers.add("Set-Cookie", cookie + "; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT")
+    cookie = cookie + "; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+    cookie = cookie + "; Secure" if secure
+    @response.headers.add("Set-Cookie", cookie)
   end
 
   pub def status(code : Int32) : Context

@@ -149,6 +149,15 @@ describe "SessionHandler" do
     assert session_cookies(dispatch(app(handler), "POST", "/sign-out")).empty?
   end
 
+  it "deletes a secure cookie with Secure, or a browser keeps it" do
+    handler = SessionHandler.new(SECRET, secure: true)
+    ctx = dispatch(app(handler), with_cookie("POST", "/sign-out", signed_in(handler)))
+    cookies = session_cookies(ctx)
+    assert cookies.size == 1
+    assert cookies[0].includes?("Max-Age=0")
+    assert cookies[0].includes?("; Secure")
+  end
+
   it "drops the CSRF token on regenerate" do
     handler = SessionHandler.new(SECRET)
     chained = chain([handler, routes { |r|
