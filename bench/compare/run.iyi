@@ -623,8 +623,9 @@ def cpu_name : String
     first_line(name || ENV["PROCESSOR_IDENTIFIER"]?).strip
   {% else %}
     info = File.file?("/proc/cpuinfo") ? File.read("/proc/cpuinfo") : (output_of("sysctl", ["-n", "machdep.cpu.brand_string"]) || "")
-    line = info.lines.find(&.starts_with?("model name")) || info
-    first_line(line.sub(/^model name\s*:\s*/, "")).strip
+    line = info.lines.find(&.starts_with?("model name"))
+    # "model name	: QEMU Virtual CPU": what follows the first colon.
+    first_line(line ? line.split(":", 2).last : info).strip
   {% end %}
 end
 
