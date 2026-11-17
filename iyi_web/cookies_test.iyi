@@ -27,4 +27,18 @@ describe "CookieJar" do
   it "treats plus as space in a cookie value" do
     assert CookieJar.parse("msg=hello+world")["msg"] == "hello world"
   end
+
+  it "takes names as sent, without percent-decoding them" do
+    jar = CookieJar.parse("__Host%2Dsid=forged; a%20b=1")
+    assert jar["__Host-sid"]?.nil?
+    assert jar["__Host%2Dsid"] == "forged"
+    assert jar["a%20b"] == "1"
+    assert jar["a b"]?.nil?
+  end
+
+  it "keeps the first of two cookies with one name" do
+    jar = CookieJar.parse("sid=specific; other=x; sid=general")
+    assert jar["sid"] == "specific"
+    assert CookieJar.parse("flag; flag=late")["flag"] == ""
+  end
 end

@@ -1,6 +1,12 @@
 # Request cookies as a table, parsed from the `Cookie` header. Setting a
 # cookie is on Context (`set_cookie`), because that writes `Set-Cookie`
 # onto the response rather than mutating what the client sent.
+#
+# Names are taken as sent, never percent-decoded: `__Host%2Dsid` is not
+# `__Host-sid`, and decoding it would let a cookie set without the prefix's
+# guarantees pass for one set with them. Values are decoded. When a name
+# comes twice the first one wins, as in Rack, Go and PHP: a browser sends
+# the cookie with the longer path, or the older one, first.
 @[Unsafe("a cookie value is percent-encoded by reading its bytes through the string's buffer")]
 module iyi_web/cookies
 
@@ -21,12 +27,12 @@ pub class CookieJar
       next if trimmed.empty?
       eq = trimmed.index('=')
       if eq
-        name = decode_form(trimmed[0, eq].strip)
+        name = trimmed[0, eq].strip
         value = decode_form(trimmed[eq + 1, trimmed.bytesize - eq - 1].strip)
-        table[name] = value unless name.empty?
+        table[name] = value unless name.empty? || table.has_key?(name)
       else
-        name = decode_form(trimmed)
-        table[name] = "" unless name.empty?
+        name = trimmed
+        table[name] = "" unless name.empty? || table.has_key?(name)
       end
     end
 
