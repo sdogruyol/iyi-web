@@ -18,10 +18,15 @@
 # bounds std/http does not have: `read_timeout` for a whole request from
 # its first byte, `idle_timeout` between requests, `write_timeout` per
 # write, the `408` a request too slow to arrive gets, and what a drain or a
-# cut-off does to a connection. The handler each connection is given turns
-# std/http's request into a `Context`, holds the request line to 8 KiB
-# (414) and the fields to 16 KiB (431), the body to
-# `max_request_body_size` (413), runs the chain and answers what it left.
+# cut-off does to a connection. Calling `Server.handle` rather than
+# `serve` passes std/http's own connection limit by, so the loop keeps
+# `max_connections` the way `serve` keeps its `max_connections`: a place
+# per connection, claimed before the accept and given back however the
+# connection ends. The handler each connection is given turns std/http's
+# request into a `Context`, holds the request line to 8 KiB (414) and the
+# fields to 16 KiB (431) once std/http has read the head - which it does
+# up to a megabyte first - and the body to `max_request_body_size` (413),
+# runs the chain and answers what it left.
 #
 # **On every core.** With more than one worker every connection is a
 # parallel task (SPEC.md III.4.13): the thread that called `listen`
@@ -84,9 +89,13 @@ import iyi_web/failure::{render_error_type_page, render_failure_page}
 # The request line, and the fields after it: Crystal's
 # `HTTP::MAX_REQUEST_LINE_SIZE` and `HTTP::MAX_HEADERS_SIZE`, which Kemal
 # serves under. std/http reads a head of up to a megabyte; past these the
-# request is answered 414 or 431.
+# request is answered 414 or 431, once the whole head has been read.
 pub MAX_REQUEST_LINE =  8192
 pub MAX_HEADERS      = 16384
+
+# How often an accept loop held at `max_connections` looks whether its
+# listener has been closed meanwhile: std/http's `CAP_CHECK_MS`.
+CAP_CHECK_MS = 250
 
 # What a TLS config offers by ALPN when the application set nothing:
 # HTTP/2 first, then HTTP/1.1.
@@ -217,19 +226,23 @@ pub class Server
         frozen = manager ? manager.frozen_tls_config(config) : config.frozen
       end
       unix = @unix
-      accept(listener) { |g, client| Server.spawn_parallel(g, site, client.fd, client.family, frozen, unix) }
+      accept(listener, site.slots) { |g, client| Server.spawn_parallel(g, site, client.fd, client.family, frozen, unix) }
     elsif site = @serial
       tls = @tls
       unix = @unix
-      accept(listener) { |g, client| Server.spawn_serial(g, site, client.fd, client.family, tls, unix) }
+      accept(listener, site.slots) { |g, client| Server.spawn_serial(g, site, client.fd, client.family, tls, unix) }
     end
   end
 
   # Accepts until the listener closes, handing each connection to *start*,
   # and then drains. A stop asked for from another thread is received here
   # beside the loop, on this thread, where the listener is; so are the
-  # certificate renewals of `autocert`.
-  private def accept(listener : IyiSocket, & : IyiGroup, IyiSocket -> Nil) : Nil
+  # certificate renewals of `autocert`. With *slots*, `max_connections`
+  # places, the loop claims one before each accept and waits while every
+  # one is held, as std/http's `serve` does: the next client waits in the
+  # kernel's listen queue until a connection ends and gives its place back
+  # (`Site#serve`).
+  private def accept(listener : IyiSocket, slots : Channel(Int32)?, & : IyiGroup, IyiSocket -> Nil) : Nil
     group do |outer|
       outer.spawn do
         while true
@@ -245,10 +258,15 @@ pub class Server
       group do |g|
         pause = 5
         while !listener.closed?
+          if room = slots
+            break unless Server.claim(room, listener)
+          end
           case client = listener.accept
           in Cancelled
+            slots.receive if slots
             break
           in SocketError
+            slots.receive if slots
             # The listener's own trouble - descriptors run out, most often -
             # is waited out rather than spun on: 5 ms doubling to a second,
             # as `std/http`'s server does, and the next accept that works
@@ -280,6 +298,24 @@ pub class Server
       manager.run
       0
     end
+  end
+
+  # A place among *slots* for the next connection, waited for while all
+  # are held: false when *listener* closes first - a stop - which is
+  # looked at every `CAP_CHECK_MS` while waiting, since a close does not
+  # wake the wait. std/http's `claim`, which is private to it.
+  def self.claim(slots : Channel(Int32), listener : IyiSocket) : Bool
+    while !listener.closed?
+      claimed = false
+      select
+      when slots.send(0)
+        claimed = true
+      when timeout(CAP_CHECK_MS)
+        nil
+      end
+      return true if claimed
+    end
+    false
   end
 
   # A connection on whichever worker is free. A class method, so the block
@@ -411,7 +447,8 @@ end
 
 # What every connection of one server shares: the handler chain, the 500
 # page and the error type pages, the settings, how many requests are in
-# flight and how many connections are open, and the two signals of a stop.
+# flight and how many connections are open, the places `max_connections`
+# allows, and the two signals of a stop.
 # Generic over the blocks and the settings, so one copy of the connection
 # code serves both a server on one thread - `Proc`s, the live `Config` -
 # and one on every worker - `SharedProc`s and `Settings`, which makes the
@@ -427,6 +464,9 @@ pub class Site(P, E, S)
   # Closed when the server begins to drain, and when its deadline passes.
   @stopping : Channel(Int32)
   @cutting : Channel(Int32)
+  # A place per connection served, claimed by the accept loop before it
+  # accepts and given back when the connection ends; nil for no limit.
+  @slots : Channel(Int32)?
 
   def initialize(@chain : Chain(P), @page_500 : E?, type_pages : Array(E), @settings : S)
     @type_pages = List.new(type_pages)
@@ -435,6 +475,12 @@ pub class Site(P, E, S)
     @draining = Atomic(Int32).new(0)
     @stopping = Channel(Int32).new
     @cutting = Channel(Int32).new
+    limit = @settings.max_connections
+    @slots = limit > 0 ? Channel(Int32).new(limit) : nil
+  end
+
+  def slots : Channel(Int32)?
+    @slots
   end
 
   pub def in_flight : Int32
@@ -464,6 +510,9 @@ pub class Site(P, E, S)
   # watcher reads the connection's state without a lock.
   def serve(fd : Int32, family : Int32, tls : T?, unix : Bool) : Nil forall T
     @live.add(1)
+    # However the connection ends - answered, upgraded and closed, cut
+    # off, or failed - it is no longer live and its place goes back.
+    defer ended
     wire = Wire.new(fd, family, @settings.read_timeout, @settings.idle_timeout, @settings.write_timeout, tls.nil?)
     wire.on_answered(->{ leave })
     group do |own|
@@ -480,7 +529,16 @@ pub class Site(P, E, S)
       own.cancel_children
       0
     end
+  end
+
+  # The place is given back with `receive` on whichever thread the
+  # connection ran, as std/http's pool does: `take_now` is `select`'s half,
+  # unlocked on a worker, and races the accepting thread's claims.
+  private def ended : Nil
     @live.sub(1)
+    if room = @slots
+      room.receive
+    end
   end
 
   # At the stop, a connection parked waiting for a request - or for the
@@ -909,7 +967,9 @@ end
 # its next request, and a write waits `write_timeout` for the client to
 # take bytes. A bound std/http or std/tls sets for a read of its own (a
 # handshake's, a lingering close's) holds too, the sooner of the two. A
-# connection taken over by an upgrade waits as its protocol likes. A
+# connection taken over by an upgrade waits as its protocol likes - a
+# WebSocket asks for each read's bound itself, what is left of
+# `websocket_idle_timeout` for its next frame (`iyi_web/websocket`). A
 # request that does not arrive in time is answered `408` when the
 # connection is HTTP/1 in the clear; under TLS or HTTP/2 it is closed
 # (std/http closes it, close_notify or GOAWAY first), since the bytes on

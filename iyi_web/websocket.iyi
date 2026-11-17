@@ -17,7 +17,16 @@
 # the RFC's code - 1002, 1007, or 1009 for a message over
 # `websocket_max_message_size` - and the connection ends. A close frame is
 # answered with one carrying the same code, then the server closes the TCP
-# connection first, as §7.1.1 asks.
+# connection first, as §7.1.1 asks. A client that sends no whole frame -
+# a message, a ping, a pong, anything - for `websocket_idle_timeout` gets
+# a close frame with 1001 and the connection ends the same way: the server
+# reads an upgraded connection with no bound of its own, so without this a
+# client that went quiet, or stopped half way through a frame, held its
+# connection, its place under `max_connections` and its half frame for
+# good. Half way through that time a client that has sent nothing of its
+# next frame is pinged, and the pong a browser sends back by itself is a
+# frame, so a page that only listens stays open for as long as it is
+# there.
 #
 # `send`, `ping` and `close` may be called from any task: a broadcast from
 # one connection's task writes to the others. The runtime lets one task
@@ -30,6 +39,7 @@
 module iyi_web/websocket
 
 import std/socket::{IyiSocket, SocketError}
+import std/time::{Time, Span}
 import std/http::{TlsStream}
 import std/digest::{SHA1}
 import std/base64::{Base64}
@@ -77,6 +87,7 @@ pub class WebSocket
 
   @socket : IyiSocket | TlsStream
   @max_message_size : Int32
+  @idle_timeout_ms : Int32
   @buffer : String
   @offset : Int32
   @lock : Channel(Int32)
@@ -94,7 +105,9 @@ pub class WebSocket
 
   # *socket* is a connection whose handshake is already done: the socket,
   # or under TLS the `TlsStream` over it, so `wss://` is the same session.
-  def initialize(@socket : IyiSocket | TlsStream, @max_message_size : Int32 = 8 * 1024 * 1024)
+  # *idle_timeout_ms* is how long the session waits for each whole frame,
+  # 0 for as long as it takes.
+  def initialize(@socket : IyiSocket | TlsStream, @max_message_size : Int32 = 8 * 1024 * 1024, @idle_timeout_ms : Int32 = 120000)
     @buffer = ""
     @offset = 0
     # The write lock: one token, taken to write a frame and put back after.
@@ -244,14 +257,16 @@ pub class WebSocket
 
   # Answers an accepted handshake with 101 and hands the connection to
   # *handler* once the server has sent it. Call `refusal` first.
-  def self.accept(ctx : Context, max_message_size : Int32, handler : Proc(WebSocket, Context, Nil)) : Nil
+  # *idle_timeout* is `websocket_idle_timeout`, in seconds, 0 for none.
+  def self.accept(ctx : Context, max_message_size : Int32, handler : Proc(WebSocket, Context, Nil), idle_timeout : Int32 = 120) : Nil
     response = ctx.response
     response.status_code = 101
     response.headers["Upgrade"] = "websocket"
     response.headers["Connection"] = "Upgrade"
     response.headers["Sec-WebSocket-Accept"] = accept_key(ctx.request.headers["Sec-WebSocket-Key"].strip)
+    idle_ms = idle_timeout <= 0 ? 0 : (idle_timeout >= 2147483 ? 2147483647 : idle_timeout * 1000)
     response.upgrade do |socket, leftover|
-      WebSocket.new(socket, max_message_size).run(leftover) { |ws| handler.call(ws, ctx) }
+      WebSocket.new(socket, max_message_size, idle_ms).run(leftover) { |ws| handler.call(ws, ctx) }
     end
   end
 
@@ -441,11 +456,14 @@ pub class WebSocket
   end
 
   # The next whole frame, reading as much as it takes. A connection that
-  # ends first answers 1006. Inside a fragmented message a frame may only
-  # carry what the message has left of the limit, so one over it is refused
-  # from its header rather than read whole beside the fragments held.
+  # ends first answers 1006, and one that sends no whole frame within the
+  # idle timeout, counted from here, 1001. Inside a fragmented message a
+  # frame may only carry what the message has left of the limit, so one
+  # over it is refused from its header rather than read whole beside the
+  # fragments held.
   private def next_frame : Frame | FrameError
     budget = @max_message_size - @fragments.bytesize
+    since = Time.monotonic
     loop do
       case decoded = WebSocket.decode_frame(@buffer, @offset, true, budget)
       in Frame
@@ -454,24 +472,65 @@ pub class WebSocket
       in FrameError
         return decoded
       in Int32
-        missing = fill(decoded)
+        missing = fill(decoded, since)
         return missing if missing
       end
     end
   end
 
   # Reads until *needed* bytes follow the offset. The pieces are joined
-  # once, so a large frame arriving in many reads is copied once.
-  private def fill(needed : Int32) : FrameError?
+  # once, so a large frame arriving in many reads is copied once. Each
+  # read waits only what is left of the idle timeout since *since* - the
+  # whole frame is held to it, not each read, so a client trickling a
+  # byte at a time is closed as surely as a silent one - and, once the
+  # close frame is out, `CLOSE_WAIT_MS` at most.
+  #
+  # A client that has sent nothing of its next frame by half the timeout
+  # is pinged, once, through the write lock as every send is. A browser's
+  # WebSocket cannot send a ping of its own, but answers one with a pong
+  # without a line of the page's code, and the pong is a whole frame: a
+  # page that only listens - notifications, a live feed - stays open for
+  # as long as its browser answers, and one whose client has gone quiet is
+  # closed at the timeout. Half a frame is not pinged: no pong can arrive
+  # inside it, so it has the whole-frame deadline and nothing else.
+  private def fill(needed : Int32, since : Span) : FrameError?
     pending = @buffer[@offset, @buffer.bytesize - @offset]
     parts = [pending]
     have = pending.bytesize
+    pinged = false
     while have < needed
       # The server closes the socket of a connection it gives up on; a
       # read of a closed socket panics rather than answering.
       return FrameError.new(1006, "") if @socket.closed?
+      if @idle_timeout_ms > 0
+        left = idle_left(since)
+        return FrameError.new(1001, "idle timeout") if left <= 0 && !@close_sent
+        wait = left
+        if have == 0 && !pinged && !@close_sent
+          # Until half the timeout has gone, then the ping and the rest.
+          until_ping = @idle_timeout_ms // 2 - (@idle_timeout_ms - left)
+          if until_ping > 0
+            wait = until_ping
+          else
+            pinged = true
+            transmit(PING, "")
+          end
+        end
+        wait = CLOSE_WAIT_MS if @close_sent && CLOSE_WAIT_MS < wait
+        @socket.read_timeout_ms = wait > 0 ? wait : CLOSE_WAIT_MS
+      end
       case chunk = @socket.read(65536)
-      in Cancelled, SocketError
+      in Cancelled
+        return FrameError.new(1006, "")
+      in SocketError
+        if chunk.timed_out? && !@close_sent && @idle_timeout_ms > 0
+          # Half the timeout with nothing of a frame: the ping's turn.
+          next if have == 0 && !pinged
+          # The idle timeout ran out mid-read.
+          return FrameError.new(1001, "idle timeout")
+        end
+        # Anything else, a timeout after the close frame went out - the
+        # client not answering it - included.
         return FrameError.new(1006, "")
       in String
         return FrameError.new(1006, "") if chunk.empty?
@@ -482,6 +541,15 @@ pub class WebSocket
     @buffer = parts.size == 1 ? pending : parts.join
     @offset = 0
     nil
+  end
+
+  # Milliseconds of the idle timeout left since *since*, 0 or less once it
+  # has run out.
+  private def idle_left(since : Span) : Int32
+    gone = Time.monotonic - since
+    elapsed = gone.total_seconds_i64 * 1000_i64 + (gone.nanoseconds // 1000000).to_i64
+    rest = @idle_timeout_ms.to_i64 - elapsed
+    rest < 0_i64 ? 0 : rest.to_i32
   end
 
   # A fragmented message's pieces go into one buffer as they come. Its

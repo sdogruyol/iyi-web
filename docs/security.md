@@ -1,7 +1,10 @@
 # Security
 
 Four handlers from the [Middleware](middleware.md) table guard an application.
-None is in the default stack; each honours `only` and `exclude`.
+None is in the default stack; each honours `only` and `exclude`. For
+`BasicAuthHandler`, `RateLimitHandler` and `CSRFHandler` their method
+defaults to `"*"`, every method, so `only ["/admin"]` guards a `POST` there
+too; a plain `Handler`'s default stays `GET`.
 
 Bearer tokens, JWTs, API keys and OAuth2's password flow are
 [dependencies](dependencies-and-auth.md) a route names, rather than
@@ -18,7 +21,7 @@ use SecurityHeadersHandler.new(content_security_policy: "default-src 'self'")
 use RateLimitHandler.new(limit: 60, period: 60)
 
 admin = BasicAuthHandler.new("admin", Program.env("ADMIN_PASSWORD") || raise "ADMIN_PASSWORD is not set")
-admin.only ["/admin", "/admin/*"], "*"
+admin.only ["/admin", "/admin/*"]
 use admin
 
 get "/admin" do |env|
@@ -62,7 +65,11 @@ windows. Every response carries `RateLimit-Limit`, `RateLimit-Remaining` and
 `Retry-After`. At most `max_keys` (default 10,000) windows are held: ended
 ones are dropped, and when all are open the oldest gives way. The counters
 are one table every worker counts in, behind a lock each request takes
-once. Behind a
+once. Without a block an IPv4 client is keyed by its address and an IPv6
+client by its /64 prefix (an IPv4-mapped `::ffff:a.b.c.d` as the IPv4
+address, a `%zone` dropped): a subscriber usually holds a whole /64, and
+keyed by full address could take a fresh allowance per request and push
+everyone else's windows out of the table. Behind a
 reverse proxy every request has the proxy's address, so pass a block that
 picks the key; trust `X-Forwarded-For` only when a proxy you run sets it,
 and answer nil to leave a request unlimited:

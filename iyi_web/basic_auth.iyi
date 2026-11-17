@@ -17,7 +17,9 @@
 # application's block, which owns that concern (`std/password` hashes do).
 #
 # Kemal's handler guards every path and is narrowed by subclassing; here
-# `only` and `exclude` narrow it. Basic credentials are a password on
+# `only` and `exclude` narrow it, and their method defaults to `"*"`, so
+# `only ["/admin"]` guards POST and DELETE there as well as GET (a plain
+# `Handler`'s default is GET). Basic credentials are a password on
 # every request: serve them over TLS.
 #
 # Not in the default stack: `use BasicAuthHandler.new(...)`.
@@ -68,6 +70,17 @@ pub class BasicAuthHandler < Handler
 
   pub def realm : String
     @realm
+  end
+
+  # Narrowed by path, the method defaults to every method rather than
+  # `Handler`'s GET: a guard named for `/admin` that let POST through
+  # would fail open.
+  pub def only(paths : Array(String), method : String = "*") : Nil
+    super(paths, method)
+  end
+
+  pub def exclude(paths : Array(String), method : String = "*") : Nil
+    super(paths, method)
   end
 
   pub def call(ctx : Context) : Nil

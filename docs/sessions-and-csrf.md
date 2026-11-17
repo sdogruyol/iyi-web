@@ -37,7 +37,7 @@ the handler is made. `SessionHandler.new` also takes:
 | `cookie_name` | `"iyi_web.session"` | |
 | `max_age` | `14 * 86400` | Seconds. The cookie's `Max-Age`, and the server's own limit on a cookie's age. |
 | `path`, `domain` | `"/"`, `""` | |
-| `secure` | `false` | Set it behind HTTPS. |
+| `secure` | `false` | Set it in production behind HTTPS: without it the cookie also travels over plain HTTP. Needed for a `__Host-` or `__Secure-` name, and then sign-out's deletion carries `Secure` too. |
 | `http_only` | `true` | |
 | `same_site` | `"Lax"` | `"None"` needs `secure: true`. |
 
@@ -45,8 +45,8 @@ the handler is made. `SessionHandler.new` also takes:
 strings, `set(key, value)` for anything `JSON.to_json` writes (read back as
 `JSON::Any` with `json?(key)`), `delete`, `has_key?`, `keys`, `clear`, and
 `id`, a random id for anything kept about the session elsewhere.
-`regenerate` gives the session a new id and keeps its values: call it at
-sign-in. A cookie that was altered, has lapsed, or was sealed under a secret
+`regenerate` gives the session a new id and keeps its values, except the
+CSRF token, which it drops: call it at sign-in. A cookie that was altered, has lapsed, or was sealed under a secret
 that is no longer listed is an empty session.
 
 The response sets the cookie only when the session changed, and deletes it
@@ -56,6 +56,18 @@ server. The cookie is written after the route returns, so a route that
 streams calls `save_session(env)` before its first `env.response.flush`; a
 change made after the headers went out cannot reach the client, and is
 reported on the error stream.
+
+The server keeps nothing, which bounds what it can take back:
+
+- `clear` is not revocation. It deletes the cookie in the browser that
+  signs out; a copy taken earlier is still a valid session until it is
+  `max_age` old. To end sessions server-side, keep an id or a version in
+  the session and check it against your own store on each request, or
+  replace the secret, which ends every session.
+- A session has no absolute lifetime. Every change reseals the cookie with
+  a fresh issue time, so a session that changes at least once every
+  `max_age` lives on indefinitely. Keep a sign-in time in the session and
+  refuse it past your limit if you need one.
 
 ## CSRF
 
@@ -71,7 +83,7 @@ import web/iyi_web/csrf::{CSRFHandler, csrf_tag}
 
 use SessionHandler.new(secret)
 csrf = CSRFHandler.new
-csrf.exclude ["/api/*"], "*"
+csrf.exclude ["/api/*"]
 use csrf
 
 get "/note" do |env|
@@ -84,5 +96,7 @@ token alone, for a script to send in the header. Each call masks the token
 with fresh random bytes, so no two pages carry the same string and a
 compressed response does not give it away. `CSRFHandler.new` takes `field`,
 `header` and the refusal's `message` (default `"Forbidden (CSRF)"`). `only`
-and `exclude` choose the requests it checks; their method defaults to `GET`,
-which is never checked, so name the method or `"*"`.
+and `exclude` choose the requests it checks; their method defaults to `"*"`,
+every method (a plain handler's is `GET`, which this never checks).
+`Session#regenerate` drops the token, so one a page carried before sign-in
+is refused after it.

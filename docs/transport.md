@@ -131,16 +131,34 @@ alone. Off by default.
 | What | Default | Answer |
 | --- | --- | --- |
 | request line | 8 KiB | `414` |
-| header fields | 16 KiB | `431` |
+| header fields | 16 KiB, checked after the head is read (see below) | `431` |
 | body | `max_request_body_size` (8 MiB) | `413` |
+| fields in the query / a form body | `max_form_fields` (1000) | `414` / `413` |
 | whole request, from its first byte | `read_timeout` (60 s) | `408` |
 | next request on a kept connection | `idle_timeout` (75 s) | closed |
 | each write | `write_timeout` (60 s) | connection ends |
 | requests per connection | `max_keepalive_requests` (100) | `Connection: close` |
+| connections at once | `max_connections` (1024) | next one waits to be accepted |
+| next frame on an open WebSocket | `websocket_idle_timeout` (120 s) | close `1001` |
 
 A head that misses `read_timeout` gets its `408` over HTTP/1 in the clear;
 under TLS or HTTP/2 the connection is closed (close_notify or GOAWAY),
 since the bytes on the wire there are not plain HTTP/1.
+
+The request line and header limits are checked on the head std/http hands
+over, once it has read all of it: std/http buffers a head of up to 1 MiB
+(`Server::MAX_HEAD`, past which it answers `431` itself), so a client can
+make a connection hold that much before iyi-web answers `431`. Holding the
+head to 16 KiB as it is read would take a bound std/http's
+`Server.handle` does not take yet.
+
+`max_connections` is kept here because iyi-web hands each connection to
+`Server.handle`, which passes `Server.serve`'s own limit by. It works as
+std/http's does: at the limit the accept loop stops accepting until a
+connection ends, so the next client waits in the kernel's listen queue
+rather than being refused, and every connection holds its place until it
+closes - a kept-alive one between requests, an upgraded WebSocket for as
+long as it is open, one that failed or was cut off until it is gone.
 
 ## Stopping
 

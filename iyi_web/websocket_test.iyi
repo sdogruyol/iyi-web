@@ -4,6 +4,7 @@
 module iyi_web/websocket_test
 
 import std/socket::{IyiSocket}
+import std/time::{Time}
 import iyi_web/websocket::{WebSocket, Frame, FrameError}
 import iyi_web/router::{Router, RouteHandler}
 import iyi_web/handler::{chain}
@@ -724,6 +725,147 @@ describe "WebSocket session" do
     end
     assert counts == [4, 4, 4]
   end
+
+  it "closes with 1001 a client that goes quiet half way through a frame, pings counting as activity" do
+    seen = Seen.new
+    pair = connected
+    peer = Peer.new(pair[1])
+    group do |g|
+      g.spawn do
+        WebSocket.new(pair[0], 1024, 600).run { |ws| seen.watch(ws) }
+        0
+      end
+      g.spawn do
+        # Pings 200 ms apart keep the session past its 600 ms, and never
+        # leave it quiet for the 300 ms after which it pings itself.
+        4.times do
+          sleep(200)
+          peer.send(WebSocket::PING, "p")
+          assert peer.expect.payload == "p"
+        end
+        # A ten-byte text frame's header and mask, and three of its bytes.
+        peer.write(WebSocket.encode_frame(WebSocket::TEXT, "0123456789", true, MASK)[0, 9])
+        assert peer.expect_close == {1001, "idle timeout"}
+        pair[1].close
+        0
+      end
+      0
+    end
+    assert seen.pings == ["p", "p", "p", "p"]
+    assert seen.messages.empty?
+    assert seen.closes == [{1001, "idle timeout"}]
+  end
+
+  it "holds the whole frame to the idle timeout, not each read, so a trickle does not keep it open" do
+    seen = Seen.new
+    pair = connected
+    peer = Peer.new(pair[1])
+    elapsed = [] of Float64
+    group do |g|
+      g.spawn do
+        WebSocket.new(pair[0], 1024, 500).run { |ws| seen.watch(ws) }
+        0
+      end
+      g.spawn do
+        frame = WebSocket.encode_frame(WebSocket::TEXT, "0123456789", true, MASK)
+        started = Time.monotonic
+        # A byte every 200 ms: each read gets one well inside the 500.
+        3.times do |index|
+          peer.write(frame[index, 1])
+          sleep(200) if index < 2
+        end
+        assert peer.expect_close == {1001, "idle timeout"}
+        elapsed << (Time.monotonic - started).total_milliseconds
+        pair[1].close
+        0
+      end
+      0
+    end
+    # Closed about 500 ms after the frame began; bounding each read would
+    # have waited 500 ms after the last byte, at 400.
+    assert elapsed.size == 1
+    assert elapsed[0] >= 450.0
+    assert elapsed[0] < 800.0
+    assert seen.closes == [{1001, "idle timeout"}]
+  end
+
+  it "pings a client that sends nothing, and keeps one that answers open past the idle timeout" do
+    seen = Seen.new
+    pair = connected
+    peer = Peer.new(pair[1])
+    elapsed = [] of Float64
+    group do |g|
+      g.spawn do
+        WebSocket.new(pair[0], 1024, 400).run { |ws| seen.watch(ws) }
+        0
+      end
+      g.spawn do
+        started = Time.monotonic
+        # A listening browser: it sends nothing of its own and answers
+        # each ping with a pong, as a browser does without the page.
+        4.times do
+          ping = peer.expect
+          assert ping.opcode == WebSocket::PING
+          peer.send(WebSocket::PONG, ping.payload)
+        end
+        elapsed << (Time.monotonic - started).total_milliseconds
+        peer.send(WebSocket::CLOSE, WebSocket.close_payload(1000, ""))
+        assert peer.expect_close == {1000, ""}
+        pair[1].close
+        0
+      end
+      0
+    end
+    # Four pings, one every 200 ms: twice the 400 ms timeout, and open.
+    assert elapsed.size == 1
+    assert elapsed[0] > 600.0
+    assert seen.pongs.size == 4
+    assert seen.closes == [{1000, ""}]
+  end
+
+  it "closes with 1001 a client that does not answer the ping" do
+    seen = Seen.new
+    pair = connected
+    peer = Peer.new(pair[1])
+    group do |g|
+      g.spawn do
+        WebSocket.new(pair[0], 1024, 400).run { |ws| seen.watch(ws) }
+        0
+      end
+      g.spawn do
+        assert peer.expect.opcode == WebSocket::PING
+        assert peer.expect_close == {1001, "idle timeout"}
+        pair[1].close
+        0
+      end
+      0
+    end
+    assert seen.pongs.empty?
+    assert seen.closes == [{1001, "idle timeout"}]
+  end
+
+  it "waits for as long as the client likes with an idle timeout of 0" do
+    seen = Seen.new
+    pair = connected
+    peer = Peer.new(pair[1])
+    group do |g|
+      g.spawn do
+        WebSocket.new(pair[0], 1024, 0).run { |ws| seen.watch(ws) }
+        0
+      end
+      g.spawn do
+        frame = WebSocket.encode_frame(WebSocket::TEXT, "late", true, MASK)
+        peer.write(frame[0, 3])
+        sleep(300)
+        peer.write(frame[3, frame.bytesize - 3])
+        assert peer.expect.payload == "late"
+        pair[1].close
+        0
+      end
+      0
+    end
+    assert seen.messages == ["late"]
+  end
 end
 
 # --- Over a server ---
@@ -817,6 +959,17 @@ group do |g|
         assert peer.expect.payload == "p"
         peer.send(WebSocket::CLOSE, WebSocket.close_payload(1000, ""))
         assert peer.expect_close == {1000, ""}
+        peer.socket.close
+      end
+
+      it "closes an upgraded connection the client went quiet on after websocket_idle_timeout" do
+        server_config.websocket_idle_timeout = 1
+        peer = open_socket(port, "/echo")[1]
+        server_config.websocket_idle_timeout = 120
+        peer.send(WebSocket::TEXT, "awake")
+        assert peer.expect.payload == "awake"
+        peer.write(WebSocket.encode_frame(WebSocket::TEXT, "half", true, MASK)[0, 4])
+        assert peer.expect_close == {1001, "idle timeout"}
         peer.socket.close
       end
 

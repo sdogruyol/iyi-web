@@ -223,6 +223,9 @@ describe "Context cookies" do
     gone = env
     gone.delete_cookie("sid")
     assert gone.response.headers["set-cookie"] == "sid=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+    secured = env
+    secured.delete_cookie("__Host-sid", secure: true)
+    assert secured.response.headers["set-cookie"] == "__Host-sid=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
     assert panics? { env.set_cookie("bad name", "x") }
   end
 end

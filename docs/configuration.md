@@ -23,6 +23,8 @@ config.max_request_body_size = 1024 * 1024
 | `max_request_body_size` | `8 * 1024 * 1024` | |
 | `max_file_uploads` | `128` | |
 | `max_multipart_form_field_size` | `8 * 1024 * 1024` | |
+| `max_form_fields` | `1000` | |
+| `max_connections` | `1024` | |
 | `max_ranges` | `16` | |
 | `reject_unreadable_body` | `true` | |
 | `route_on_raw_path` | `false` | |
@@ -38,6 +40,7 @@ config.max_request_body_size = 1024 * 1024
 | `compress` | `false` | |
 | `websocket_allowed_origins` | `[] of String` (same-origin) | |
 | `websocket_max_message_size` | `8 * 1024 * 1024` | |
+| `websocket_idle_timeout` | `120` | |
 | `app_name` | `"iyi-web"` | |
 
 - `max_keepalive_requests` caps the requests served on one connection before
@@ -51,7 +54,26 @@ config.max_request_body_size = 1024 * 1024
   [Transport](transport.md).
 - A request line longer than 8 KiB gets `414 URI Too Long`, and header
   fields past 16 KiB `431 Request Header Fields Too Large`, the bounds
-  Crystal's server holds Kemal to. Neither is a setting.
+  Crystal's server holds Kemal to. Neither is a setting, and both are
+  checked once std/http has read the whole head, which it buffers up to
+  1 MiB (`Server::MAX_HEAD`) first: a client can make the server hold that
+  much of a head before the `431`. A head past 1 MiB std/http answers
+  `431` itself.
+- `max_form_fields` is the most fields the query string may carry, and as
+  many again a form body (`application/x-www-form-urlencoded`, or a
+  `multipart/form-data` body's text fields). Parsing stops at the field
+  after the limit, which is never filed, and the request gets `414` for
+  the query or `413` for the body before the route runs (with
+  `reject_unreadable_body` off, the route finds that table empty and the
+  status in `params.body_error`). The limit is what keeps a body of names
+  whose hashes collide from making the tables quadratic to build: iyi's
+  `String#hash` is unseeded.
+- `max_connections` is the most connections served at once, std/http's own
+  default; `0` for no limit. At the limit the server stops accepting until
+  one ends: the next client waits in the kernel's listen queue and is
+  served in its turn, as Go's `netutil.LimitListener` does. A connection
+  holds its place until it closes, between keep-alive requests and as an
+  open WebSocket too. Read when the server starts.
 - `max_ranges` is the most ranges one `Range` header may ask for; `0` turns
   range requests off.
 - `reject_unreadable_body` answers a JSON body that does not parse with `400`,
@@ -71,6 +93,14 @@ config.max_request_body_size = 1024 * 1024
 - `websocket_allowed_origins` lists origins such as `"https://example.com"`;
   `"*"` admits every request and `"null"` a sandboxed page.
 - `websocket_max_message_size` counts a fragmented message whole.
+- `websocket_idle_timeout` is how many seconds an open WebSocket waits for
+  the client's next whole frame - a message, a ping or a pong - before it
+  closes the connection with `1001`. The time runs from the end of the
+  last frame. Half way through it, a client that has sent nothing of its
+  next frame is pinged; a browser answers with a pong by itself, so a page
+  that only listens stays open. Half a frame followed by silence, or a
+  frame trickled a byte at a time, is not pinged and is closed at the
+  timeout. `0` turns both off.
 - `app_name` and `env` appear in the line printed at startup. With `env` set
   to `test`, `run` binds the port without serving requests.
 - `powered_by true` adds `X-Powered-By: iyi-web` to every response.

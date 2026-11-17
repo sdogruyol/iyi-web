@@ -19,6 +19,8 @@ bash bench/compare/run.sh                               # every framework, 10 s 
 bash bench/compare/run.sh --duration 5 --only iyi-web,go
 bash bench/compare/run.sh --db postgres://user:pw@host/bench   # an existing PostgreSQL
 bash bench/compare/run.sh --no-db                       # leave /db out
+bash bench/compare/run.sh --server-cpus 0-5 --client-cpus 6-7 --db-cpus 8-11
+                                                        # Linux: servers, oha and PostgreSQL on their own cores
 bash bench/compare/run.sh --help                        # warm-up, connections, workers, port, output
 ```
 
@@ -63,8 +65,12 @@ For each framework in turn:
 3. Starts it on its own port, serving on every core the way each is
    deployed: iyi-web, Kemal (Crystal's default execution context resized to
    the core count) and Go with threads; FastAPI under uvicorn with one
-   worker process per core and `httptools`; Express with one `node:cluster`
-   worker per core. Request logging is off everywhere.
+   worker process per core, `httptools` and `uvloop` (when they are
+   installed; `uvloop` does not build on Windows); Express with one
+   `node:cluster` worker per core. Request logging is off everywhere. On
+   Linux, `--server-cpus`, `--client-cpus` and `--db-cpus` hold the servers,
+   oha and the PostgreSQL the runner starts to the CPUs named, with
+   `taskset -c`; `--workers` then defaults to the number of server CPUs.
 4. Checks every endpoint's status, `Content-Type` and body, and that
    `/users/abc` is refused with a 4xx; `/db` is asked eight times and must
    answer `200`, JSON with exactly `id` and `randomNumber`, both from 1 to
@@ -79,7 +85,73 @@ For each framework in turn:
 Results go to `bench/compare/results.json` and `bench/compare/results.md`
 (both ignored by git).
 
-### Results
+### Results on Linux, cores split
+
+Measured 2026-11-17 with
+`bash bench/compare/run.sh --server-cpus 0-5 --client-cpus 6-7 --db-cpus 8-11`
+(otherwise defaults: 64 connections, 3 s warm-up, 10 s per endpoint, the
+database started by the runner), three full runs one after another, each
+in a window where no other build or test of ours ran. The table is each
+cell's median of the three runs:
+
+| Framework | `/plaintext` req/s | `/json` req/s | `/users/42` req/s | `/db` req/s |
+|---|---:|---:|---:|---:|
+| iyi-web | 254731 | 244259 | 229998 | 83579 |
+| FastAPI | 87053 | 85286 | 57402 | 27636 |
+| Express | 219687 | 239108 | 262988 | 74497 |
+| Kemal | 72051 | 69893 | 77448 | 24348 |
+| Go net/http | 280625 | 267170 | 263499 | 120447 |
+
+| Framework | p99 ms `/plaintext` | `/json` | `/users/42` | `/db` |
+|---|---:|---:|---:|---:|
+| iyi-web | 1.600 | 1.642 | 1.766 | 2.879 |
+| FastAPI | 2.001 | 2.167 | 3.200 | 4.926 |
+| Express | 1.402 | 1.117 | 0.811 | 1.929 |
+| Kemal | 2.325 | 2.462 | 2.712 | 3.212 |
+| Go net/http | 1.381 | 1.415 | 1.441 | 1.808 |
+
+Every run, every endpoint: 0 non-200 answers and 0 errors. Each cell's
+three runs were within 15% of each other except Express `/users/42`
+(222,723 in the third run against about 264,000) and `/db` (55,012 against
+about 76,000), and Go `/plaintext` (237,333 in the second against about
+283,000).
+
+- Machine: Linux 7.0 (x86_64), QEMU Virtual CPU version 2.5+, 12 logical
+  cores, a virtual machine; the servers held to CPUs 0-5 (6 workers or
+  processes each), oha to 6-7 and PostgreSQL to 8-11 with `taskset`. A
+  probe before the runs put oha at 173% of its two CPUs at iyi-web's
+  plaintext rate, and giving it four or six CPUs did not raise the rate:
+  the servers, not the load generator, set these numbers.
+- iyi-web from this checkout on iyi 0.21.0, iyilang/db 0.5.0 and
+  iyilang/pg 0.5.0; FastAPI 0.163.1, uvicorn 0.54.0 with httptools and
+  uvloop, asyncpg 0.32.0, Python 3.12.16; Express 5.3.0 on Node 24.21.0;
+  Kemal 1.15.0, crystal-pg 0.31.0 and crystal-db 0.15.0 on Crystal 1.21.0;
+  Go 1.27.4 with pgx 5; oha 1.17.0; PostgreSQL 16.2 from pgserver, 24
+  connections per server.
+
+What these say that the Windows table below does not:
+
+- **Go leads on Linux.** iyi-web serves about 90% of Go's rate on the
+  three plain endpoints and 69% on `/db`; on Windows it was ahead on the
+  first three and even on `/db`. Each runtime's Windows I/O path is a
+  different code path from its Linux one, and the Linux numbers are the
+  ones a server deployment sees.
+- **Express is level with iyi-web** on the plain endpoints (ahead on
+  `/users/42`) and behind on `/db`.
+- **Kemal is six times faster here than on Windows**, as the Windows notes
+  below suspected: Crystal's Windows event loop was its limit there.
+- **FastAPI needs uvloop.** On Linux with several uvicorn workers on
+  asyncio's own loop, every keep-alive request after a connection's first
+  waited ~40 ms, and FastAPI served about 1,500 req/s; the runner uses
+  uvloop when it is installed, as `uvicorn[standard]` does.
+- **Still one machine.** The load generator and the database share the
+  virtual machine with the server, on separate cores, and the virtual
+  machine shares its host with another one. A second machine on the same
+  LAN was over Wi-Fi with a 2.9 ms round trip, which caps 64 connections
+  at about 22,000 req/s, so it could not serve as a separate load
+  generator.
+
+### Results on Windows
 
 Measured 2026-11-04 with `bash bench/compare/run.sh` (defaults, the
 database started by the runner), on the `roadmap` branch, after checking

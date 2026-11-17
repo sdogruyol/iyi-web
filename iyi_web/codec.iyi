@@ -113,21 +113,35 @@ end
 
 # Every name/value pair of a query or form body, decoded, in the order
 # sent: `tag=a&tag=b` is two pairs. Pairs with an empty name are dropped.
-pub def parse_query_pairs(text : String) : Array(Tuple(String, String))
+#
+# *max_pairs* bounds the work: the scan stops at the pair after it, so a
+# caller holding the answer to `max_form_fields` sees `size > max_pairs`
+# and refuses the request without a single pair past the limit having been
+# decoded, let alone hashed. That is the point of it: `String#hash` is
+# std's unseeded FNV-1a, names that collide are cheap to make, and every
+# colliding name a table takes costs as much as all the ones before it, so
+# a body of some hundred thousand of them makes building the table
+# quadratic. The pieces are cut one at a time rather than split up front
+# for the same reason: what is past the limit is never looked at.
+pub def parse_query_pairs(text : String, max_pairs : Int32 = 2147483647) : Array(Tuple(String, String))
   pairs = [] of Tuple(String, String)
-  return pairs if text.empty?
-
-  text.split('&').each do |pair|
-    next if pair.empty?
-    eq = pair.index('=')
-    if eq
-      name = decode_form(pair[0, eq])
-      value = decode_form(pair[eq + 1, pair.bytesize - eq - 1])
-      pairs << {name, value} unless name.empty?
-    else
-      name = decode_form(pair)
-      pairs << {name, ""} unless name.empty?
+  size = text.bytesize
+  start = 0
+  while start < size && pairs.size <= max_pairs
+    stop = text.byte_index("&", start) || size
+    if stop > start
+      pair = text[start, stop - start]
+      eq = pair.index('=')
+      if eq
+        name = decode_form(pair[0, eq])
+        value = decode_form(pair[eq + 1, pair.bytesize - eq - 1])
+        pairs << {name, value} unless name.empty?
+      else
+        name = decode_form(pair)
+        pairs << {name, ""} unless name.empty?
+      end
     end
+    start = stop + 1
   end
   pairs
 end

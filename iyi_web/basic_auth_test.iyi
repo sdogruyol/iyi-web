@@ -18,6 +18,9 @@ def guarded(handler : Handler) : Handler
     r.get "/public" do |env|
       "open"
     end
+    r.post "/admin" do |env|
+      "posted"
+    end
   }])
 end
 
@@ -100,6 +103,15 @@ describe "BasicAuthHandler" do
     app = guarded(handler)
     assert dispatch(app, "GET", "/public").response.body == "open"
     assert dispatch(app, "GET", "/admin").response.status_code == 401
+    # `only` with no method guards every method, not only GET.
+    assert dispatch(app, "POST", "/admin").response.status_code == 401
+  end
+
+  it "guards every method off an excluded path" do
+    handler = BasicAuthHandler.new("admin", "secret")
+    handler.exclude ["/public"]
+    app = guarded(handler)
+    assert dispatch(app, "POST", "/admin").response.status_code == 401
   end
 
   it "skips excluded paths" do

@@ -123,10 +123,16 @@ specifications say, as providers and as plain functions.
 | Provider | Value | Scheme in the document |
 |---|---|---|
 | `bearer_auth` | the token of `Authorization: Bearer <token>` | `bearerAuth`, http bearer |
-| `api_key_auth("X-API-Key")` | the key; `KeyLocation::Query` or `::Cookie` for the other places | `apiKeyAuth`, apiKey |
+| `api_key_auth("X-API-Key")` | the key; `KeyLocation::Query` or `::Cookie` for the other places (see below on cookies) | `apiKeyAuth`, apiKey |
 | `jwt_auth(secret)` | the token's `Claims`, verified | `bearerAuth`, http bearer, `bearerFormat: JWT` |
 | `jwt_auth(secret, MyClaims)` | the payload read into `MyClaims` | the same |
 | `oauth2_password_bearer("/token")` | the bearer token | `OAuth2PasswordBearer`, oauth2 password flow |
+
+A key read from a cookie (`KeyLocation::Cookie`) is ambient authority: the
+browser attaches it to a request another site makes it send, as it does a
+session cookie. Guard the unsafe methods of such routes with `CSRFHandler`,
+or set the cookie `SameSite=Strict` (or `Lax`, which still sends it on a
+top-level `GET`), as for any cookie that authenticates.
 
 Each refuses a missing credential with `401`. A bearer token's refusal
 carries `WWW-Authenticate: Bearer realm="api"`; a JWT that was sent and
@@ -187,7 +193,7 @@ failed:
 | `exp` still ahead | `token has expired` |
 | `nbf` passed | `token is not valid yet` |
 | `iat` not in the future | `token was issued in the future` |
-| `iss` / `aud`, when `issuer:` / `audience:` are given | `token issuer is not accepted`, `token audience is not accepted` |
+| `iss` / `aud`, when `issuer:` / `audience:` are given; a non-null `aud` when no `audience:` is (RFC 7519 §4.1.3) | `token issuer is not accepted`, `token audience is not accepted` |
 | the payload reads into the type asked for | `invalid token claims: ...` |
 
 `exp`, `nbf` and `iat` are optional, and checked when present, each give or
@@ -217,12 +223,16 @@ token route, and sends the token it gets as a bearer token.
 import std/password::{Bcrypt}
 
 TOKEN = jwt_auth(SECRET, security: SecurityScheme.oauth2_password("/token"))
+UNKNOWN = Bcrypt.hash("no account has this password", 10)
 
 post "/token" do |env|
   grant = password_grant(env)
   next grant if grant.is_a?(OAuthError)
   account = find_account(grant.username)
-  if account && Bcrypt.verify(grant.password, account.password_hash)
+  # Verify against a dummy hash for a name nobody has, so a wrong name takes
+  # as long as a wrong password and the timing does not list the accounts.
+  matched = Bcrypt.verify(grant.password, account ? account.password_hash : UNKNOWN)
+  if account && matched
     token = JWT.sign(Claims.new(sub: account.name, expires_in: Span.new(hours: 1)), SECRET)
     token_response(env, token, Span.new(hours: 1))
     nil
