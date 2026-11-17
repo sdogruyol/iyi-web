@@ -6,6 +6,104 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
+A security release. An outside-eyes review of the auth, session, CSRF and
+request-handling code found no break in the cryptography (AES-256-GCM
+sessions, HS256 JWTs, masked CSRF tokens all hold) but a set of defaults
+that failed open and some denial-of-service paths; this fixes them.
+
+### Upgrading from 0.7
+
+- **`only` / `exclude` on `BasicAuthHandler`, `CSRFHandler` and
+  `RateLimitHandler` cover every method by default.** They defaulted to
+  GET, so `admin.only ["/admin"]` left `POST /admin` unauthenticated,
+  `csrf.only [...]` checked nothing, and `limiter.only ["/login"]` left
+  `POST /login` unlimited. A rule that really means one method names it.
+  A plain `Handler` subclass keeps GET as its default.
+- **`CookieJar` keeps cookie names as sent and the first of two cookies
+  with one name.** Names were percent-decoded, so `__Host%2Dsession`
+  read as `__Host-session` and defeated the prefix; the last duplicate
+  won, which let a sibling subdomain's cookie replace the real one.
+- **`Session#regenerate` drops the CSRF token** (`_csrf_token`), so a
+  token learned before sign-in is useless after it.
+- **`JWT.verify` refuses a token with an `aud` claim when no `audience:`
+  is given** (RFC 7519 §4.1.3), and refuses a signature whose base64url
+  text is not the canonical one (four different last characters used to
+  verify).
+- **`RateLimitHandler`'s default key groups IPv6 clients by /64**, so one
+  host's routed /64 is one allowance, not 2^64; `::ffff:a.b.c.d` keys as
+  the IPv4 address.
+- **At most `max_form_fields` (1000) fields per request.** iyi's string
+  hash is unseeded, so a form of ~100k keys built to collide made
+  `Params` quadratic: one POST to any path held a worker for seconds to
+  minutes, before routing or auth. A query, urlencoded body or multipart
+  form past the limit is refused before the route, 414 for the query and
+  413 for a body; nothing past the limit is parsed. `Params#body_error`
+  can answer 414. The query and a urlencoded body are parsed on first
+  use, not when the `Context` is built.
+- **At most `max_connections` (1024) connections are served at once**,
+  as std/http's own server does; past it the accept loop waits, and new
+  clients queue in the kernel. `0` turns the limit off.
+- **A WebSocket gets `websocket_idle_timeout` (120 s).** It had no read
+  timeout after the upgrade, so a client could announce an 8 MiB frame,
+  send all but its last byte and hold the memory forever. A frame that
+  does not arrive whole within the timeout closes the connection with
+  1001; a silent connection is pinged at half the timeout, and the
+  browser's automatic pong keeps it open. `0` turns it off.
+
+### Added
+
+- `Context#delete_cookie(..., secure:)`; `SessionHandler` passes its
+  `secure` setting, so signing out deletes a `__Host-`/`__Secure-`
+  session cookie (browsers ignore a deletion of one without `Secure`).
+- `rate_limit_key(address)`, the default key as a function.
+- `SESSION_CSRF_KEY` in `iyi_web/session`; `CSRF_SESSION_KEY` in
+  `iyi_web/csrf` is the same string.
+- The streaming `parse_multipart` takes an optional `spool:` block that
+  opens a file part's temporary file.
+- `Config`/`Settings#max_form_fields`, `#max_connections` and
+  `#websocket_idle_timeout`; `Params#limit_fields`; optional
+  arguments on `parse_query_pairs`, `WebSocket.new` and
+  `WebSocket.accept`.
+
+### Fixed
+
+- A multipart part header that arrives a few bytes at a time (a chunked
+  body of 1-byte chunks) is scanned in linear time; a 60 KiB header took
+  16 s of CPU before.
+- An upload whose write fails (disk full) no longer leaves its temporary
+  files and spool directories behind; every file the parse made is
+  deleted, the half-written one included.
+- `bench/compare/run.iyi` builds on iyi 0.21 again: a regex literal
+  inside a `{% if %}` block was refused (`undefined constant
+  ::Regex::Options`), so the runner did not compile.
+
+### Known limits (need iyi std)
+
+- A JSON body's object members and std/http's header table still go
+  into hash tables keyed by the unseeded string hash, so colliding keys
+  there are still quadratic, bounded by `max_request_body_size` and
+  std/http's 1 MiB head. The fix is a seeded string hash in iyi std.
+- The 16 KiB header-field limit is checked after std/http has read the
+  whole head (up to 1 MiB); `docs/transport.md` now says so.
+
+### Documentation
+
+- `docs/dependencies-and-auth.md`: the password-flow example always runs
+  bcrypt, so its timing does not tell which usernames exist; a key in a
+  cookie (`KeyLocation::Cookie`) needs CSRF protection on unsafe methods.
+- `docs/sessions-and-csrf.md`: `clear` is not revocation, a session
+  resealed on every change has no absolute lifetime, and `secure:` should
+  be on in production.
+- `docs/templates.md`: autoescape covers element text and quoted
+  attribute values; URL and event-handler attributes, unquoted
+  attributes and `<script>`/`<style>` need more, and the page says what.
+- `docs/benchmarks.md`: results on Linux, the servers, oha and
+  PostgreSQL on separate cores (`--server-cpus`, `--client-cpus`,
+  `--db-cpus`, new), median of three runs. Go's `net/http` leads there
+  (iyi-web ~90% of it on the plain endpoints, 69% on the query), unlike
+  on Windows; the README says so. FastAPI runs on `uvloop` where it is
+  installed.
+
 ## [0.7.0] - 2026-11-10
 
 Requires iyi 0.21.0 or later. iyi 0.21.0 made `spawn` one verb (SPEC.md
