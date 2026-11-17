@@ -123,10 +123,16 @@ specifications say, as providers and as plain functions.
 | Provider | Value | Scheme in the document |
 |---|---|---|
 | `bearer_auth` | the token of `Authorization: Bearer <token>` | `bearerAuth`, http bearer |
-| `api_key_auth("X-API-Key")` | the key; `KeyLocation::Query` or `::Cookie` for the other places | `apiKeyAuth`, apiKey |
+| `api_key_auth("X-API-Key")` | the key; `KeyLocation::Query` or `::Cookie` for the other places (see below on cookies) | `apiKeyAuth`, apiKey |
 | `jwt_auth(secret)` | the token's `Claims`, verified | `bearerAuth`, http bearer, `bearerFormat: JWT` |
 | `jwt_auth(secret, MyClaims)` | the payload read into `MyClaims` | the same |
 | `oauth2_password_bearer("/token")` | the bearer token | `OAuth2PasswordBearer`, oauth2 password flow |
+
+A key read from a cookie (`KeyLocation::Cookie`) is ambient authority: the
+browser attaches it to a request another site makes it send, as it does a
+session cookie. Guard the unsafe methods of such routes with `CSRFHandler`,
+or set the cookie `SameSite=Strict` (or `Lax`, which still sends it on a
+top-level `GET`), as for any cookie that authenticates.
 
 Each refuses a missing credential with `401`. A bearer token's refusal
 carries `WWW-Authenticate: Bearer realm="api"`; a JWT that was sent and
