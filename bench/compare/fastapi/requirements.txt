@@ -2,3 +2,4 @@ fastapi
 uvicorn
 httptools
 asyncpg
+uvloop; sys_platform != "win32"

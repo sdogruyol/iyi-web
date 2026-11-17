@@ -65,7 +65,8 @@ For each framework in turn:
 3. Starts it on its own port, serving on every core the way each is
    deployed: iyi-web, Kemal (Crystal's default execution context resized to
    the core count) and Go with threads; FastAPI under uvicorn with one
-   worker process per core and `httptools`; Express with one
+   worker process per core, `httptools` and `uvloop` (when they are
+   installed; `uvloop` does not build on Windows); Express with one
    `node:cluster` worker per core. Request logging is off everywhere. On
    Linux, `--server-cpus`, `--client-cpus` and `--db-cpus` hold the servers,
    oha and the PostgreSQL the runner starts to the CPUs named, with

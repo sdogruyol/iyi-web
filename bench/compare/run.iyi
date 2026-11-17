@@ -282,6 +282,12 @@ class FastAPI < Framework
   def start(port : Int32, options : Options) : ChildProcess | ProcessError
     args = ["-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", port.to_s, "--workers", options.workers.to_s, "--no-access-log", "--log-level", "warning"]
     args = args + ["--http", "httptools"] if found?(@python, ["-c", "import httptools"])
+    # uvloop, as `uvicorn[standard]` deploys it (it does not build on
+    # Windows). Linux measured 2026-11-17: with several workers on asyncio's
+    # own loop, every keep-alive request after a connection's first waited
+    # ~40 ms (the length of Linux's delayed-ACK timer), so FastAPI served
+    # ~1,500 req/s; with uvloop, no wait.
+    args = args + ["--loop", "uvloop"] if found?(@python, ["-c", "import uvloop"])
     command, args = pinned(options.server_cpus, @python, args)
     Process.spawn(command, args, chdir: File.join(HERE, "fastapi"), output: Redirect::Null, env: with_db({} of String => String, options, POOL_PER_WORKER))
   end
