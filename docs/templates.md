@@ -62,7 +62,8 @@ controller's `def show(name : String) : String` with `render` inside.
 `<%= expr %>` prints `expr.to_s` HTML-escaped: `&`, `<`, `>`, `"` and `'`
 become `&amp;`, `&lt;`, `&gt;`, `&quot;` and `&#39;`, exactly what
 `HTML.escape` from `std/html` does. A value from a request, a database or a
-file prints as text wherever it lands, in an element or in an attribute:
+file prints as text in an element's content and in a quoted attribute
+value, and only there (see [Where escaping is not enough](#where-escaping-is-not-enough)):
 
 ```erb
 <input name="q" value="<%= query %>">
@@ -77,6 +78,46 @@ $ curl -G localhost:3000/search --data-urlencode 'q=<script>alert(1)</script>'
 
 The template's own text is never escaped: `<b>Hello</b>` in a view is
 printed as written. So is the text of `<%% ... %>`.
+
+### Where escaping is not enough
+
+HTML-escaping keeps a value from closing the element or the quoted
+attribute it is printed in. It says nothing about what the value means
+once it is there, and these places mean something:
+
+- **A URL attribute** (`href`, `src`, `action`, `formaction`, ...):
+  `<a href="<%= url %>">` with `url` = `javascript:alert(1)` runs script
+  on a click, and none of its characters needs escaping. Check a URL
+  from outside against an allow-list of schemes (`https:`, `http:`,
+  `mailto:`) or build it yourself from a path you own, and print the
+  checked value.
+- **An unquoted attribute**: `<input value=<%= query %>>` with
+  `query` = `x onfocus=alert(1) autofocus` adds attributes, because a
+  space, `=` or a backtick are not escaped. Always quote attribute values,
+  with `"` or `'`.
+- **An event-handler attribute** (`onclick`, `onload`, any `on*`):
+  the browser decodes the attribute's entities before it runs the code,
+  so in `onclick="greet('<%= name %>')"` the `&#39;` is a `'` again
+  and `name` = `');alert(1);('` breaks out of the string. Never print a
+  value into one.
+- **Inside `<script>` or `<style>`**: their text is not HTML, entities are
+  not decoded, and `var n = <%= count %>;` with `count` =
+  `1;alert(1)` needs no quote at all to run. Never print a value into
+  either.
+
+To hand data to script, print it as JSON in a quoted `data-` attribute,
+where autoescape is the right escaping, and read it from the element:
+
+```erb
+<div id="chart" data-points="<%= JSON.to_json(points) %>"></div>
+<script>
+  const points = JSON.parse(document.getElementById("chart").dataset.points)
+</script>
+```
+
+A `<script type="application/json">` block works too, but not through
+`<%= %>`: entities are not decoded there, so it needs `raw` and JSON with
+every `<` written as `\u003c`, so the data can never contain `</script>`.
 
 ### Markup that is already HTML: `raw` and `SafeHTML`
 
