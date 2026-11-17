@@ -5,7 +5,7 @@
 module iyi_web/rate_limit_test
 
 import std/shared_proc::{SharedProc}
-import iyi_web/rate_limit::{RateLimitHandler}
+import iyi_web/rate_limit::{RateLimitHandler, rate_limit_key}
 import iyi_web/handler::{Handler, chain}
 import iyi_web/context::{Context}
 import iyi_web/request::{Request}
@@ -203,6 +203,30 @@ describe "RateLimitHandler" do
     end
     assert statuses == [200, 200, 429]
     3.times { assert dispatch(app, from("10.0.0.1")).response.status_code == 200 }
+  end
+
+  it "keys IPv6 clients by their /64 and IPv4 by address" do
+    clock = FakeClock.new
+    app = limited(RateLimitHandler.new(limit: 1, period: 60, clock: clock.reading), Hits.new)
+    assert dispatch(app, from("2001:db8:1:2::1")).response.status_code == 200
+    assert dispatch(app, from("2001:db8:1:2:ffff::9")).response.status_code == 429
+    assert dispatch(app, from("2001:db8:1:3::1")).response.status_code == 200
+  end
+
+  it "reads every IPv6 form into its /64 key" do
+    assert rate_limit_key("192.0.2.7") == "192.0.2.7"
+    assert rate_limit_key("") == ""
+    assert rate_limit_key("2001:db8::1") == "2001:0db8:0000:0000::/64"
+    assert rate_limit_key("2001:DB8:0:0:1:2:3:4") == "2001:0db8:0000:0000::/64"
+    assert rate_limit_key("2001:db8:a:b:c:d:e:f") == "2001:0db8:000a:000b::/64"
+    assert rate_limit_key("::1") == "0000:0000:0000:0000::/64"
+    assert rate_limit_key("::") == "0000:0000:0000:0000::/64"
+    assert rate_limit_key("fe80::1%eth0") == "fe80:0000:0000:0000::/64"
+    assert rate_limit_key("fe80::2%wlan0") == rate_limit_key("fe80::1")
+    assert rate_limit_key("2001:db8:1:2:3::") == "2001:0db8:0001:0002::/64"
+    assert rate_limit_key("::ffff:192.0.2.1") == "192.0.2.1"
+    assert rate_limit_key("::ffff:c000:201") == "192.0.2.1"
+    assert rate_limit_key("64:ff9b::192.0.2.1") == "0064:ff9b:0000:0000::/64"
   end
 
   it "refuses settings that cannot limit anything" do

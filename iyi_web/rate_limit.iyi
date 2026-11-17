@@ -25,6 +25,12 @@
 #     forwarded ? forwarded.split(",").last.strip : ctx.request.remote_address
 #   end
 #
+# Without a block, an IPv6 client is keyed by its /64 prefix, not its full
+# address: one subscriber is usually handed a whole /64, and keyed by
+# address could take a fresh allowance per request and crowd every other
+# key out of the table. An IPv4-mapped address (`::ffff:192.0.2.1`) keys as
+# the IPv4 address, and a `%zone` is dropped. IPv4 keys by address.
+#
 # A request over a unix socket has no address, and without a block all of
 # them share one allowance.
 #
@@ -186,7 +192,7 @@ pub class RateLimitHandler < Handler
     if chosen = @key
       chosen.call(ctx)
     else
-      ctx.request.remote_address || ""
+      rate_limit_key(ctx.request.remote_address || "")
     end
   end
 
@@ -211,4 +217,63 @@ end
 pub def monotonic_ms : Int64
   now = Time.monotonic
   now.total_seconds_i64 * 1000_i64 + (now.nanoseconds // 1000000).to_i64
+end
+
+# The default key for an address: IPv4 as it is, IPv6 as its /64 prefix in
+# full lowercase hex (`2001:db8:0:1::/64`'s key is `2001:0db8:0000:0001::/64`),
+# an IPv4-mapped IPv6 address as its IPv4 address. Anything that does not
+# parse as IPv6 is its own key.
+pub def rate_limit_key(address : String) : String
+  return address unless address.includes?(":")
+  text = address
+  if zone = text.index('%')
+    text = text[0, zone]
+  end
+  groups = ipv6_groups(text)
+  return text unless groups
+  if groups[0] == 0 && groups[1] == 0 && groups[2] == 0 && groups[3] == 0 && groups[4] == 0 && groups[5] == 0xffff
+    return "#{groups[6] >> 8}.#{groups[6] & 0xff}.#{groups[7] >> 8}.#{groups[7] & 0xff}"
+  end
+  hex = groups[0, 4].map { |group| group.to_s(16).rjust(4, '0') }
+  hex.join(":") + "::/64"
+end
+
+# The eight 16-bit groups of an IPv6 address, `::` expanded and a trailing
+# dotted IPv4 part read as the last two, or nil if it is not one.
+private def ipv6_groups(text : String) : Array(Int32)?
+  halves = text.split("::")
+  return nil if halves.size > 2
+  head = ipv6_part(halves[0])
+  return nil unless head
+  if halves.size == 1
+    return head.size == 8 ? head : nil
+  end
+  tail = ipv6_part(halves[1])
+  return nil unless tail
+  missing = 8 - head.size - tail.size
+  return nil if missing < 1
+  head + Array.new(missing, 0) + tail
+end
+
+private def ipv6_part(text : String) : Array(Int32)?
+  groups = [] of Int32
+  return groups if text.empty?
+  pieces = text.split(':')
+  pieces.each_with_index do |piece, index|
+    if index == pieces.size - 1 && piece.includes?(".")
+      octets = piece.split('.')
+      return nil unless octets.size == 4
+      values = octets.map { |octet| octet.to_i? || -1 }
+      return nil unless values.all? { |value| value >= 0 && value <= 255 }
+      return nil unless octets.all? { |octet| !octet.empty? && octet.bytesize <= 3 }
+      groups << (values[0] << 8 | values[1])
+      groups << (values[2] << 8 | values[3])
+    else
+      return nil if piece.empty? || piece.bytesize > 4
+      value = piece.to_i?(16)
+      return nil unless value && value >= 0
+      groups << value
+    end
+  end
+  groups
 end
