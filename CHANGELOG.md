@@ -6,6 +6,8 @@ All notable changes to iyi-web are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-23
+
 A security release. An outside-eyes review of the auth, session, CSRF and
 request-handling code found no break in the cryptography (AES-256-GCM
 sessions, HS256 JWTs, masked CSRF tokens all hold) but a set of defaults
@@ -855,7 +857,8 @@ The first release. Requires iyi 0.14.1 or later.
   `Content-Length` is read, before the body is buffered.
 - Static file paths with a `..` segment or a NUL byte are refused.
 
-[Unreleased]: https://github.com/sdogruyol/iyi-web/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/sdogruyol/iyi-web/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/sdogruyol/iyi-web/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/sdogruyol/iyi-web/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/sdogruyol/iyi-web/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/sdogruyol/iyi-web/compare/v0.5.0...v0.5.1
