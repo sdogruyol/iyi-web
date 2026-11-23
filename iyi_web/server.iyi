@@ -24,9 +24,9 @@
 # per connection, claimed before the accept and given back however the
 # connection ends. The handler each connection is given turns std/http's
 # request into a `Context`, holds the request line to 8 KiB (414) and the
-# fields to 16 KiB (431) once std/http has read the head - which it does
-# up to a megabyte first - and the body to `max_request_body_size` (413),
-# runs the chain and answers what it left.
+# fields to 16 KiB (431) once std/http has read the head - which it reads
+# no further than `MAX_HEAD`, 32 KiB - and the body to
+# `max_request_body_size` (413), runs the chain and answers what it left.
 #
 # **On every core.** With more than one worker every connection is a
 # parallel task (SPEC.md III.4.13): the thread that called `listen`
@@ -88,10 +88,17 @@ import iyi_web/failure::{render_error_type_page, render_failure_page}
 
 # The request line, and the fields after it: Crystal's
 # `HTTP::MAX_REQUEST_LINE_SIZE` and `HTTP::MAX_HEADERS_SIZE`, which Kemal
-# serves under. std/http reads a head of up to a megabyte; past these the
-# request is answered 414 or 431, once the whole head has been read.
+# serves under. Past these the request is answered 414 or 431, on the
+# head std/http hands over.
 pub MAX_REQUEST_LINE =  8192
 pub MAX_HEADERS      = 16384
+
+# The most of a head std/http reads before it answers 431 itself, its
+# end come or not (`Server.handle`'s *max_head*, iyi 0.22): 32 KiB, the
+# two limits above with room for what std/http counts and they do not -
+# the CRLFs, whitespace around a value, a name repeated on lines of its
+# own. Before 0.22 std/http read up to 1 MiB of a head first.
+pub MAX_HEAD = 32768
 
 # How often an accept loop held at `max_connections` looks whether its
 # listener has been closed meanwhile: std/http's `CAP_CHECK_MS`.
@@ -575,7 +582,7 @@ pub class Site(P, E, S)
         # address, and is left nil (`Request#remote_address`).
         peer = unix ? nil : wire.remote_address
         conn = Connection.new(wire, g, peer, !tls.nil?)
-        Std::Http::Server.handle(wire, ->(request : Std::Http::Request) { answer(request, conn) }, nil, nil, true, @settings.compress, 0, tls, 0)
+        Std::Http::Server.handle(wire, ->(request : Std::Http::Request) { answer(request, conn) }, nil, nil, true, @settings.compress, 0, tls, 0, MAX_HEAD)
         0
       end
       task.value

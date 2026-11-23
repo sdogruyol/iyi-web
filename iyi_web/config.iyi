@@ -471,10 +471,10 @@ pub class Config
   # one's text fields. One more is refused - 414 for the query, 413 for the
   # body, before the route runs unless `reject_unreadable_body` is off -
   # and the field past the limit is the last one parsed. 1000 by default,
-  # Rack's and Go's figure. The bound is there because std's `String#hash`
-  # is unseeded: names that collide are cheap to make, and each one a
-  # table takes costs as much as every one before it, so a body of a
-  # hundred thousand would take a worker quadratic time to file.
+  # Rack's and Go's figure. The bound holds a request to the work of that
+  # many fields. It was first there because `String#hash` was unseeded
+  # before iyi 0.22: names that collided were cheap to make, and a body of
+  # a hundred thousand took a worker quadratic time to file.
   pub def max_form_fields : Int32
     @max_form_fields
   end

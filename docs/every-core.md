@@ -58,12 +58,15 @@ alone. `config.logger = value` has no `workers:`, and its refusal says to
 use `logger value, workers: 1`.
 
 A constant the block names is checked as a capture is. One it reaches
-through the functions it calls is warned about, with the path (iyi's
-reach warning, #148): make it a `List` if it is only read, put it behind
-a `Mutex`, or say why every worker may reach it with `@[SafeReach("...")]`
-on the constant, which the compiler proves: every write before the first
-parallel task starts, or behind one `Mutex#lock`. iyi-web's own programs,
-tests and examples compile with no such warning.
+through the functions it calls is refused too, with the path (iyi 0.22's
+reach rule, SPEC.md III.4.5; 0.21 warned): make it a `List` if it is only
+read, put it behind a `Mutex`, or say why every worker may reach it with
+`@[SafeReach("...")]` on the constant, which the compiler proves: every
+write before the first parallel task starts, or behind one `Mutex#lock`.
+`workers: 1` does not lift this one: a block kept to run later - a route
+on one thread, a socket's `on_message` - runs anywhere as far as the
+compiler can tell, so state such a block changes is a local it captures,
+not a constant (`examples/websocket_chat.iyi`'s room).
 
 Settings are copied when a server on more than one worker starts
 (`Settings`); one changed on `config` afterwards does not reach it.

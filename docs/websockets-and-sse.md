@@ -43,20 +43,24 @@ class Room
   end
 end
 
-ROOM = Room.new
+room = Room.new
 
 ws "/chat/:name", workers: 1 do |socket, env|
   name = env.params.url["name"]
-  ROOM.join(socket)
-  socket.on_message { |text| ROOM.broadcast(name + ": " + text) }
-  socket.on_close { |code, reason| ROOM.leave(socket) }
+  room.join(socket)
+  socket.on_message { |text| room.broadcast(name + ": " + text) }
+  socket.on_close { |code, reason| room.leave(socket) }
 end
 ```
 
 The room is an `Array` of sockets, which no two workers may share, so this
 endpoint is registered with `workers: 1` and the application is served on
 one thread ([Every core](every-core.md)), as `examples/websocket_chat.iyi`
-is.
+is. The room is a local the block captures, which `workers: 1` keeps
+unchecked. As a constant (`ROOM = Room.new`) it would be refused: iyi
+refuses module state that is not `Share` wherever a parallel block may
+reach it, and the callbacks a socket keeps run anywhere as far as the
+compiler can tell.
 
 `ws` registers a WebSocket endpoint (RFC 6455); `Router#ws` does the same on a
 router. A `GET` with `Upgrade: websocket` runs the `before` filters for `GET`,

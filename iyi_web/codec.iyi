@@ -117,12 +117,13 @@ end
 # *max_pairs* bounds the work: the scan stops at the pair after it, so a
 # caller holding the answer to `max_form_fields` sees `size > max_pairs`
 # and refuses the request without a single pair past the limit having been
-# decoded, let alone hashed. That is the point of it: `String#hash` is
-# std's unseeded FNV-1a, names that collide are cheap to make, and every
-# colliding name a table takes costs as much as all the ones before it, so
-# a body of some hundred thousand of them makes building the table
-# quadratic. The pieces are cut one at a time rather than split up front
-# for the same reason: what is past the limit is never looked at.
+# decoded, let alone hashed. Before iyi 0.22 `String#hash` was an unseeded
+# FNV-1a, names that collided were cheap to make, and a body of some
+# hundred thousand of them made building the table quadratic; 0.22 keys
+# the hash afresh in every process, and the bound still holds the work to
+# what a thousand fields cost. The pieces are cut one at a time rather
+# than split up front for the same reason: what is past the limit is never
+# looked at.
 pub def parse_query_pairs(text : String, max_pairs : Int32 = 2147483647) : Array(Tuple(String, String))
   pairs = [] of Tuple(String, String)
   size = text.bytesize

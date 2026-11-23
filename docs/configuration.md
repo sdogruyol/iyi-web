@@ -54,20 +54,20 @@ config.max_request_body_size = 1024 * 1024
   [Transport](transport.md).
 - A request line longer than 8 KiB gets `414 URI Too Long`, and header
   fields past 16 KiB `431 Request Header Fields Too Large`, the bounds
-  Crystal's server holds Kemal to. Neither is a setting, and both are
-  checked once std/http has read the whole head, which it buffers up to
-  1 MiB (`Server::MAX_HEAD`) first: a client can make the server hold that
-  much of a head before the `431`. A head past 1 MiB std/http answers
-  `431` itself.
+  Crystal's server holds Kemal to. Neither is a setting. Both are checked
+  once std/http has read the whole head, which it reads no further than
+  32 KiB (`MAX_HEAD`): a head past that std/http answers `431` itself,
+  whether its end has come or not.
 - `max_form_fields` is the most fields the query string may carry, and as
   many again a form body (`application/x-www-form-urlencoded`, or a
   `multipart/form-data` body's text fields). Parsing stops at the field
   after the limit, which is never filed, and the request gets `414` for
   the query or `413` for the body before the route runs (with
   `reject_unreadable_body` off, the route finds that table empty and the
-  status in `params.body_error`). The limit is what keeps a body of names
-  whose hashes collide from making the tables quadratic to build: iyi's
-  `String#hash` is unseeded.
+  status in `params.body_error`). The limit holds a request to the work
+  of that many fields; before iyi 0.22, whose `String#hash` was unseeded,
+  it was also what kept names built to collide from making the tables
+  quadratic.
 - `max_connections` is the most connections served at once, std/http's own
   default; `0` for no limit. At the limit the server stops accepting until
   one ends: the next client waits in the kernel's listen queue and is

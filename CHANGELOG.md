@@ -11,8 +11,27 @@ request-handling code found no break in the cryptography (AES-256-GCM
 sessions, HS256 JWTs, masked CSRF tokens all hold) but a set of defaults
 that failed open and some denial-of-service paths; this fixes them.
 
+Requires iyi 0.22.0 or later, which closes the two limits this release
+found in iyi's std: `String#hash` is keyed afresh in every process, so a
+JSON body's members and std/http's headers no longer collide on purpose,
+and std/http's `Server.handle` takes a `max_head`, which iyi-web now
+passes.
+
 ### Upgrading from 0.7
 
+- **iyi 0.22.0 or later.** 0.22.0 refuses module state that is not
+  `Share` wherever a parallel block may reach it, through the code it
+  calls too (SPEC.md III.4.5), where 0.21.0 warned, and a block kept to
+  run later - a route registered with `workers: 1`, a socket's
+  `on_message` - runs anywhere as far as the compiler can tell. State
+  such a block changes is a local it captures, not a constant:
+  `examples/websocket_chat.iyi`'s room was `ROOM = Room.new` and is
+  `room = Room.new` now ([Every core](docs/every-core.md)).
+- **A head past 32 KiB gets `431` as it is read** (`MAX_HEAD`), from
+  std/http, whether its end has come or not. std/http read up to 1 MiB
+  of a head before iyi-web looked at it, so a client could make each
+  connection hold that much. The 8 KiB request line and 16 KiB fields
+  are checked as before.
 - **`only` / `exclude` on `BasicAuthHandler`, `CSRFHandler` and
   `RateLimitHandler` cover every method by default.** They defaulted to
   GET, so `admin.only ["/admin"]` left `POST /admin` unauthenticated,
@@ -32,8 +51,8 @@ that failed open and some denial-of-service paths; this fixes them.
 - **`RateLimitHandler`'s default key groups IPv6 clients by /64**, so one
   host's routed /64 is one allowance, not 2^64; `::ffff:a.b.c.d` keys as
   the IPv4 address.
-- **At most `max_form_fields` (1000) fields per request.** iyi's string
-  hash is unseeded, so a form of ~100k keys built to collide made
+- **At most `max_form_fields` (1000) fields per request.** iyi 0.21's
+  string hash was unseeded, so a form of ~100k keys built to collide made
   `Params` quadratic: one POST to any path held a worker for seconds to
   minutes, before routing or auth. A query, urlencoded body or multipart
   form past the limit is refused before the route, 414 for the query and
@@ -76,15 +95,6 @@ that failed open and some denial-of-service paths; this fixes them.
 - `bench/compare/run.iyi` builds on iyi 0.21 again: a regex literal
   inside a `{% if %}` block was refused (`undefined constant
   ::Regex::Options`), so the runner did not compile.
-
-### Known limits (need iyi std)
-
-- A JSON body's object members and std/http's header table still go
-  into hash tables keyed by the unseeded string hash, so colliding keys
-  there are still quadratic, bounded by `max_request_body_size` and
-  std/http's 1 MiB head. The fix is a seeded string hash in iyi std.
-- The 16 KiB header-field limit is checked after std/http has read the
-  whole head (up to 1 MiB); `docs/transport.md` now says so.
 
 ### Documentation
 
