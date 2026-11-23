@@ -132,6 +132,7 @@ alone. Off by default.
 | --- | --- | --- |
 | request line | 8 KiB | `414` |
 | header fields | 16 KiB, checked after the head is read (see below) | `431` |
+| whole head, as it is read | 32 KiB (`MAX_HEAD`) | `431`, from std/http |
 | body | `max_request_body_size` (8 MiB) | `413` |
 | fields in the query / a form body | `max_form_fields` (1000) | `414` / `413` |
 | whole request, from its first byte | `read_timeout` (60 s) | `408` |
@@ -146,11 +147,11 @@ under TLS or HTTP/2 the connection is closed (close_notify or GOAWAY),
 since the bytes on the wire there are not plain HTTP/1.
 
 The request line and header limits are checked on the head std/http hands
-over, once it has read all of it: std/http buffers a head of up to 1 MiB
-(`Server::MAX_HEAD`, past which it answers `431` itself), so a client can
-make a connection hold that much before iyi-web answers `431`. Holding the
-head to 16 KiB as it is read would take a bound std/http's
-`Server.handle` does not take yet.
+over, once it has read all of it. std/http reads no further than 32 KiB of
+a head (`MAX_HEAD`, its `Server.handle`'s *max_head* since iyi 0.22) and
+answers `431` itself past that, whether the head's end has come or not, so
+a client cannot make a connection hold more of a head than that. Before
+0.22 std/http read up to 1 MiB first.
 
 `max_connections` is kept here because iyi-web hands each connection to
 `Server.handle`, which passes `Server.serve`'s own limit by. It works as

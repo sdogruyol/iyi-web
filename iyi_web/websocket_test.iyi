@@ -896,7 +896,7 @@ class Room
   end
 end
 
-ROOM = Room.new
+room = Room.new
 
 def handshake(path : String, origin : String = "http://example.com") : String
   "GET #{path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
@@ -927,12 +927,15 @@ server_router.ws "/echo" do |socket, env|
   socket.on_message { |text| socket.send(text) }
 end
 # The room is one `Array` of sockets every connection writes to, which no
-# two workers may share: kept unchecked, for a server on one thread.
+# two workers may share: captured, and kept unchecked, for a server on one
+# thread. A constant would not do: iyi 0.22 refuses module state that is
+# not `Share` wherever a parallel block may reach it, and a kept block
+# runs anywhere.
 server_router.ws "/room/:name", workers: 1 do |socket, env|
   name = env.params.url["name"]
-  ROOM.join(socket)
-  socket.on_message { |text| ROOM.broadcast(name + ": " + text) }
-  socket.on_close { |code, reason| ROOM.leave(socket) }
+  room.join(socket)
+  socket.on_message { |text| room.broadcast(name + ": " + text) }
+  socket.on_close { |code, reason| room.leave(socket) }
 end
 
 server_config = settings(["http://example.com"])

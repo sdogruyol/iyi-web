@@ -592,6 +592,13 @@ group do |g|
         assert status_line(slim) == "HTTP/1.1 200 OK"
       end
 
+      it "answers 431 to a head past 32 KiB without waiting for its end" do
+        # No blank line ends it: std/http stops reading at MAX_HEAD, where
+        # it used to read up to 1 MiB and then wait out read_timeout.
+        endless = exchange(port, "GET / HTTP/1.1\r\nHost: localhost\r\nX-Pad: " + "p" * 40000)
+        assert status_line(endless).starts_with?("HTTP/1.1 431 ")
+      end
+
       it "refuses a chunked body past the cap with 413" do
         cfg.max_request_body_size = 8
         chunked = exchange(port, close_request("POST", "/echo", "Transfer-Encoding: chunked\r\n") + "5\r\nabcde\r\n5\r\nfghij\r\n0\r\n\r\n")

@@ -2,7 +2,9 @@
 
 ## Requirements
 
-[iyi](https://iyi-lang.com) 0.21.0 or later: `spawn(unit: :new)`, the pool
+[iyi](https://iyi-lang.com) 0.22.0 or later: `Server.handle`'s `max_head`,
+which holds a request's head to 32 KiB as std/http reads it (0.21.0 read up
+to 1 MiB of it first), `spawn(unit: :new)`, the pool
 every connection is served on (0.20 spelled it `spawn_parallel`, which 0.21.0
 removed), the `@[Share(serial: workers, crossing: ...)]` mark every
 registration carries, so a refusal is made on your line and names both ways

@@ -41,6 +41,9 @@ PAGE = <<-HTML
 # workers may share, so the `ws` route below is registered with
 # `workers: 1`: the chat is served on one thread, its connections taking
 # turns where one waits, as every iyi-web server did before workers.
+# The room is a local the block captures, which `workers: 1` keeps
+# unchecked; a constant would be refused, since iyi refuses module state
+# that is not `Share` wherever a parallel block may reach it.
 class Room
   @members : Array(WebSocket)
 
@@ -63,7 +66,7 @@ class Room
   end
 end
 
-ROOM = Room.new
+room = Room.new
 
 get "/" do |env|
   PAGE
@@ -75,18 +78,18 @@ end
 # can widen.
 ws "/chat/:name", workers: 1 do |socket, env|
   name = env.params.url["name"]
-  ROOM.join(socket)
-  ROOM.broadcast(name + " joined")
+  room.join(socket)
+  room.broadcast(name + " joined")
   socket.on_message do |text|
     if text == "/quit"
       socket.close(1000, "bye " + name)
     else
-      ROOM.broadcast(name + ": " + text)
+      room.broadcast(name + ": " + text)
     end
   end
   socket.on_close do |code, reason|
-    ROOM.leave(socket)
-    ROOM.broadcast(name + " left")
+    room.leave(socket)
+    room.broadcast(name + " left")
   end
 end
 

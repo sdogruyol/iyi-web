@@ -17,10 +17,10 @@
 # server has given the params `max_form_fields` (`limit_fields`): each of
 # the query, a urlencoded body and a multipart body's text fields may
 # carry that many fields, and one that carries more fills no table at all
-# and is answered by `body_error`. iyi's `String#hash` is unseeded, so
-# names that collide are cheap to make and a table that took all of them
-# would be quadratic to build; the parse stops at the first field past the
-# limit, which is never inserted.
+# and is answered by `body_error`. The parse stops at the first field past
+# the limit, which is never inserted, so a request costs no more than that
+# many fields (before iyi 0.22, whose `String#hash` was unseeded, names
+# built to collide made a table that took them all quadratic to build).
 module iyi_web/params
 
 import std/json::{Any, Parser}
